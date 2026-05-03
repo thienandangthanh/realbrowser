@@ -20,6 +20,39 @@ REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
 Do not run `doctor` by default. Use it when setup is uncertain or a browser
 command fails.
 
+## Console Output Copy Fast Path
+
+For requests like "check console log", "copy console output", or "what is in
+DevTools Console", treat the user's ask literally: select the exact existing
+tab, read the DevTools-style console lines, and paste those lines back in a
+code block. Do not summarize first, do not mix output from other matching tabs,
+and do not reload unless the user asks to reproduce startup logs.
+
+```bash
+REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
+"$REALBROWSER_CLI" sessions
+"$REALBROWSER_CLI" find-tab "<url-or-title-fragment>" --all-sessions
+"$REALBROWSER_CLI" select-tab "<url-or-title-fragment>" --all-sessions
+"$REALBROWSER_CLI" observe --max-chars 1500
+"$REALBROWSER_CLI" console --preserve --limit 80
+```
+
+For real signed-in Chrome profiles, `console` and `capture-console` may be
+MCP-backed and can refuse to start a new controller because Chrome may show
+"Allow remote debugging?". If the user has already said they allowed it, or
+explicitly accepts that prompt in the current turn, rerun the console command
+with `--allow-profile-reattach` instead of stopping or switching to unrelated
+page reads:
+
+```bash
+"$REALBROWSER_CLI" console --preserve --limit 80 --allow-profile-reattach
+```
+
+If multiple tabs match, verify by URL/title/visible page text with `observe` or
+a targeted `js` read, then select the requested tab before reading console output.
+For web development startup or hydration issues, use `capture-console --reload`
+only when a reload/reproduction is wanted.
+
 ## OpenClaw-Style Extraction
 
 Realbrowser has generic OpenClaw-style extraction built in. Use this before

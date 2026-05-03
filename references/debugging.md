@@ -127,19 +127,49 @@ full raw stdout and you know it fits safely in context.
 
 ## Console Capture
 
-For render bugs or "check console log":
+For render bugs, "check console log", or "copy DevTools Console output", first
+decide whether the user wants the existing tab's current console buffer or a
+fresh reproduction. Existing-tab copy should preserve the current page and paste
+the console lines back verbatim in a code block.
 
 ```bash
-"$REALBROWSER_CLI" capture-console https://app.example.com --anonymous --duration 5000 --out /tmp/app-console.json
+"$REALBROWSER_CLI" find-tab "<url-or-title-fragment>" --all-sessions
+"$REALBROWSER_CLI" select-tab "<url-or-title-fragment>" --all-sessions
+"$REALBROWSER_CLI" observe --max-chars 1500
+"$REALBROWSER_CLI" console --preserve --limit 80
+```
+
+If the page is in a real signed-in Chrome profile, `console` may refuse with a
+message about starting a Chrome DevTools MCP controller and the
+"Allow remote debugging?" prompt. Do not treat that as "console unavailable"
+when the user has already allowed remote debugging or says to proceed. In that
+case, rerun the same selected-tab console command with explicit consent:
+
+```bash
+"$REALBROWSER_CLI" console --preserve --limit 80 --allow-profile-reattach
+```
+
+For startup/render bugs where a fresh load is needed:
+
+```bash
+"$REALBROWSER_CLI" capture-console "<url>" --anonymous --duration 5000 --out /tmp/realbrowser-console.json
 "$REALBROWSER_CLI" console --errors --limit 20
 "$REALBROWSER_CLI" console get <msgid> --raw
 ```
 
-For authenticated pages, select the tab/profile first, then capture on reload:
+For authenticated pages, select the tab/profile first, then capture on reload
+only when reproduction on reload is wanted:
 
 ```bash
-"$REALBROWSER_CLI" select-tab app.example.com --all-sessions
-"$REALBROWSER_CLI" capture-console --reload --duration 5000 --out /tmp/app-auth-console.json
+"$REALBROWSER_CLI" select-tab "<url-or-title-fragment>" --all-sessions
+"$REALBROWSER_CLI" capture-console --reload --duration 5000 --out /tmp/realbrowser-console.json
+```
+
+If the authenticated reload capture hits the real-profile MCP approval guard and
+the user has accepted the prompt, add `--allow-profile-reattach`:
+
+```bash
+"$REALBROWSER_CLI" capture-console --reload --duration 5000 --out /tmp/realbrowser-console.json --allow-profile-reattach
 ```
 
 `capture-console` includes JavaScript console messages and failed DevTools
@@ -148,6 +178,16 @@ network rows by default because Chrome DevTools shows those in Console. Use
 
 Console and network artifacts can contain user data, tokens, request payloads,
 or account details. Keep them local unless the user explicitly asks to share.
+
+Copy-output response rules:
+
+- Include only the selected tab's console output unless the user asks for
+  analysis.
+- Keep DevTools Console network failures because Chrome shows them in Console.
+- If there are multiple matching tabs or profiles, verify the exact target by
+  URL/title/visible page text before reading output.
+- If no lines are captured, say that no console output was found for the
+  selected tab and state whether the page was reloaded.
 
 ## Network And Performance Capture
 
