@@ -32,8 +32,10 @@ const DAEMON_CAPABILITIES = Object.freeze([
   "bounded-raw-output",
   "chain-step-durations",
   "content-posts",
+  "device-screenshots",
   "endpoint-session-manager",
   "filtered-links",
+  "foreground-readiness",
   "managed-headless",
   "managed-idle-timeout",
   "page-local-wait",
@@ -221,53 +223,66 @@ const LINUX_FLATPAK_BROWSER_PROFILE_SOURCES = [
 
 const INTERACTIVE_ROLES = new Set([
   "button",
-  "link",
-  "textbox",
   "checkbox",
-  "radio",
   "combobox",
+  "link",
   "listbox",
   "menuitem",
   "menuitemcheckbox",
   "menuitemradio",
   "option",
+  "radio",
   "searchbox",
   "slider",
   "spinbutton",
   "switch",
   "tab",
+  "textbox",
   "treeitem",
 ]);
 
 const CONTENT_ROLES = new Set([
-  "heading",
-  "img",
-  "image",
-  "paragraph",
-  "text",
-  "statictext",
-  "listitem",
+  "article",
   "cell",
-  "rowheader",
   "columnheader",
+  "gridcell",
+  "heading",
+  "image",
+  "img",
+  "listitem",
+  "main",
+  "navigation",
+  "paragraph",
+  "region",
+  "rowheader",
+  "statictext",
+  "text",
 ]);
 
 const STRUCTURAL_ROLES = new Set([
+  "application",
+  "banner",
+  "complementary",
+  "contentinfo",
+  "directory",
+  "document",
   "generic",
+  "grid",
+  "group",
+  "ignored",
+  "list",
+  "menu",
+  "menubar",
   "none",
   "presentation",
-  "document",
-  "group",
-  "section",
-  "region",
-  "main",
-  "navigation",
-  "banner",
-  "contentinfo",
-  "complementary",
-  "list",
-  "table",
   "row",
+  "rowgroup",
+  "section",
+  "table",
+  "tablist",
+  "toolbar",
+  "tree",
+  "treegrid",
 ]);
 
 const CLI_COMMAND_GROUPS = [
@@ -275,10 +290,11 @@ const CLI_COMMAND_GROUPS = [
     title: "Daily workflow",
     commands: [
       { name: "status", usage: "realbrowser status [--deep] [--json]", summary: "Show current daemon and Chrome control state." },
-      { name: "claim", aliases: ["claim-tab", "handle-claim"], usage: "realbrowser claim [url] [--handle-out <path>|--handle-name <name>] [--force] [--session <name>] [--json]", summary: "Claim a tab and write a reusable handle." },
+      { name: "claim", aliases: ["claim-tab", "handle-claim"], usage: "realbrowser claim [url] [--handle-out <path>|--handle-name <name>] [--foreground-until-ready] [--selector <css>] [--min-cards <n>] [--force] [--session <name>] [--json]", summary: "Claim a tab and write a reusable handle." },
       { name: "handles", aliases: ["list-handles", "handle-list"], usage: "realbrowser handles [--json]", summary: "List saved tab handles." },
       { name: "release-handle", aliases: ["handle-release", "delete-handle"], usage: "realbrowser release-handle <path-or-name> [--json]", summary: "Delete a saved tab handle.", minArgs: 1 },
       { name: "mobile-screenshot", usage: "realbrowser mobile-screenshot [url] [path] [--viewport <WxH>] [--handle <path-or-name>] [--handle-out <path>] [--force] [--session <name>]", summary: "Capture a page-scoped mobile screenshot with dimension checks.", handle: true },
+      { name: "device-screenshots", aliases: ["exact-screenshots", "responsive-exact"], usage: "realbrowser device-screenshots [url] [path-prefix] [--devices desktop:1440x900,tablet:768x1024,mobile:390x844] [--settle-ms <ms>] [--mobile-emulation] [--full] [--handle <path-or-name>] [--session <name>]", summary: "Capture exact desktop/tablet/mobile PNG screenshots with dimension checks.", handle: true },
       { name: "screenshot", usage: "realbrowser screenshot [path] [--full|--full-page] [--uid <uid>] [--labels|--annotate] [--format png|jpeg|webp] [--quality <0-100>] [--max-side <px>] [--max-bytes <bytes|5mb>] [--raw-size|--no-normalize] [--page <id>]", summary: "Capture a screenshot.", handle: true },
       { name: "observe", usage: "realbrowser observe [--screenshot] [--limit <n>] [--max-chars <n>] [--page <id>] [--json]", summary: "Read a compact page observation.", handle: true },
       { name: "snapshot", aliases: ["accessibility"], usage: "realbrowser snapshot [--page <id>] [--efficient] [--interactive] [--compact] [--depth <n>] [--max-chars <n>] [--max-nodes <n>] [--labels|--annotate] [--out <path>] [--raw|--verbose] [--json]", summary: "Read the accessibility tree.", handle: true },
@@ -295,7 +311,7 @@ const CLI_COMMAND_GROUPS = [
       { name: "clear-session", aliases: ["session-clear", "clear-active-session"], usage: "realbrowser clear-session [--json]", summary: "Clear the active session pointer." },
       { name: "find-tab", aliases: ["tabs-all", "search-tabs"], usage: "realbrowser find-tab [query] [--browser <key>] [--all-sessions] [--json]", summary: "Search tabs across browser/session inventory." },
       { name: "select-tab", aliases: ["attach-tab"], usage: "realbrowser select-tab <query> [--browser <key>] [--all-sessions] [--front] [--no-activate-session] [--json]", summary: "Select a matching tab for automation.", minArgs: 1 },
-      { name: "open-profile", aliases: ["profile-open"], usage: "realbrowser open-profile <profile-query> <url> [--browser <key>] [--select] [--no-fallback] [--timeout <ms>] [--front] [--json]", summary: "Open a URL in a specific browser UI profile.", minArgs: 2 },
+      { name: "open-profile", aliases: ["profile-open"], usage: "realbrowser open-profile <profile-query> <url> [--browser <key>] [--select] [--no-fallback] [--timeout <ms>] [--front|--foreground-until-ready] [--json]", summary: "Open a URL in a specific browser UI profile.", minArgs: 2 },
       { name: "cleanup-remote-debugging", aliases: ["cleanup"], usage: "realbrowser cleanup-remote-debugging [--allow-attach] [--json]", summary: "Turn off Chrome remote-debugging when possible." },
       { name: "stop", aliases: ["detach"], usage: "realbrowser stop|detach [--all-sessions] [--dismiss-banner] [--cleanup-remote-debugging] [--json]", summary: "Stop realbrowser session state." },
     ],
@@ -304,7 +320,7 @@ const CLI_COMMAND_GROUPS = [
     title: "Navigation and page actions",
     commands: [
       { name: "tabs", usage: "realbrowser tabs [--json]", summary: "List pages in the current session." },
-      { name: "open", aliases: ["newtab"], usage: "realbrowser open <url> [--front] [--anonymous|--profile <profile-query>] [--browser <key>] [--select] [--no-fallback] [--timeout <ms>] [--json]", summary: "Open a URL.", handle: false, minArgs: 1 },
+      { name: "open", aliases: ["newtab"], usage: "realbrowser open <url> [--front|--foreground-until-ready] [--selector <css>] [--min-cards <n>] [--anonymous|--profile <profile-query>] [--browser <key>] [--select] [--no-fallback] [--timeout <ms>] [--json]", summary: "Open a URL.", handle: false, minArgs: 1 },
       { name: "navigate", aliases: ["goto"], usage: "realbrowser navigate <url> [--page <id>]", summary: "Navigate the selected page.", handle: true, minArgs: 1 },
       { name: "back", usage: "realbrowser back [--page <id>]", summary: "Navigate back.", handle: true },
       { name: "forward", usage: "realbrowser forward [--page <id>]", summary: "Navigate forward.", handle: true },
@@ -324,6 +340,7 @@ const CLI_COMMAND_GROUPS = [
       { name: "highlight", usage: "realbrowser highlight <uid|selector> [--page <id>]", summary: "Highlight a target.", handle: true, minArgs: 1 },
       { name: "upload", usage: "realbrowser upload <uid> <file> [--page <id>]", summary: "Upload a file.", handle: true, minArgs: 2 },
       { name: "wait", usage: "realbrowser wait [<text>|--load|--domcontentloaded|--networkidle] [--visible] [--selector <css>] [--timeout <ms>] [--page <id>]", summary: "Wait for text, visible content, selector, or page readiness.", handle: true },
+      { name: "wait-ready", aliases: ["ready"], usage: "realbrowser wait-ready [text] [--selector <css>] [--min-cards <n>] [--card-selector <css>] [--visual-stable] [--no-skeletons] [--screenshot] [--timeout <ms>] [--page <id>]", summary: "Wait for real visible page content, not just readyState.", handle: true },
       { name: "scroll", usage: "realbrowser scroll [selector|uid] [--page <id>]", summary: "Scroll the page or target.", handle: true },
       { name: "viewport", aliases: ["resize"], usage: "realbrowser viewport <WxH|reset> [--page <id>]", summary: "Set or reset viewport size.", handle: true, minArgs: 1 },
     ],
@@ -406,8 +423,21 @@ const CLI_GLOBAL_FLAGS = [
   "--profile <profile-query>",
   "--browser <browser-key>",
   "--page <id-or-target>",
+  "--target-id <cdp-target-id>",
   "--select",
   "--front",
+  "--foreground-until-ready",
+  "--front-until-ready",
+  "--ready-text <text>",
+  "--min-cards <n>",
+  "--card-selector <css>",
+  "--stable-ms <ms>",
+  "--settle-ms <ms>",
+  "--visual-stable",
+  "--no-skeletons",
+  "--mobile-emulation",
+  "--mobile",
+  "--no-mobile",
   "--headless",
   "--headed",
   "--no-headless",
@@ -470,6 +500,7 @@ function usage(commandName = "") {
     "  realbrowser claim https://app.example.com --handle-name app --json",
     "  realbrowser --handle app screenshot tmp/app.png",
     "  realbrowser mobile-screenshot https://app.example.com tmp/app-mobile.png --viewport 390x844",
+    "  realbrowser device-screenshots https://app.example.com tmp/app-inbox",
     "  realbrowser handles",
     "",
     "Commands:",
@@ -531,6 +562,7 @@ const FLAG_VALUE_NAMES = new Set([
   "--color-scheme",
   "--cpu",
   "--depth",
+  "--devices",
   "--download-dir",
   "--duration",
   "--filter",
@@ -541,6 +573,7 @@ const FLAG_VALUE_NAMES = new Set([
   "--handle-out",
   "--har",
   "--limit",
+  "--min-cards",
   "--max-bytes",
   "--max-chars",
   "--max-labels",
@@ -553,20 +586,26 @@ const FLAG_VALUE_NAMES = new Set([
   "--page",
   "--profile",
   "--quality",
+  "--ready-text",
   "--request-file",
   "--response-file",
   "--return",
   "--selector",
+  "--settle-ms",
   "--session",
+  "--stable-ms",
   "--state-file",
   "--submit",
+  "--target-id",
   "--text-filter",
   "--timeout",
   "--trace",
   "--uid",
   "--user-agent",
   "--viewport",
+  "--viewports",
   "--href-filter",
+  "--card-selector",
 ]);
 
 const OPTIONAL_VALUE_FLAGS = new Set(["--network"]);
@@ -602,7 +641,9 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--failed",
   "--fallback-text",
   "--force",
+  "--foreground-until-ready",
   "--front",
+  "--front-until-ready",
   "--full",
   "--full-page",
   "--full-stdout",
@@ -617,6 +658,8 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--keep-isolated",
   "--labels",
   "--mcp",
+  "--mobile",
+  "--mobile-emulation",
   "--no-active-session",
   "--no-auto-out",
   "--no-dismiss-banner",
@@ -626,8 +669,11 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--no-fast",
   "--no-network",
   "--no-normalize",
+  "--no-mobile",
+  "--no-mobile-emulation",
   "--no-reload",
   "--no-screenshot",
+  "--no-skeletons",
   "--no-select",
   "--no-summary",
   "--no-activate-session",
@@ -646,6 +692,7 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--values",
   "--verbose",
   "--visible",
+  "--visual-stable",
   "--version",
   "--unsafe-full-stdout",
 ]);
@@ -835,6 +882,26 @@ function parseArgv(argv) {
       flags.limit = argv[++index];
     } else if (arg?.startsWith("--limit=")) {
       flags.limit = arg.slice("--limit=".length);
+    } else if (arg === "--min-cards") {
+      flags.minCards = argv[++index];
+    } else if (arg?.startsWith("--min-cards=")) {
+      flags.minCards = arg.slice("--min-cards=".length);
+    } else if (arg === "--card-selector") {
+      flags.cardSelector = argv[++index];
+    } else if (arg?.startsWith("--card-selector=")) {
+      flags.cardSelector = arg.slice("--card-selector=".length);
+    } else if (arg === "--ready-text") {
+      flags.readyText = argv[++index];
+    } else if (arg?.startsWith("--ready-text=")) {
+      flags.readyText = arg.slice("--ready-text=".length);
+    } else if (arg === "--stable-ms") {
+      flags.stableMs = argv[++index];
+    } else if (arg?.startsWith("--stable-ms=")) {
+      flags.stableMs = arg.slice("--stable-ms=".length);
+    } else if (arg === "--settle-ms") {
+      flags.settleMs = argv[++index];
+    } else if (arg?.startsWith("--settle-ms=")) {
+      flags.settleMs = arg.slice("--settle-ms=".length);
     } else if (arg === "--filter") {
       flags.filter = argv[++index];
     } else if (arg?.startsWith("--filter=")) {
@@ -951,6 +1018,21 @@ function parseArgv(argv) {
       flags.allSessions = true;
     } else if (arg === "--front" || arg === "--bring-to-front") {
       flags.front = true;
+    } else if (arg === "--foreground-until-ready" || arg === "--front-until-ready") {
+      flags.foregroundUntilReady = true;
+      flags.front = true;
+    } else if (arg === "--visual-stable") {
+      flags.visualStable = true;
+    } else if (arg === "--no-skeletons") {
+      flags.noSkeletons = true;
+    } else if (arg === "--mobile") {
+      flags.mobile = true;
+    } else if (arg === "--no-mobile") {
+      flags.mobile = false;
+    } else if (arg === "--mobile-emulation") {
+      flags.mobileEmulation = true;
+    } else if (arg === "--no-mobile-emulation") {
+      flags.mobileEmulation = false;
     } else if (arg === "--headless") {
       flags.headless = true;
     } else if (arg === "--headed" || arg === "--no-headless") {
@@ -1055,10 +1137,20 @@ function parseArgv(argv) {
       flags.page = argv[++index];
     } else if (arg?.startsWith("--page=")) {
       flags.page = arg.slice("--page=".length);
+    } else if (arg === "--target-id") {
+      flags.targetId = argv[++index];
+    } else if (arg?.startsWith("--target-id=")) {
+      flags.targetId = arg.slice("--target-id=".length);
     } else if (arg === "--viewport") {
       flags.viewport = argv[++index];
     } else if (arg?.startsWith("--viewport=")) {
       flags.viewport = arg.slice("--viewport=".length);
+    } else if (arg === "--devices" || arg === "--viewports") {
+      flags.devices = argv[++index];
+    } else if (arg?.startsWith("--devices=")) {
+      flags.devices = arg.slice("--devices=".length);
+    } else if (arg?.startsWith("--viewports=")) {
+      flags.devices = arg.slice("--viewports=".length);
     } else if (arg === "--uid") {
       flags.uid = argv[++index];
     } else if (arg?.startsWith("--uid=")) {
@@ -1302,6 +1394,7 @@ async function readHandleFile(filePath) {
     session: String(handle.session ?? "").trim(),
     stateFile: handle.stateFile ? path.resolve(String(handle.stateFile)) : "",
     pageId: parsePageId(handle.pageId),
+    targetId: handle.targetId === undefined ? "" : String(handle.targetId),
     url: String(handle.url ?? ""),
     createdAt: handle.createdAt ?? null,
     updatedAt: handle.updatedAt ?? null,
@@ -1325,9 +1418,10 @@ function stateFileFromHandle(handle) {
 }
 
 function handleTargetDescription(handle) {
+  const target = handle.targetId ? ` page ${handle.pageId} target ${handle.targetId}` : ` page ${handle.pageId}`;
   return handle.session
-    ? `session "${handle.session}" page ${handle.pageId}`
-    : `state file "${handle.stateFile}" page ${handle.pageId}`;
+    ? `session "${handle.session}"${target}`
+    : `state file "${handle.stateFile}"${target}`;
 }
 
 function staleHandleError(handle, reason) {
@@ -1352,7 +1446,10 @@ async function validateHandleTarget(handle) {
     throw staleHandleError(handle, `The recorded daemon is not healthy: ${reason}`);
   }
   const pagesResult = await daemonRpc(state, { command: "tabs", args: [], flags: {} });
-  const page = parseListPagesResult(pagesResult).find((entry) => entry.id === handle.pageId);
+  const pages = parseListPagesResult(pagesResult);
+  const page = handle.targetId
+    ? pages.find((entry) => entry.targetId === handle.targetId) ?? pages.find((entry) => entry.id === handle.pageId)
+    : pages.find((entry) => entry.id === handle.pageId);
   if (!page) {
     throw staleHandleError(handle, `Page ${handle.pageId} is no longer open in the recorded daemon.`);
   }
@@ -1396,6 +1493,9 @@ async function applyHandleToFlags(command, flags = {}) {
   }
   if (flags.page === undefined) {
     flags.page = String(handle.pageId);
+  }
+  if (!flags.targetId && handle.targetId) {
+    flags.targetId = handle.targetId;
   }
   flags.resolvedHandle = handle.path;
   return handle;
@@ -2195,6 +2295,74 @@ async function daemonRpc(state, payload) {
   });
 }
 
+function isDeviceScreenshotsCommand(command) {
+  return command === "device-screenshots" || command === "exact-screenshots" || command === "responsive-exact";
+}
+
+function isMissingDaemonCapabilityError(error, capability) {
+  return String(error?.message ?? error).includes(`does not support ${capability}`);
+}
+
+async function selectedCdpTargetIdFromDaemon(state, flags = {}) {
+  if (flags.targetId) {
+    return String(flags.targetId);
+  }
+  const result = await daemonRpc(state, { command: "tabs", args: [], flags: {} }).catch(() => null);
+  const pages = parseListPagesResult(result);
+  if (pages.length === 0) {
+    return "";
+  }
+  if (flags.page !== undefined) {
+    const requested = String(flags.page);
+    const match = pages.find((page) =>
+      String(page.id) === requested ||
+      page.tabId === requested ||
+      page.suggestedTargetId === requested ||
+      page.targetId === requested
+    );
+    return match?.targetId ?? "";
+  }
+  const selected = pages.find((page) => page.selected);
+  if (selected?.targetId) {
+    return selected.targetId;
+  }
+  return pages.length === 1 ? pages[0].targetId ?? "" : "";
+}
+
+async function maybeRunDeviceScreenshotsWithTemporaryDaemon(state, payload, flags = {}, error) {
+  if (!isDeviceScreenshotsCommand(payload?.command) || !isMissingDaemonCapabilityError(error, "device-screenshots")) {
+    return null;
+  }
+  const browserUrl = browserUrlFromState(state);
+  if (!browserUrl || !isRealProfileSessionMode(modeFromState(state))) {
+    return null;
+  }
+  const tempFlags = {
+    ...payload.flags,
+    browserUrl,
+    noFallback: true,
+    noActiveSession: true,
+    session: "",
+    stateFile: path.join(os.tmpdir(), `realbrowser-device-screenshots-${process.pid}-${Date.now()}.json`),
+  };
+  if (!tempFlags.targetId) {
+    const targetId = await selectedCdpTargetIdFromDaemon(state, flags);
+    if (targetId) {
+      tempFlags.targetId = targetId;
+    }
+  }
+  const tempState = await ensureDaemon(tempFlags);
+  try {
+    return await daemonRpc(tempState, {
+      command: payload.command,
+      args: payload.args,
+      flags: tempFlags,
+    });
+  } finally {
+    await stopState(tempState).catch(() => {});
+  }
+}
+
 function daemonCapabilitiesFrom(value) {
   const capabilities = value?.__health?.capabilities ?? value?.capabilities;
   return new Set(Array.isArray(capabilities) ? capabilities.map((entry) => String(entry)) : []);
@@ -2205,11 +2373,23 @@ function daemonSupports(state, capability) {
 }
 
 function requiredCapabilitiesForCommand(command, args = []) {
+  const needsForegroundReadiness = args.includes("--foreground-until-ready") ||
+    args.includes("--front-until-ready") ||
+    args.some((arg) => String(arg).startsWith("--foreground-until-ready=") || String(arg).startsWith("--front-until-ready="));
   switch (command) {
+    case "open":
+    case "newtab":
+    case "claim":
+    case "claim-tab":
+    case "handle-claim":
+      return needsForegroundReadiness ? new Set(["foreground-readiness"]) : new Set();
     case "wait":
       return args.includes("--visible") || args.includes("--selector") || args.some((arg) => String(arg).startsWith("--selector="))
         ? new Set(["visible-wait"])
         : new Set();
+    case "wait-ready":
+    case "ready":
+      return new Set(["foreground-readiness"]);
     case "eval":
     case "js":
     case "text":
@@ -2232,6 +2412,10 @@ function requiredCapabilitiesForCommand(command, args = []) {
       return new Set(["content-posts"]);
     case "links":
       return new Set(["filtered-links"]);
+    case "device-screenshots":
+    case "exact-screenshots":
+    case "responsive-exact":
+      return new Set(["device-screenshots"]);
     default:
       return new Set();
   }
@@ -2243,6 +2427,9 @@ function requiredCapabilitiesForPayload(payload) {
   const flags = payload?.flags ?? {};
   if ((command === "wait") && (flags.visible || flags.selector)) {
     required.add("visible-wait");
+  }
+  if (flags.foregroundUntilReady) {
+    required.add("foreground-readiness");
   }
   if (
     (
@@ -2742,7 +2929,16 @@ async function runCli() {
   await prepareRealProfileSessionFlags(flags);
 
   const state = await ensureDaemon(flags);
-  const response = await daemonRpc(state, daemonPayloadForCommand(command, args, flags, state));
+  const payload = daemonPayloadForCommand(command, args, flags, state);
+  let response;
+  try {
+    response = await daemonRpc(state, payload);
+  } catch (error) {
+    response = await maybeRunDeviceScreenshotsWithTemporaryDaemon(state, payload, flags, error);
+    if (!response) {
+      throw error;
+    }
+  }
   const explicitSessionName = sessionNameFromFlags(flags);
   if (explicitSessionName) {
     await writeActiveSessionName(explicitSessionName);
@@ -2785,6 +2981,7 @@ function publicHandle(handle) {
     session: handle.session,
     stateFile: handle.stateFile || undefined,
     pageId: handle.pageId,
+    targetId: handle.targetId || undefined,
     url: handle.url,
     createdAt: handle.createdAt,
     updatedAt: handle.updatedAt,
@@ -2801,6 +2998,7 @@ async function writePageHandle({ state, flags, page, handlePath, overwrite = fal
     session,
     stateFile: stateFileFromFlags({ ...flags, session }),
     pageId: page.id,
+    targetId: page.targetId,
     url: page.url,
     createdAt: now,
     updatedAt: now,
@@ -2818,6 +3016,7 @@ async function writePageHandle({ state, flags, page, handlePath, overwrite = fal
     session,
     stateFile: handle.stateFile,
     pageId: page.id,
+    targetId: page.targetId,
     url: page.url,
     createdAt: now,
     updatedAt: now,
@@ -2881,7 +3080,10 @@ async function claimPageHandle(args, flags = {}) {
       page = beforePages.find((entry) => entry.id === existingHandle.pageId && sameDocumentUrl(entry.url, targetUrl)) ?? null;
     }
     if (!page) {
-      const openFlags = { ...flags, select: true };
+      const openFlags = { ...flags, select: true, foregroundUntilReady: false };
+      if (flags.foregroundUntilReady) {
+        openFlags.front = true;
+      }
       await daemonRpc(state, daemonPayloadForCommand("open", [targetUrl], openFlags, state));
     }
   } else if (existingHandle) {
@@ -2905,6 +3107,32 @@ async function claimPageHandle(args, flags = {}) {
   const explicitSessionName = sessionNameFromFlags(flags);
   if (explicitSessionName) {
     await writeActiveSessionName(explicitSessionName);
+  }
+  let ready = null;
+  if (flags.foregroundUntilReady) {
+    const activation = await foregroundBrowserAppForProfile({ source: { appName: flags.browserAppName } }, flags);
+    await daemonRpc(state, {
+      command: "select",
+      args: [String(page.id)],
+      flags: { ...flags, front: true, foregroundUntilReady: false },
+    }).catch(() => null);
+    ready = await daemonRpc(state, {
+      command: "wait-ready",
+      args: readinessArgsFromFlags(flags),
+      flags: { ...flags, page: String(page.id) },
+    });
+    return {
+      text: [
+        formatClaimText(handle),
+        activation?.error ? `App foreground attempt failed: ${activation.error}` : activation ? `App foreground attempt: ${activation.command} ${activation.args?.join(" ") ?? ""}`.trim() : "",
+        ready?.text ? `Readiness:\n${ready.text}` : "",
+      ].filter(Boolean).join("\n"),
+      handle: publicHandle(handle),
+      path: handle.path,
+      filePath: handle.path,
+      ready,
+      appActivation: activation,
+    };
   }
   return {
     text: formatClaimText(handle),
@@ -2961,6 +3189,74 @@ function parseViewportSize(sizeText) {
   };
 }
 
+const DEFAULT_DEVICE_SCREENSHOT_VIEWPORTS = Object.freeze([
+  ["desktop", "1440x900"],
+  ["tablet", "768x1024"],
+  ["mobile", "390x844"],
+]);
+
+function safeDeviceScreenshotName(name, index = 0) {
+  const cleaned = String(name ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return cleaned || `device-${index + 1}`;
+}
+
+function parseDeviceScreenshotViewports(value = "") {
+  const entries = String(value ?? "").trim()
+    ? String(value).split(/[;,]/).map((entry) => entry.trim()).filter(Boolean)
+    : DEFAULT_DEVICE_SCREENSHOT_VIEWPORTS.map(([name, size]) => `${name}:${size}`);
+  if (entries.length === 0) {
+    throw new Error("device-screenshots expects at least one viewport.");
+  }
+  return entries.map((entry, index) => {
+    const match = entry.match(/^([^:=]+)[:=](.+)$/u);
+    const name = safeDeviceScreenshotName(match ? match[1] : `device-${index + 1}`, index);
+    const viewport = parseViewportSize(match ? match[2] : entry);
+    return {
+      name,
+      ...viewport,
+    };
+  });
+}
+
+function isMobileDeviceScreenshotName(name) {
+  return /(?:mobile|phone|iphone|android)/iu.test(String(name ?? ""));
+}
+
+function deviceScreenshotMobileMode(device, flags = {}) {
+  if (flags.mobile === true) {
+    return true;
+  }
+  if (flags.mobile === false || flags.mobileEmulation === false) {
+    return false;
+  }
+  return Boolean(flags.mobileEmulation && isMobileDeviceScreenshotName(device.name));
+}
+
+function formatPageCandidates(pages) {
+  return pages.map((page) => {
+    const handle = page.tabId ?? page.suggestedTargetId ?? `page:${page.id}`;
+    const target = page.targetId ? ` target=${String(page.targetId).slice(0, 12)}` : "";
+    return `- ${handle}${target} ${page.title || "(untitled)"} ${page.url || "about:blank"}`;
+  }).join("\n");
+}
+
+function looksLikeUrl(value) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return false;
+  }
+  try {
+    const parsed = new URL(text);
+    return Boolean(parsed.protocol && parsed.host);
+  } catch {
+    return false;
+  }
+}
+
 function readPngDimensions(filePath) {
   const buffer = fs.readFileSync(filePath);
   const pngSignature = "89504e470d0a1a0a";
@@ -2978,6 +3274,37 @@ function defaultMobileScreenshotPath() {
     DEFAULT_SCREENSHOT_DIR,
     `mobile-screenshot-${new Date().toISOString().replaceAll(/[:.]/g, "-")}.png`,
   );
+}
+
+function defaultDeviceScreenshotsPrefix() {
+  return path.join(
+    DEFAULT_SCREENSHOT_DIR,
+    `device-screenshots-${new Date().toISOString().replaceAll(/[:.]/g, "-")}`,
+  );
+}
+
+function resolveDeviceScreenshotsTarget(args = []) {
+  const first = args[0] ?? "";
+  if (args.length >= 2) {
+    return {
+      targetUrl: first,
+      prefix: path.resolve(args[1]),
+    };
+  }
+  if (first && looksLikeUrl(first)) {
+    return {
+      targetUrl: first,
+      prefix: defaultDeviceScreenshotsPrefix(),
+    };
+  }
+  return {
+    targetUrl: "",
+    prefix: path.resolve(first || defaultDeviceScreenshotsPrefix()),
+  };
+}
+
+function deviceScreenshotPath(prefix, name) {
+  return path.resolve(`${prefix}-${safeDeviceScreenshotName(name)}.png`);
 }
 
 async function findCurrentPage(state, flags = {}, targetUrl = "") {
@@ -3686,6 +4013,12 @@ function isBrowserProfileLaunchSupported(source) {
 
 async function openUrlInBrowserProfile(url, profileQuery, flags = {}) {
   const profile = await resolveBrowserProfileSelection(profileQuery, flags);
+  flags.browserAppName = profile.source?.appName ?? profile.browserName;
+  flags.browserProfileId = profile.id;
+  if (flags.foregroundUntilReady && flags.select !== false) {
+    flags.select = true;
+    flags.front = true;
+  }
   if (flags.select && !profile.devtoolsHttpUrl && !profile.devtoolsWsEndpoint) {
     throw new Error(`Profile ${profile.id} is not exposing a DevTools endpoint, so realbrowser cannot auto-select the new tab. Enable Chrome remote debugging in that profile, or run without --select to only open the tab.`);
   }
@@ -3701,7 +4034,7 @@ async function openUrlInBrowserProfile(url, profileQuery, flags = {}) {
       noFallback: true,
     })
     : null;
-  return {
+  const result = {
     text: [
       `Opened ${url} in ${profile.browserName} profile ${profile.profileDirectory} (${profile.displayName}).`,
       selected?.text,
@@ -3713,6 +4046,88 @@ async function openUrlInBrowserProfile(url, profileQuery, flags = {}) {
     profile: publicProfileInfo(profile),
     launch,
     selected,
+  };
+  return await maybeRunForegroundReadinessForProfileOpen(result, profile, flags);
+}
+
+function readinessArgsFromFlags(flags = {}) {
+  const text = normalizeOptionalString(flags.readyText);
+  return text ? [text] : [];
+}
+
+function readinessPageFromResult(result) {
+  return result?.page ?? result?.selected?.page ?? result?.opened?.page ?? null;
+}
+
+async function foregroundBrowserAppForProfile(profile, flags = {}) {
+  if (!(flags.front || flags.foregroundUntilReady) || process.platform !== "darwin") {
+    return null;
+  }
+  const appName = normalizeOptionalString(profile?.source?.appName ?? flags.browserAppName);
+  if (!appName) {
+    return null;
+  }
+  try {
+    return await spawnDetached("open", ["-a", appName]);
+  } catch (error) {
+    return {
+      command: "open",
+      args: ["-a", appName],
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function maybeRunForegroundReadinessForProfileOpen(result, profile, flags = {}) {
+  if (!flags.foregroundUntilReady) {
+    return result;
+  }
+  const activation = await foregroundBrowserAppForProfile(profile, flags);
+  const endpoint = endpointForBrowserProfile(profile);
+  if (!endpoint) {
+    return {
+      ...result,
+      appActivation: activation,
+      text: [
+        result?.text,
+        "Foreground readiness was requested, but no DevTools endpoint is available for readiness checks.",
+      ].filter(Boolean).join("\n"),
+    };
+  }
+  const daemonFlags = {
+    ...flags,
+    browserUrl: endpoint.wsEndpoint ?? endpoint.httpUrl,
+    noFallback: true,
+  };
+  const state = await ensureDaemon(daemonFlags);
+  const page = readinessPageFromResult(result);
+  const readyFlags = {
+    ...daemonFlags,
+    ...(page?.tabId ? { page: page.tabId } : page?.id !== undefined ? { page: String(page.id) } : {}),
+  };
+  const ready = await daemonRpc(state, {
+    command: "wait-ready",
+    args: readinessArgsFromFlags(flags),
+    flags: readyFlags,
+  });
+  return appendReadinessResult(result, ready, activation);
+}
+
+function appendReadinessResult(result, ready, activation = null) {
+  const activationLine = activation?.error
+    ? `App foreground attempt failed: ${activation.error}`
+    : activation
+      ? `App foreground attempt: ${activation.command} ${activation.args?.join(" ") ?? ""}`.trim()
+      : "";
+  return {
+    ...result,
+    appActivation: activation,
+    ready,
+    text: [
+      result?.text,
+      activationLine,
+      ready?.text ? `Readiness:\n${ready.text}` : "",
+    ].filter(Boolean).join("\n"),
   };
 }
 
@@ -3775,6 +4190,18 @@ async function openUrlViaEndpointSession(endpointSession, profile, url, flags = 
     ...(flags.timeout ? { timeout: flags.timeout } : {}),
     front: Boolean(flags.front),
     select: Boolean(flags.select),
+    ...(flags.foregroundUntilReady ? {
+      foregroundUntilReady: true,
+      browserAppName: flags.browserAppName,
+      readyText: flags.readyText,
+      selector: flags.selector,
+      minCards: flags.minCards,
+      cardSelector: flags.cardSelector,
+      stableMs: flags.stableMs,
+      visualStable: flags.visualStable,
+      noSkeletons: flags.noSkeletons,
+      screenshot: flags.screenshot,
+    } : {}),
   };
   const opened = await daemonRpc(endpointSession.state, {
     command: "open",
@@ -3802,6 +4229,8 @@ async function openUrlViaEndpointSession(endpointSession, profile, url, flags = 
       `Opened ${url} through realbrowser session ${sessionName} for ${profile.browserName} profile ${profile.profileDirectory} (${profile.displayName}).`,
       page ? `Page: ${page.id} ${page.url}` : "Opened page, but could not identify the new page id. Run `realbrowser tabs` to select it manually.",
       selected?.text,
+      opened?.appActivation?.error ? `App foreground attempt failed: ${opened.appActivation.error}` : opened?.appActivation ? `App foreground attempt: ${opened.appActivation.command} ${opened.appActivation.args?.join(" ") ?? ""}`.trim() : "",
+      opened?.ready?.text ? `Readiness:\n${opened.ready.text}` : "",
       flags.select ? `Activated session: ${sessionName}` : "",
       profile.devtoolsHttpUrl
         ? `Debug endpoint reused: ${profile.devtoolsHttpUrl}${profile.devtoolsScope === "browser" ? " (browser-level)" : ""}.`
@@ -4307,6 +4736,363 @@ function formatCdpValue(value) {
     return value;
   }
   return JSON.stringify(value, null, 2);
+}
+
+function axValue(value) {
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+  const raw = value.value;
+  if (typeof raw === "string") {
+    return raw;
+  }
+  if (typeof raw === "number" || typeof raw === "boolean") {
+    return String(raw);
+  }
+  return "";
+}
+
+function buildCdpRoleTree(nodes) {
+  const byId = new Map();
+  const tree = [];
+  for (const raw of Array.isArray(nodes) ? nodes : []) {
+    const nodeId = String(raw?.nodeId ?? "");
+    if (!nodeId) {
+      continue;
+    }
+    byId.set(nodeId, tree.length);
+    tree.push({
+      raw,
+      role: axValue(raw.role) || "unknown",
+      name: axValue(raw.name),
+      value: axValue(raw.value),
+      description: axValue(raw.description),
+      backendDOMNodeId:
+        typeof raw.backendDOMNodeId === "number" && raw.backendDOMNodeId > 0
+          ? Math.floor(raw.backendDOMNodeId)
+          : undefined,
+      children: [],
+      depth: 0,
+    });
+  }
+
+  const childIndexes = new Set();
+  for (let index = 0; index < tree.length; index += 1) {
+    for (const childId of tree[index]?.raw?.childIds ?? []) {
+      const childIndex = byId.get(childId);
+      if (childIndex === undefined) {
+        continue;
+      }
+      tree[index].children.push(childIndex);
+      tree[childIndex].parent = index;
+      childIndexes.add(childIndex);
+    }
+  }
+
+  const roots = tree.map((_node, index) => index).filter((index) => !childIndexes.has(index));
+  const stack = (roots.length ? roots : tree.length ? [0] : []).map((index) => ({ index, depth: 0 }));
+  while (stack.length) {
+    const current = stack.pop();
+    if (!current) {
+      break;
+    }
+    tree[current.index].depth = current.depth;
+    for (const child of [...(tree[current.index]?.children ?? [])].reverse()) {
+      stack.push({ index: child, depth: current.depth + 1 });
+    }
+  }
+
+  return { tree, roots: roots.length ? roots : tree.length ? [0] : [] };
+}
+
+function shouldIncludeCdpRoleNode(node, options = {}) {
+  const role = String(node?.role ?? "").toLowerCase();
+  if (options.maxDepth !== undefined && node.depth > options.maxDepth) {
+    return false;
+  }
+  if (options.interactive) {
+    return INTERACTIVE_ROLES.has(role) || role === "iframe" || Boolean(node.cursorInfo);
+  }
+  if (options.compact && STRUCTURAL_ROLES.has(role) && !node.name && !node.ref) {
+    return false;
+  }
+  return true;
+}
+
+function cdpCursorSuffix(info) {
+  if (!info) {
+    return "";
+  }
+  const parts = [
+    info.hasCursorPointer ? "cursor:pointer" : undefined,
+    info.hasOnClick ? "onclick" : undefined,
+    info.hasTabIndex ? "tabindex" : undefined,
+    info.isEditable ? "contenteditable" : undefined,
+    info.hiddenInputType ? `hidden-${info.hiddenInputType}` : undefined,
+  ].filter(Boolean);
+  return parts.length ? ` [${parts.join(", ")}]` : "";
+}
+
+function renderCdpRoleTree(tree, index, output, options = {}, indentOffset = 0) {
+  const node = tree[index];
+  if (!node) {
+    return;
+  }
+  if (shouldIncludeCdpRoleNode(node, options)) {
+    const indent = "  ".repeat(Math.max(0, node.depth + indentOffset));
+    const name = node.name ? ` "${escapeQuoted(node.name)}"` : "";
+    const ref = node.ref ? ` [ref=${node.ref}]` : "";
+    const nth = node.nth !== undefined && node.nth > 0 ? ` [nth=${node.nth}]` : "";
+    const value = node.value ? ` value="${escapeQuoted(node.value)}"` : "";
+    const description = node.description ? ` description="${escapeQuoted(node.description)}"` : "";
+    const url = node.url ? ` [url=${node.url}]` : "";
+    output.push(`${indent}- ${node.role}${name}${ref}${nth}${value}${description}${url}${cdpCursorSuffix(node.cursorInfo)}`);
+  }
+  for (const child of node.children) {
+    renderCdpRoleTree(tree, child, output, options, indentOffset);
+  }
+}
+
+async function findCdpCursorInteractiveElements(send) {
+  const attr = "data-realbrowser-cdp-ci";
+  const evaluated = await send("Runtime.evaluate", {
+    expression: `(() => {
+      const out = [];
+      const roles = new Set(["button","link","textbox","checkbox","radio","combobox","listbox","menuitem","menuitemcheckbox","menuitemradio","option","searchbox","slider","spinbutton","switch","tab","treeitem"]);
+      const tags = new Set(["a","button","input","select","textarea","details","summary"]);
+      document.querySelectorAll("[${attr}]").forEach((el) => el.removeAttribute("${attr}"));
+      for (const el of Array.from(document.body ? document.body.querySelectorAll("*") : [])) {
+        if (!(el instanceof HTMLElement) || el.closest("[hidden],[aria-hidden='true']")) continue;
+        const tagName = el.tagName.toLowerCase();
+        if (tags.has(tagName)) continue;
+        const role = String(el.getAttribute("role") || "").toLowerCase();
+        if (roles.has(role)) continue;
+        const style = getComputedStyle(el);
+        const hasCursorPointer = style.cursor === "pointer";
+        const hasOnClick = el.hasAttribute("onclick") || el.onclick !== null;
+        const tabIndex = el.getAttribute("tabindex");
+        const hasTabIndex = tabIndex !== null && tabIndex !== "-1";
+        const ce = el.getAttribute("contenteditable");
+        const isEditable = ce === "" || ce === "true";
+        if (!hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) continue;
+        if (hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
+          const parent = el.parentElement;
+          if (parent && getComputedStyle(parent).cursor === "pointer") continue;
+        }
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        let hiddenInputType = "";
+        const hiddenInput = el.querySelector("input[type='radio'],input[type='checkbox']");
+        if (hiddenInput instanceof HTMLInputElement) {
+          const hiddenStyle = getComputedStyle(hiddenInput);
+          if (hiddenInput.hidden || hiddenStyle.display === "none" || hiddenStyle.visibility === "hidden") {
+            hiddenInputType = hiddenInput.type;
+          }
+        }
+        el.setAttribute("${attr}", String(out.length));
+        out.push({
+          text: String(el.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 100),
+          tagName,
+          hasCursorPointer,
+          hasOnClick,
+          hasTabIndex,
+          isEditable,
+          hiddenInputType,
+        });
+      }
+      return out;
+    })()`,
+    returnByValue: true,
+    awaitPromise: false,
+  }).catch(() => null);
+  const entries = Array.isArray(evaluated?.result?.value) ? evaluated.result.value : [];
+  if (!entries.length) {
+    return new Map();
+  }
+
+  const doc = await send("DOM.getDocument", { depth: 0 }).catch(() => null);
+  const rootNodeId = doc?.root?.nodeId;
+  if (typeof rootNodeId !== "number") {
+    return new Map();
+  }
+  const queried = await send("DOM.querySelectorAll", { nodeId: rootNodeId, selector: `[${attr}]` }).catch(() => null);
+  const out = new Map();
+  await Promise.all((queried?.nodeIds ?? []).map(async (nodeId) => {
+    const described = await send("DOM.describeNode", { nodeId }).catch(() => null);
+    const attrs = described?.node?.attributes ?? [];
+    const attrIndex = attrs.indexOf(attr);
+    const rawIndex = attrIndex >= 0 ? attrs[attrIndex + 1] : undefined;
+    const index = typeof rawIndex === "string" ? Number(rawIndex) : Number.NaN;
+    const backendNodeId = described?.node?.backendNodeId;
+    if (typeof backendNodeId === "number" && Number.isInteger(index) && entries[index]) {
+      out.set(backendNodeId, entries[index]);
+    }
+  }));
+  await send("Runtime.evaluate", {
+    expression: `document.querySelectorAll("[${attr}]").forEach((el) => el.removeAttribute("${attr}"))`,
+    returnByValue: true,
+  }).catch(() => {});
+  return out;
+}
+
+async function resolveCdpLinkUrls(send, refs) {
+  const out = new Map();
+  await Promise.all(Object.values(refs).map(async (ref) => {
+    if (ref.role !== "link" || !ref.backendDOMNodeId) {
+      return;
+    }
+    const resolved = await send("DOM.resolveNode", { backendNodeId: ref.backendDOMNodeId }).catch(() => null);
+    const objectId = resolved?.object?.objectId;
+    if (!objectId) {
+      return;
+    }
+    const hrefResult = await send("Runtime.callFunctionOn", {
+      objectId,
+      functionDeclaration: "function() { return this.href || ''; }",
+      returnByValue: true,
+    }).catch(() => null);
+    const href = typeof hrefResult?.result?.value === "string" ? hrefResult.result.value : "";
+    if (href) {
+      out.set(ref.backendDOMNodeId, href);
+    }
+  }));
+  return out;
+}
+
+async function resolveCdpIframeFrameIds(send, tree) {
+  const out = new Map();
+  await Promise.all(tree.map(async (node) => {
+    if (String(node.role).toLowerCase() !== "iframe" || !node.backendDOMNodeId) {
+      return;
+    }
+    const described = await send("DOM.describeNode", {
+      backendNodeId: node.backendDOMNodeId,
+      depth: 1,
+    }).catch(() => null);
+    const frameId = described?.node?.contentDocument?.frameId ?? described?.node?.frameId ?? "";
+    if (frameId) {
+      out.set(node.backendDOMNodeId, frameId);
+    }
+  }));
+  return out;
+}
+
+async function buildCdpRoleSnapshotFromSession(params) {
+  const res = await params.send(
+    "Accessibility.getFullAXTree",
+    params.frameId ? { frameId: params.frameId } : {},
+  );
+  const { tree, roots } = buildCdpRoleTree(Array.isArray(res?.nodes) ? res.nodes : []);
+  const cursorElements = await findCdpCursorInteractiveElements(params.send);
+  for (const node of tree) {
+    if (node.backendDOMNodeId && cursorElements.has(node.backendDOMNodeId)) {
+      const cursorInfo = cursorElements.get(node.backendDOMNodeId);
+      node.cursorInfo = cursorInfo;
+      if (!node.name && cursorInfo?.text) {
+        node.name = cursorInfo.text;
+      }
+    }
+  }
+
+  const counts = new Map();
+  const refsByKey = new Map();
+  const refs = {};
+  for (const node of tree) {
+    const role = String(node.role).toLowerCase();
+    const shouldRef =
+      INTERACTIVE_ROLES.has(role) ||
+      (CONTENT_ROLES.has(role) && Boolean(node.name)) ||
+      role === "iframe" ||
+      Boolean(node.cursorInfo);
+    if (!shouldRef) {
+      continue;
+    }
+    const key = `${role}:${node.name}`;
+    const nth = counts.get(key) ?? 0;
+    counts.set(key, nth + 1);
+    const ref = `e${params.nextRef.value}`;
+    params.nextRef.value += 1;
+    node.ref = ref;
+    node.nth = nth;
+    refsByKey.set(key, [...(refsByKey.get(key) ?? []), ref]);
+    refs[ref] = {
+      role,
+      ...(node.name ? { name: node.name } : {}),
+      ...(nth > 0 ? { nth } : {}),
+      ...(node.backendDOMNodeId ? { backendDOMNodeId: node.backendDOMNodeId } : {}),
+      ...(params.frameId ? { frameId: params.frameId } : {}),
+    };
+  }
+  for (const refList of refsByKey.values()) {
+    if (refList.length > 1) {
+      continue;
+    }
+    const ref = refList[0];
+    if (ref) {
+      delete refs[ref]?.nth;
+      const node = tree.find((entry) => entry.ref === ref);
+      if (node) {
+        delete node.nth;
+      }
+    }
+  }
+
+  const iframeFrameIds = await resolveCdpIframeFrameIds(params.send, tree);
+  for (const node of tree) {
+    if (node.backendDOMNodeId && iframeFrameIds.has(node.backendDOMNodeId)) {
+      node.frameId = iframeFrameIds.get(node.backendDOMNodeId);
+      if (node.ref && refs[node.ref]) {
+        refs[node.ref].frameId = node.frameId;
+      }
+    }
+  }
+
+  if (params.urls) {
+    const urls = await resolveCdpLinkUrls(params.send, refs);
+    for (const node of tree) {
+      if (node.backendDOMNodeId && urls.has(node.backendDOMNodeId)) {
+        node.url = urls.get(node.backendDOMNodeId);
+      }
+    }
+  }
+
+  const lines = [];
+  for (const root of roots) {
+    renderCdpRoleTree(tree, root, lines, params.options ?? {});
+  }
+
+  if (params.recurseIframes) {
+    const iframeNodes = tree.filter((node) => node.ref && node.frameId);
+    for (const iframe of iframeNodes) {
+      const marker = `[ref=${iframe.ref}]`;
+      const lineIndex = lines.findIndex((line) => line.includes(marker));
+      if (lineIndex < 0 || !iframe.frameId) {
+        continue;
+      }
+      const child = await buildCdpRoleSnapshotFromSession({
+        ...params,
+        frameId: iframe.frameId,
+        recurseIframes: false,
+      }).catch(() => null);
+      if (!child?.lines?.length) {
+        continue;
+      }
+      Object.assign(refs, child.refs);
+      lines.splice(lineIndex + 1, 0, ...child.lines.map((line) => `  ${line}`));
+    }
+  }
+
+  const refValues = Object.values(refs);
+  return {
+    lines,
+    refs,
+    tree,
+    roots,
+    stats: {
+      refs: refValues.length,
+      interactive: refValues.filter((ref) => INTERACTIVE_ROLES.has(ref.role)).length,
+    },
+  };
 }
 
 function browserTabMatchesQuery(tab, query) {
@@ -5421,6 +6207,16 @@ class BrowserDaemon {
     return flags.mcp !== true && flags.fast !== false && Boolean(this.cdpEndpoint());
   }
 
+  shouldFallbackToMcpAfterCdp(flags = {}) {
+    if (flags.mcp === true || flags.allowProfileReattach === true) {
+      return true;
+    }
+    if (flags.noFallback === true || this.noFallback) {
+      return false;
+    }
+    return !isRealProfileSessionMode(this.currentMode());
+  }
+
   async cdpTargets() {
     const endpoint = this.cdpEndpoint();
     if (!endpoint) {
@@ -5492,7 +6288,10 @@ class BrowserDaemon {
       try {
         const pages = await this.cdpPages();
         return formatCdpPagesResult(pages);
-      } catch {
+      } catch (error) {
+        if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+          throw error;
+        }
         // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
       }
     }
@@ -5506,6 +6305,14 @@ class BrowserDaemon {
     const pages = await this.cdpPages();
     if (pages.length === 0) {
       throw new Error("No CDP page targets found");
+    }
+    const requestedTargetId = String(flags.targetId ?? "").trim();
+    if (requestedTargetId) {
+      const direct = pages.find((page) => page.targetId === requestedTargetId);
+      if (direct) {
+        return direct.targetId;
+      }
+      throw new Error(`No CDP page target matched target id ${requestedTargetId}`);
     }
     const requested = flags.page !== undefined ? String(flags.page) : "";
     if (requested) {
@@ -5532,7 +6339,7 @@ class BrowserDaemon {
     return pages.find((page) => page.targetId === targetId) ?? null;
   }
 
-  async cdpPageRequest(targetId, method, params = {}) {
+  async cdpPageRequest(targetId, method, params = {}, options = {}) {
     const client = await this.ensureCdpBrowserClient();
     let sessionId = null;
     try {
@@ -5544,7 +6351,7 @@ class BrowserDaemon {
       if (!sessionId) {
         throw new Error(`CDP attach did not return a session id for target ${targetId}`);
       }
-      return await client.request(method, params, { sessionId });
+      return await client.request(method, params, { ...options, sessionId });
     } finally {
       if (sessionId) {
         await safeCdpRequest(client, "Target.detachFromTarget", { sessionId });
@@ -5552,8 +6359,74 @@ class BrowserDaemon {
     }
   }
 
+  async withCdpPageSession(targetId, callback) {
+    const client = await this.ensureCdpBrowserClient();
+    let sessionId = "";
+    try {
+      const attached = await client.request("Target.attachToTarget", {
+        targetId,
+        flatten: true,
+      });
+      sessionId = String(attached?.sessionId ?? "");
+      if (!sessionId) {
+        throw new Error(`CDP attach did not return a session id for target ${targetId}`);
+      }
+      return await callback(client, sessionId);
+    } finally {
+      if (sessionId) {
+        await safeCdpRequest(client, "Target.detachFromTarget", { sessionId });
+      }
+    }
+  }
+
+  async cdpRoleSnapshot(flags = {}) {
+    const targetId = await this.resolveCdpTargetId(flags);
+    const efficient = flags.efficient || flags.mode === "efficient";
+    const maxDepth =
+      flags.depth !== undefined
+        ? parsePositiveInteger(flags.depth, "depth")
+        : efficient
+          ? 6
+          : undefined;
+    const options = {
+      interactive: Boolean(flags.interactive || efficient),
+      compact: Boolean(flags.compact || efficient),
+      ...(maxDepth !== undefined ? { maxDepth } : {}),
+    };
+    const built = await this.withCdpPageSession(targetId, async (client, sessionId) => {
+      const send = async (method, params = {}) => await client.request(method, params, { sessionId });
+      await Promise.all([
+        send("Page.enable").catch(() => null),
+        send("Runtime.enable").catch(() => null),
+        send("DOM.enable").catch(() => null),
+        send("Accessibility.enable").catch(() => null),
+      ]);
+      return await buildCdpRoleSnapshotFromSession({
+        send,
+        options,
+        urls: Boolean(flags.urls),
+        recurseIframes: true,
+        nextRef: { value: 1 },
+      });
+    });
+    const snapshot = built.lines.join("\n").trim() || (options.interactive ? "(no interactive elements)" : "(empty page)");
+    return {
+      snapshot,
+      refs: built.refs,
+      stats: {
+        lines: snapshot.split("\n").length,
+        chars: snapshot.length,
+        refs: built.stats.refs,
+        interactive: built.stats.interactive,
+      },
+      targetId,
+      cdp: true,
+    };
+  }
+
   async cdpActivateTarget(targetId) {
     const endpoint = this.cdpEndpoint();
+    await this.cdpPageRequest(targetId, "Page.bringToFront", {}).catch(() => null);
     if (endpoint?.httpUrl) {
       const activated = await cdpHttpJson(endpoint.httpUrl, `/json/activate/${encodeURIComponent(targetId)}`, {
         timeoutMs: 3000,
@@ -5630,6 +6503,9 @@ class BrowserDaemon {
 
   async navigateCdpPage(type, url, flags = {}) {
     const targetId = await this.resolveCdpTargetId(flags);
+    if (flags.front) {
+      await this.cdpActivateTarget(targetId);
+    }
     if (type === "url") {
       await this.cdpPageRequest(targetId, "Page.navigate", { url });
       this.selectedCdpTargetId = targetId;
@@ -5744,7 +6620,10 @@ class BrowserDaemon {
           page,
           cdp: true,
         };
-      } catch {
+      } catch (error) {
+        if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+          throw error;
+        }
         // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
       }
     }
@@ -5784,32 +6663,44 @@ class BrowserDaemon {
       case "navigate":
       case "goto":
         requireArgs(command, args, 1);
+        if (flags.foregroundUntilReady) {
+          flags.front = true;
+        }
         if (this.shouldUseFastCdp(flags)) {
           try {
-            return await this.navigateCdpPage("url", args[0], flags);
+            return await this.maybeWaitReadyAfterPageResult(
+              await this.navigateCdpPage("url", args[0], flags),
+              flags,
+            );
           } catch {
             // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
           }
         }
-        return await this.callTool("navigate_page", {
+        return await this.maybeWaitReadyAfterPageResult(await this.callTool("navigate_page", {
           ...this.pageArgs(flags),
           type: "url",
           url: args[0],
-        });
+        }), flags);
       case "back":
       case "forward":
       case "reload":
+        if (flags.foregroundUntilReady) {
+          flags.front = true;
+        }
         if (this.shouldUseFastCdp(flags)) {
           try {
-            return await this.navigateCdpPage(command, undefined, flags);
+            return await this.maybeWaitReadyAfterPageResult(
+              await this.navigateCdpPage(command, undefined, flags),
+              flags,
+            );
           } catch {
             // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
           }
         }
-        return await this.callTool("navigate_page", {
+        return await this.maybeWaitReadyAfterPageResult(await this.callTool("navigate_page", {
           ...this.pageArgs(flags),
           type: command,
-        });
+        }), flags);
       case "select":
         requireArgs(command, args, 1);
         if (args.length >= 2) {
@@ -5907,6 +6798,9 @@ class BrowserDaemon {
         });
       case "wait":
         return await this.handleWait(args, flags);
+      case "wait-ready":
+      case "ready":
+        return await this.handleWaitReady(args, flags);
       case "scroll":
         return await this.handleScroll(args, flags);
       case "viewport":
@@ -5967,6 +6861,10 @@ class BrowserDaemon {
         return await this.handleCaptureConsole(args, flags);
       case "screenshot":
         return await this.handleScreenshot(args, flags);
+      case "device-screenshots":
+      case "exact-screenshots":
+      case "responsive-exact":
+        return await this.handleDeviceScreenshots(args, flags);
       case "responsive":
         return await this.handleResponsive(args, flags);
       case "diff":
@@ -6293,6 +7191,95 @@ class BrowserDaemon {
   }
 
   async handleSnapshot(args, flags = {}) {
+    if (this.shouldUseFastCdp(flags) && !flags.labels && !flags.annotate) {
+      try {
+        const snap = await this.cdpRoleSnapshot(flags);
+        const rawPayload = {
+          snapshot: snap.snapshot,
+          refs: snap.refs,
+          stats: snap.stats,
+          targetId: snap.targetId,
+          cdp: true,
+        };
+        if (flags.raw) {
+          const outPath = flags.out ?? flags.output;
+          const rawText = formatValue(rawPayload);
+          if (outPath) {
+            await writeTextFile(outPath, `${rawText}\n`);
+            return {
+              text: readOutputSummary({
+                command: "snapshot",
+                outPath,
+                chars: rawText.length,
+                truncated: rawText.length > READ_STDOUT_HARD_MAX_CHARS,
+                raw: true,
+                maxCharsInfo: stdoutMaxCharsFromFlags(flags, String(READ_STDOUT_HARD_MAX_CHARS)),
+              }),
+              structuredContent: {
+                command: "snapshot",
+                raw: true,
+                chars: rawText.length,
+                out: outPath,
+                targetId: snap.targetId,
+                cdp: true,
+              },
+            };
+          }
+          return {
+            text: formatStdoutText(rawText, READ_STDOUT_HARD_MAX_CHARS, flags),
+            structuredContent: rawPayload,
+          };
+        }
+        const maxChars = stdoutMaxCharsFromFlags(
+          flags,
+          flags.verbose ? String(READ_STDOUT_HARD_MAX_CHARS) : String(DEFAULT_SNAPSHOT_MAX_CHARS),
+        );
+        const truncated = truncateText(snap.snapshot, maxChars.value);
+        const stdoutHardCapped = maxChars.capped && truncated.truncated;
+        let text = truncated.text;
+        if (truncated.truncated && !stdoutHardCapped) {
+          text = `${text}\n\n[...TRUNCATED - use --max-chars or --out]`;
+        }
+        if (stdoutHardCapped) {
+          text = `${text}\n\n[...STDOUT CAPPED at ${maxChars.value} chars - use --out for full output]`;
+        }
+        const outPath = flags.out ?? flags.output;
+        if (outPath) {
+          await writeTextFile(outPath, `${snap.snapshot}\n`);
+        }
+        const lines = [];
+        if (!flags.quiet) {
+          lines.push(outPath ? `snapshot written to ${outPath}` : text);
+        }
+        if (outPath) {
+          lines.push(`snapshot: ${outPath}`);
+        }
+        lines.push(
+          `stats: lines=${snap.stats.lines} chars=${snap.stats.chars} refs=${snap.stats.refs} interactive=${snap.stats.interactive}${truncated.truncated ? " truncated=true" : ""}`,
+        );
+        return {
+          text: lines.filter(Boolean).join("\n"),
+          structuredContent: {
+            snapshotText: text,
+            refs: snap.refs,
+            stats: {
+              ...snap.stats,
+              stdoutCapped: stdoutHardCapped,
+              requestedMaxChars: maxChars.requested,
+              stdoutMaxChars: maxChars.value,
+            },
+            truncated: truncated.truncated,
+            targetId: snap.targetId,
+            cdp: true,
+            ...(outPath ? { out: outPath } : {}),
+          },
+        };
+      } catch (error) {
+        if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+          throw error;
+        }
+      }
+    }
     const snapshot = await this.callTool("take_snapshot", {
       ...this.pageArgs(flags),
       verbose: Boolean(flags.verbose || flags.raw),
@@ -6574,6 +7561,9 @@ class BrowserDaemon {
   async handleOpen(args, flags = {}, command = "open") {
     requireArgs(command, args, 1);
     const url = args[0];
+    if (flags.foregroundUntilReady) {
+      flags.front = true;
+    }
     if (this.mode === ANONYMOUS_MODE) {
       const pageId = command === "newtab"
         ? await this.openAnonymousTab(url, flags)
@@ -6586,20 +7576,41 @@ class BrowserDaemon {
             url,
           });
         }
-        return await this.selectPage(pageId, Boolean(flags.front));
+        return await this.maybeWaitReadyAfterPageResult(
+          await this.selectPage(pageId, Boolean(flags.front)),
+          flags,
+        );
       }
     }
     if (this.shouldUseFastCdp(flags)) {
       try {
-        return await this.openCdpPage(url, flags, command);
+        return await this.maybeWaitReadyAfterPageResult(
+          await this.openCdpPage(url, flags, command),
+          flags,
+        );
       } catch {
         // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
       }
     }
-    return await this.callTool("new_page", {
+    const opened = await this.callTool("new_page", {
       url,
       background: !flags.front,
     });
+    return await this.maybeWaitReadyAfterPageResult(opened, flags);
+  }
+
+  async maybeWaitReadyAfterPageResult(result, flags = {}) {
+    if (!flags.foregroundUntilReady) {
+      return result;
+    }
+    const activation = await foregroundBrowserAppForProfile({ source: { appName: flags.browserAppName } }, flags);
+    const page = readinessPageFromResult(result);
+    const readyFlags = {
+      ...flags,
+      ...(page?.tabId ? { page: page.tabId } : page?.id !== undefined ? { page: String(page.id) } : {}),
+    };
+    const ready = await this.handleWaitReady(readinessArgsFromFlags(flags), readyFlags);
+    return appendReadinessResult(result, ready, activation);
   }
 
   async resolveAnonymousNavigationPageId(flags = {}) {
@@ -6788,7 +7799,10 @@ class BrowserDaemon {
       try {
         const result = await this.evaluateCdpFunction(buildEvalFunction(args.join(" ")), flags);
         return flags.raw ? await formatRawResult("eval", result, flags) : compactTextResult(result, flags, DEFAULT_READ_MAX_CHARS);
-      } catch {
+      } catch (error) {
+        if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+          throw error;
+        }
         // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
       }
     }
@@ -7049,7 +8063,10 @@ class BrowserDaemon {
     if (this.shouldUseFastCdp(flags) && !flags.uid && !(selectorOrUid && isUidRef(selectorOrUid))) {
       try {
         return await this.evaluateCdpFunction(fnString, flags);
-      } catch {
+      } catch (error) {
+        if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+          throw error;
+        }
         // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
       }
     }
@@ -7221,13 +8238,86 @@ class BrowserDaemon {
     );
   }
 
+  async handleWaitReady(args, flags = {}) {
+    const timeout = parsePositiveInteger(flags.timeout ?? "15000", "timeout");
+    const text = normalizeOptionalString(flags.readyText) ?? normalizeOptionalString(args.join(" "));
+    const result = await this.evaluateFunction(
+      waitForReadyContentFunction(text, timeout, {
+        selector: flags.selector,
+        cardSelector: flags.cardSelector,
+        minCards: flags.minCards,
+        stableMs: flags.stableMs,
+        visualStable: Boolean(flags.visualStable || flags.foregroundUntilReady),
+        noSkeletons: Boolean(flags.noSkeletons),
+        foregroundRequested: Boolean(flags.foregroundUntilReady || flags.front),
+      }),
+      flags,
+    );
+    const ready = parseEvaluateJsonResult(result, "wait-ready");
+    let screenshot = null;
+    if (flags.screenshot) {
+      screenshot = await this.handleScreenshot([], flags).catch((error) => ({
+        text: `screenshot failed: ${error instanceof Error ? error.message : String(error)}`,
+      }));
+    }
+    return {
+      text: [
+        formatReadyContentSummary(ready),
+        screenshot?.text,
+      ].filter(Boolean).join("\n"),
+      structuredContent: ready,
+      ready,
+      screenshot,
+    };
+  }
+
   async handleViewport(size, flags = {}) {
     if (size === "reset" || size === "clear") {
+      if (this.shouldUseFastCdp(flags)) {
+        try {
+          const targetId = await this.resolveCdpTargetId(flags);
+          await this.cdpPageRequest(targetId, "Emulation.clearDeviceMetricsOverride", {}, {
+            timeoutMs: parsePositiveInteger(flags.timeout ?? "10000", "timeout"),
+          });
+          return {
+            text: "Viewport emulation reset.\nFast path: CDP",
+            structuredContent: { targetId, cdp: true },
+            cdp: true,
+          };
+        } catch {
+          // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+        }
+      }
       return await this.callTool("emulate", this.pageArgs(flags));
     }
-    const [width, height] = size.split(/[x,]/).map((value) => Number.parseInt(value, 10));
+    const [width, height, rawDpr] = size.split(/[x,]/).map((value) => Number.parseInt(value, 10));
     if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
       throw new Error("viewport expects a size like 1280x720");
+    }
+    const deviceScaleFactor = Number.isFinite(rawDpr) && rawDpr > 0 ? rawDpr : 1;
+    if (this.shouldUseFastCdp(flags)) {
+      try {
+        const targetId = await this.resolveCdpTargetId(flags);
+        await this.cdpPageRequest(targetId, "Emulation.setDeviceMetricsOverride", {
+          width,
+          height,
+          deviceScaleFactor,
+          mobile: Boolean(flags.mobile),
+        }, {
+          timeoutMs: parsePositiveInteger(flags.timeout ?? "10000", "timeout"),
+        });
+        return {
+          text: `Emulating viewport: ${JSON.stringify({ width, height, deviceScaleFactor, mobile: Boolean(flags.mobile) })}\nFast path: CDP`,
+          structuredContent: {
+            targetId,
+            viewport: { width, height, deviceScaleFactor, mobile: Boolean(flags.mobile) },
+            cdp: true,
+          },
+          cdp: true,
+        };
+      } catch {
+        // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+      }
     }
     const viewport = size.includes("x") && size.split("x").length >= 3 ? size : `${width}x${height}x1`;
     return await this.callTool("emulate", {
@@ -7418,6 +8508,12 @@ class BrowserDaemon {
 
   async captureScreenshotCdpOnce(filePath, format, flags = {}, quality = undefined) {
     const targetId = await this.resolveCdpTargetId(flags);
+    return await this.withCdpPageSession(targetId, async (client, sessionId) =>
+      await this.captureScreenshotCdpInSession(client, sessionId, targetId, filePath, format, flags, quality)
+    );
+  }
+
+  async captureScreenshotCdpInSession(client, sessionId, targetId, filePath, format, flags = {}, quality = undefined) {
     const normalizedFormat = normalizeFormat(format);
     const params = {
       format: normalizedFormat,
@@ -7428,7 +8524,7 @@ class BrowserDaemon {
       params.quality = quality;
     }
     if (flags.full) {
-      const metrics = await this.cdpPageRequest(targetId, "Page.getLayoutMetrics", {}).catch(() => null);
+      const metrics = await client.request("Page.getLayoutMetrics", {}, { sessionId }).catch(() => null);
       const contentSize = metrics?.cssContentSize ?? metrics?.contentSize;
       const width = Number(contentSize?.width);
       const height = Number(contentSize?.height);
@@ -7441,8 +8537,37 @@ class BrowserDaemon {
           scale: 1,
         };
       }
+    } else if (flags.exactViewportPng) {
+      const clipWidth = Number(flags.clipWidth);
+      const clipHeight = Number(flags.clipHeight);
+      if (Number.isFinite(clipWidth) && Number.isFinite(clipHeight) && clipWidth > 0 && clipHeight > 0) {
+        params.clip = {
+          x: 0,
+          y: 0,
+          width: Math.ceil(clipWidth),
+          height: Math.ceil(clipHeight),
+          scale: 1,
+        };
+      } else {
+        const metrics = await client.request("Page.getLayoutMetrics", {}, { sessionId }).catch(() => null);
+        const viewport = metrics?.cssLayoutViewport ?? metrics?.cssVisualViewport ?? metrics?.layoutViewport ?? metrics?.visualViewport;
+        const width = Number(viewport?.clientWidth);
+        const height = Number(viewport?.clientHeight);
+        const x = Number(viewport?.pageX ?? viewport?.x ?? 0);
+        const y = Number(viewport?.pageY ?? viewport?.y ?? 0);
+        if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+          params.clip = {
+            x: Number.isFinite(x) ? x : 0,
+            y: Number.isFinite(y) ? y : 0,
+            width: Math.ceil(width),
+            height: Math.ceil(height),
+            scale: 1,
+          };
+        }
+      }
     }
-    const result = await this.cdpPageRequest(targetId, "Page.captureScreenshot", params, {
+    const result = await client.request("Page.captureScreenshot", params, {
+      sessionId,
       timeoutMs: parsePositiveInteger(flags.timeout ?? "30000", "timeout"),
     });
     const data = String(result?.data ?? "");
@@ -7562,6 +8687,326 @@ class BrowserDaemon {
       ...this.pageArgs(flags),
       viewport: `${width}x${height}x1`,
     });
+  }
+
+  async handleDeviceScreenshots(args, flags = {}) {
+    const { targetUrl, prefix } = resolveDeviceScreenshotsTarget(args);
+    const devices = parseDeviceScreenshotViewports(flags.devices);
+    const page = await this.resolveDeviceScreenshotsPage(targetUrl, flags);
+    if (!page) {
+      throw new Error("Could not find a page for device-screenshots.");
+    }
+
+    if (this.shouldUseFastCdp(flags)) {
+      try {
+        return await this.captureDeviceScreenshotsCdp(page, devices, prefix, flags);
+      } catch (error) {
+        if (isRealProfileSessionMode(this.currentMode())) {
+          throw error;
+        }
+        // Dedicated/anonymous sessions can fall back to MCP page-scoped calls.
+      }
+    }
+    return await this.captureDeviceScreenshotsMcp(page, devices, prefix, flags);
+  }
+
+  async resolveDeviceScreenshotsPage(targetUrl = "", flags = {}) {
+    if (this.shouldUseFastCdp(flags)) {
+      return await this.resolveDeviceScreenshotsCdpPage(targetUrl, flags);
+    }
+    return await this.resolveDeviceScreenshotsMcpPage(targetUrl, flags);
+  }
+
+  async resolveDeviceScreenshotsCdpPage(targetUrl = "", flags = {}) {
+    const hasExplicitTarget = Boolean(flags.targetId || flags.page !== undefined);
+    if (targetUrl && hasExplicitTarget) {
+      await this.navigateCdpPage("url", targetUrl, flags);
+    }
+    if (hasExplicitTarget) {
+      const targetId = await this.resolveCdpTargetId(flags);
+      this.selectedCdpTargetId = targetId;
+      return await this.cdpPageForTargetId(targetId) ?? {
+        id: flags.page === undefined ? null : Number.parseInt(String(flags.page), 10),
+        targetId,
+        url: targetUrl,
+        title: "",
+      };
+    }
+
+    const pages = await this.cdpPages();
+    if (targetUrl) {
+      const matches = pages.filter((page) => pageUrlMatchesRequest(page.url, targetUrl));
+      if (matches.length > 1) {
+        throw new Error(`device-screenshots matched multiple tabs for ${targetUrl}; pass --page, --target-id, or select the intended tab first:\n${formatPageCandidates(matches)}`);
+      }
+      if (matches.length === 1) {
+        this.selectedCdpTargetId = matches[0].targetId;
+        return matches[0];
+      }
+      const opened = await this.openCdpPage(targetUrl, { ...flags, front: Boolean(flags.front), foregroundUntilReady: false }, "open");
+      const page = opened.page ?? (this.selectedCdpTargetId ? await this.cdpPageForTargetId(this.selectedCdpTargetId) : null);
+      if (page?.targetId) {
+        this.selectedCdpTargetId = page.targetId;
+      }
+      return page;
+    }
+
+    const selected = this.selectedCdpTargetId
+      ? pages.find((page) => page.targetId === this.selectedCdpTargetId)
+      : pages.find((page) => page.selected);
+    if (selected) {
+      this.selectedCdpTargetId = selected.targetId;
+      return selected;
+    }
+    if (pages.length === 1) {
+      this.selectedCdpTargetId = pages[0].targetId;
+      return pages[0];
+    }
+    throw new Error(`device-screenshots needs a single selected tab; pass --page, --target-id, --handle, or select-tab first:\n${formatPageCandidates(pages)}`);
+  }
+
+  async resolveDeviceScreenshotsMcpPage(targetUrl = "", flags = {}) {
+    if (targetUrl && flags.page !== undefined) {
+      await this.callTool("navigate_page", {
+        ...this.pageArgs(flags),
+        type: "url",
+        url: targetUrl,
+      });
+    } else if (targetUrl) {
+      await this.handleOpen([targetUrl], { ...flags, select: true, foregroundUntilReady: false }, "open");
+    }
+    const pages = parseListPagesResult(await this.callTool("list_pages", {}));
+    if (flags.page !== undefined) {
+      const pageId = parsePageId(flags.page);
+      return pages.find((page) => page.id === pageId) ?? { id: pageId, url: targetUrl, title: "" };
+    }
+    if (targetUrl) {
+      const matches = pages.filter((page) => pageUrlMatchesRequest(page.url, targetUrl));
+      if (matches.length > 1) {
+        throw new Error(`device-screenshots matched multiple pages for ${targetUrl}; pass --page or select the intended page first:\n${formatPageCandidates(matches)}`);
+      }
+      if (matches.length === 1) {
+        return matches[0];
+      }
+    }
+    const selected = pages.find((page) => page.selected);
+    if (selected) {
+      return selected;
+    }
+    if (pages.length === 1) {
+      return pages[0];
+    }
+    throw new Error(`device-screenshots needs a single selected page; pass --page, --handle, or select-tab first:\n${formatPageCandidates(pages)}`);
+  }
+
+  async readViewportMetricsInSession(client, sessionId, flags = {}) {
+    const settleMs = Math.min(10000, parsePositiveInteger(flags.settleMs ?? "200", "settle-ms"));
+    const result = await client.request("Runtime.evaluate", {
+      expression: `new Promise((resolve) => {
+        let done = false;
+        const sample = () => {
+          if (done) return;
+          done = true;
+          resolve({
+            url: location.href,
+            title: document.title,
+            innerWidth,
+            innerHeight,
+            devicePixelRatio,
+            visualViewport: {
+              width: visualViewport?.width,
+              height: visualViewport?.height,
+              scale: visualViewport?.scale
+            }
+          });
+        };
+        setTimeout(sample, ${settleMs + 250});
+        requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(sample, ${settleMs})));
+      })`,
+      awaitPromise: true,
+      returnByValue: true,
+    }, { sessionId, timeoutMs: Math.max(1000, settleMs + 5000) });
+    if (result?.exceptionDetails) {
+      throw new Error(formatCdpException(result.exceptionDetails));
+    }
+    return cdpRemoteObjectValue(result?.result);
+  }
+
+  async waitForDeviceScreenshotReadyInSession(client, sessionId, flags = {}) {
+    const needsReady = Boolean(
+      flags.readyText ||
+      flags.selector ||
+      flags.cardSelector ||
+      flags.minCards ||
+      flags.visualStable ||
+      flags.noSkeletons,
+    );
+    if (!needsReady) {
+      return { metrics: await this.readViewportMetricsInSession(client, sessionId, flags) };
+    }
+    const timeout = parsePositiveInteger(flags.timeout ?? "15000", "timeout");
+    const result = await client.request("Runtime.evaluate", {
+      expression: `(${waitForReadyContentFunction(
+        normalizeOptionalString(flags.readyText) ?? "",
+        timeout,
+        {
+          selector: flags.selector,
+          cardSelector: flags.cardSelector,
+          minCards: flags.minCards,
+          stableMs: flags.stableMs ?? flags.settleMs,
+          visualStable: Boolean(flags.visualStable),
+          noSkeletons: Boolean(flags.noSkeletons),
+          foregroundRequested: Boolean(flags.foregroundUntilReady || flags.front),
+        },
+      )})()`,
+      awaitPromise: true,
+      returnByValue: true,
+    }, { sessionId, timeoutMs: timeout + 2000 });
+    if (result?.exceptionDetails) {
+      throw new Error(formatCdpException(result.exceptionDetails));
+    }
+    const value = cdpRemoteObjectValue(result?.result);
+    const ready = typeof value === "string" ? JSON.parse(value) : value;
+    return {
+      ready,
+      metrics: await this.readViewportMetricsInSession(client, sessionId, flags),
+    };
+  }
+
+  async captureDeviceScreenshotsCdp(page, devices, prefix, flags = {}) {
+    const targetId = page.targetId || await this.resolveCdpTargetId({ ...flags, page: page.id });
+    return await this.withCdpPageSession(targetId, async (client, sessionId) => {
+      await client.request("Page.enable", {}, { sessionId });
+      const results = [];
+      try {
+        for (const device of devices) {
+          const outputPath = deviceScreenshotPath(prefix, device.name);
+          const mobile = deviceScreenshotMobileMode(device, flags);
+          await fsp.mkdir(path.dirname(outputPath), { recursive: true });
+          await client.request("Emulation.setDeviceMetricsOverride", {
+            width: device.width,
+            height: device.height,
+            deviceScaleFactor: 1,
+            mobile,
+            screenWidth: device.width,
+            screenHeight: device.height,
+          }, { sessionId });
+          await client.request("Emulation.setTouchEmulationEnabled", {
+            enabled: mobile,
+            ...(mobile ? { configuration: "mobile" } : {}),
+          }, { sessionId }).catch(() => null);
+          const ready = await this.waitForDeviceScreenshotReadyInSession(client, sessionId, flags);
+          await this.captureScreenshotCdpInSession(client, sessionId, targetId, outputPath, "png", {
+            ...flags,
+            exactViewportPng: true,
+            clipWidth: device.width,
+            clipHeight: device.height,
+            full: Boolean(flags.full),
+          });
+          const png = readPngDimensions(outputPath);
+          if (!flags.full && (png.pixelWidth !== device.width || png.pixelHeight !== device.height)) {
+            throw new Error(`${device.name} screenshot dimension mismatch: expected ${device.width}x${device.height}, got ${png.pixelWidth}x${png.pixelHeight}`);
+          }
+          results.push({
+            name: device.name,
+            requested: device.requested,
+            filePath: path.resolve(outputPath),
+            metrics: ready.metrics,
+            ready: ready.ready,
+            png,
+            mobile,
+            targetId,
+            cdp: true,
+          });
+        }
+      } finally {
+        await safeCdpRequest(client, "Emulation.clearDeviceMetricsOverride", {}, { sessionId });
+        await safeCdpRequest(client, "Emulation.setTouchEmulationEnabled", { enabled: false }, { sessionId });
+      }
+      return this.formatDeviceScreenshotResults(results, prefix, page, { cdp: true, targetId });
+    });
+  }
+
+  async captureDeviceScreenshotsMcp(page, devices, prefix, flags = {}) {
+    const results = [];
+    const pageFlags = { ...flags, page: page.id };
+    try {
+      for (const device of devices) {
+        const outputPath = deviceScreenshotPath(prefix, device.name);
+        const mobile = deviceScreenshotMobileMode(device, flags);
+        await this.handleViewport(device.requested, { ...pageFlags, mobile });
+        const ready = await this.waitForDeviceScreenshotReadyMcp(pageFlags);
+        await this.handleScreenshot([outputPath], {
+          ...pageFlags,
+          exactViewportPng: true,
+          rawSize: flags.rawSize !== false,
+          full: Boolean(flags.full),
+          format: "png",
+        });
+        const png = readPngDimensions(outputPath);
+        if (!flags.full && (png.pixelWidth !== device.width || png.pixelHeight !== device.height)) {
+          throw new Error(`${device.name} screenshot dimension mismatch: expected ${device.width}x${device.height}, got ${png.pixelWidth}x${png.pixelHeight}`);
+        }
+        results.push({
+          name: device.name,
+          requested: device.requested,
+          filePath: path.resolve(outputPath),
+          metrics: ready.metrics,
+          ready: ready.ready,
+          png,
+          mobile,
+        });
+      }
+    } finally {
+      await this.handleViewport("reset", pageFlags).catch(() => {});
+    }
+    return this.formatDeviceScreenshotResults(results, prefix, page);
+  }
+
+  async waitForDeviceScreenshotReadyMcp(flags = {}) {
+    const needsReady = Boolean(
+      flags.readyText ||
+      flags.selector ||
+      flags.cardSelector ||
+      flags.minCards ||
+      flags.visualStable ||
+      flags.noSkeletons,
+    );
+    if (needsReady) {
+      const readyResult = await this.handleWaitReady(readinessArgsFromFlags(flags), flags);
+      const metricsResult = await this.evaluateFunction(deviceScreenshotMetricsFunction(), flags);
+      return {
+        ready: readyResult.ready,
+        metrics: parseEvaluateJsonResult(metricsResult, "device screenshot metrics"),
+      };
+    }
+    const settleMs = Math.min(10000, parsePositiveInteger(flags.settleMs ?? "200", "settle-ms"));
+    if (settleMs > 0) {
+      await sleep(settleMs);
+    }
+    const metricsResult = await this.evaluateFunction(deviceScreenshotMetricsFunction(), flags);
+    return {
+      metrics: parseEvaluateJsonResult(metricsResult, "device screenshot metrics"),
+    };
+  }
+
+  formatDeviceScreenshotResults(results, prefix, page, extra = {}) {
+    const text = results.map((result) => {
+      const metrics = result.metrics
+        ? ` browser=${result.metrics.innerWidth}x${result.metrics.innerHeight}@${result.metrics.devicePixelRatio}`
+        : "";
+      const png = result.png ? ` png=${result.png.pixelWidth}x${result.png.pixelHeight}` : "";
+      const mobile = result.mobile ? " mobile-emulation=yes" : "";
+      return `${result.name} (${result.requested}): ${result.filePath}${metrics}${png}${mobile}`;
+    }).join("\n");
+    return {
+      text,
+      prefix: path.resolve(prefix),
+      pageId: page.id,
+      targetId: extra.targetId ?? page.targetId,
+      results,
+      ...extra,
+    };
   }
 
   async handleResponsive(args, flags = {}) {
@@ -9153,6 +10598,7 @@ function visibleContentPostsFunction(selector = undefined) {
       const style = getComputedStyle(el);
       return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || "1") > 0;
     };
+    const visibleRect = (rect) => rect && rect.width > 0 && rect.height > 0 && rect.bottom >= -innerHeight * 0.25 && rect.top <= innerHeight * 3;
     const pageBrandLabels = (() => {
       const out = new Set();
       const add = (value) => {
@@ -9172,11 +10618,18 @@ function visibleContentPostsFunction(selector = undefined) {
       if (value.length > 220) return false;
       if (pageBrandLabels.has(value.toLowerCase())) return true;
       return /^(like|comment|share|reply|send|save|follow|following|more|see more|view more|show more|load more|hide|report|translate|copy link|not now|join|joined|visit|subscribe|notifications?|write a comment|add a comment|comment as .+|top contributor|add friend|message|log in|sign up)$/i.test(value) ||
-        /^(?:view|show|load)\\s+(?:\\d+\\s+)?(?:more\\s+)?(?:comments?|replies?|items?|results?|responses?)$/i.test(value) ||
+        /^(?:view|show|load)\\s+(?:\\d+\\s+)?(?:more\\s+)?(?:comments?|answers?|replies?|items?|results?|responses?)$/i.test(value) ||
         /^(?:like|comment|share|reply|send|save)\\s*\\d+(?:[.,]\\d+)?\\s*[kmb]?$/i.test(value) ||
         /^\\d+(?:[.,]\\d+)?\\s*[kmb]?$/i.test(value) ||
-        /^\\d+\\s*(likes?|comments?|shares?|replies?|views?)$/i.test(value) ||
+        /^\\d+\\s*(likes?|comments?|answers?|shares?|replies?|views?)$/i.test(value) ||
         /^[·•⋯…]+$/.test(value);
+    };
+    const isBoundaryLine = (line) => {
+      const value = String(line || "").trim();
+      return /^(?:view|show|load)\\s+(?:\\d+\\s+)?(?:more\\s+)?(?:comments?|answers?|replies?)$/i.test(value) ||
+        /^(?:write|add) a (?:comment|reply|answer)$/i.test(value) ||
+        /^(?:comment|answer) as\\b/i.test(value) ||
+        /^(?:most relevant|all comments|all answers)$/i.test(value);
     };
     const cleanLines = (value, max = 1800) => {
       const seen = new Set();
@@ -9192,6 +10645,85 @@ function visibleContentPostsFunction(selector = undefined) {
           return true;
         });
       return lines.join("\\n").slice(0, max).trim();
+    };
+    const joinSegments = (segments, max = 2400) => {
+      const lines = [];
+      const seen = new Set();
+      for (const segment of segments) {
+        for (const rawLine of String(segment || "").split("\\n")) {
+          const line = rawLine.replace(/\\s+/g, " ").trim();
+          if (line.length <= 1) continue;
+          const key = line.toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          lines.push(line);
+          if (lines.join("\\n").length >= max) {
+            return lines.join("\\n").slice(0, max).trim();
+          }
+        }
+      }
+      return lines.join("\\n").slice(0, max).trim();
+    };
+    const visibleText = (root, max = 2400) => {
+      if (!(root instanceof Element)) return "";
+      const segments = [];
+      const blockedTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "PATH"]);
+      const nodeVisible = (node) => {
+        const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+        if (!(el instanceof Element)) return false;
+        if (blockedTags.has(el.tagName)) return false;
+        let current = el;
+        while (current && current instanceof Element && current !== root.parentElement) {
+          if (blockedTags.has(current.tagName)) return false;
+          const style = getComputedStyle(current);
+          if (style.visibility === "hidden" || style.display === "none" || Number(style.opacity || "1") <= 0) return false;
+          if (current === root) break;
+          current = current.parentElement;
+        }
+        return true;
+      };
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          const value = String(node.nodeValue || "").replace(/\\s+/g, " ").trim();
+          if (value.length <= 1) return NodeFilter.FILTER_REJECT;
+          if (!nodeVisible(node)) return NodeFilter.FILTER_REJECT;
+          try {
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            const rects = [...range.getClientRects()];
+            range.detach?.();
+            return rects.some(visibleRect) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+          } catch {
+            return NodeFilter.FILTER_REJECT;
+          }
+        },
+      });
+      let visited = 0;
+      while (walker.nextNode() && visited < 1200 && joinSegments(segments, max).length < max) {
+        visited += 1;
+        segments.push(walker.currentNode.nodeValue || "");
+      }
+      for (const media of root.querySelectorAll('img[alt], [role="img"][aria-label], video[aria-label], canvas[aria-label]')) {
+        if (!(media instanceof Element) || !visible(media)) continue;
+        const label = media.getAttribute("alt") || media.getAttribute("aria-label") || "";
+        const cleaned = label.replace(/^(?:image|photo|may be an image of|may be an image of text that says)\\s*[:\\-]?\\s*/i, "").trim();
+        if (cleaned.length >= 8 && !isBoilerplateLine(cleaned)) segments.push(cleaned);
+      }
+      return joinSegments(segments, max);
+    };
+    const mostlyRepeatedBrand = (text) => {
+      const lines = cleanLines(text, 800).split("\\n").filter(Boolean);
+      if (lines.length < 3) return false;
+      const unique = [...new Set(lines.map((line) => line.toLowerCase()))];
+      return unique.length <= 2 && unique.every((line) => pageBrandLabels.has(line) || line === "facebook");
+    };
+    const candidateText = (el, max = 2400) => {
+      const fromVisibleNodes = visibleText(el, max);
+      if (fromVisibleNodes.length >= 30 || !mostlyRepeatedBrand(fromVisibleNodes)) {
+        return fromVisibleNodes;
+      }
+      const fallback = cleanLines(el.innerText || el.textContent || el.getAttribute("aria-label") || "", max);
+      return mostlyRepeatedBrand(fallback) ? fromVisibleNodes : fallback;
     };
     const cssPath = (el) => {
       if (!(el instanceof Element)) return "";
@@ -9228,17 +10760,26 @@ function visibleContentPostsFunction(selector = undefined) {
     const timePattern = /\\b(?:just now|today|yesterday|\\d+\\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks|mo|month|months|y|yr|yrs|year|years)\\s*ago|\\d+[smhdw]|\\d{1,2}:\\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\s+\\d{1,2})\\b/i;
     const extractParts = (text) => {
       const lines = text.split("\\n").map((line) => line.trim()).filter(Boolean);
-      const contentLines = lines.filter((line) => !isBoilerplateLine(line));
-      const time = contentLines.find((line) => timePattern.test(line) && line.length <= 120);
-      const author = contentLines.find((line) => {
-        if (line === time) return false;
+      const boundaryIndex = lines.findIndex(isBoundaryLine);
+      const beforeBoundary = boundaryIndex >= 0 ? lines.slice(0, boundaryIndex) : lines;
+      const contentLines = beforeBoundary.filter((line) => !isBoilerplateLine(line));
+      const timeIndex = contentLines.findIndex((line) => timePattern.test(line) && line.length <= 120);
+      const time = timeIndex >= 0 ? contentLines[timeIndex] : undefined;
+      const authorIndex = contentLines.findIndex((line, index) => {
+        if (index === timeIndex) return false;
         if (timePattern.test(line)) return false;
         return line.length <= 100;
       });
-      const ignored = new Set([author, time].filter(Boolean).map((line) => line.toLowerCase()));
-      let bodyLines = contentLines.filter((line) => !ignored.has(line.toLowerCase()));
+      const author = authorIndex >= 0 ? contentLines[authorIndex] : undefined;
+      const ignoredIndexes = new Set([authorIndex, timeIndex].filter((index) => index >= 0));
+      const bodyStart = Math.max(...[authorIndex, timeIndex].filter((index) => index >= 0), -1) + 1;
+      let bodyLines = contentLines
+        .slice(bodyStart)
+        .filter((line, offset) => !ignoredIndexes.has(bodyStart + offset))
+        .map((line) => line.replace(/\\s*See more\\s*$/i, "").trim())
+        .filter(Boolean);
       if (bodyLines.length === 0) {
-        bodyLines = contentLines;
+        bodyLines = contentLines.filter((_, index) => !ignoredIndexes.has(index));
       }
       return {
         author,
@@ -9253,8 +10794,8 @@ function visibleContentPostsFunction(selector = undefined) {
       const feedChildren = queryAll('[role="feed"] > *')
         .filter((el) => {
           if (!visible(el)) return false;
-          const text = cleanLines(el.innerText || el.textContent || "", 2600);
-          if (text.length < 40 || text.length > 8000) return false;
+          const text = candidateText(el, 2600);
+          if (text.length < 30 || text.length > 8000 || mostlyRepeatedBrand(text)) return false;
           const lines = text.split("\\n").filter((line) => !isBoilerplateLine(line));
           return lines.length >= 2 || text.length >= 120;
         });
@@ -9275,8 +10816,8 @@ function visibleContentPostsFunction(selector = undefined) {
           const blocks = [...root.querySelectorAll('article, section, [role="article"], [role="group"], [aria-posinset], div')]
             .filter((el) => {
               if (!visible(el)) return false;
-              const text = cleanLines(el.innerText || el.textContent || "", 2600);
-              if (text.length < 40 || text.length > 6000) return false;
+              const text = candidateText(el, 2600);
+              if (text.length < 30 || text.length > 6000 || mostlyRepeatedBrand(text)) return false;
               const lines = text.split("\\n").filter((line) => !isBoilerplateLine(line));
               if (lines.length < 2 && text.length < 120) return false;
               return true;
@@ -9298,7 +10839,7 @@ function visibleContentPostsFunction(selector = undefined) {
       .map((candidate) => {
         const el = candidate.el;
         const rect = el.getBoundingClientRect();
-        const text = cleanLines(el.innerText || el.textContent || el.getAttribute("aria-label") || "", 2400);
+        const text = candidateText(el, 2400);
         const parts = extractParts(text);
         return {
           tag: el.tagName.toLowerCase(),
@@ -9314,7 +10855,7 @@ function visibleContentPostsFunction(selector = undefined) {
           text,
         };
       })
-      .filter((entry) => entry.text.length >= 30 && (entry.body || entry.text).length >= 20)
+      .filter((entry) => entry.text.length >= 30 && (entry.body || entry.text).length >= 20 && !mostlyRepeatedBrand(entry.text))
       .sort((a, b) => a.top - b.top || a.height - b.height || a.left - b.left || a.text.length - b.text.length);
     const out = [];
     for (const entry of entries) {
@@ -9824,9 +11365,9 @@ function createCdpDownloadWaiter(client, cdpUrl, timeoutMs) {
   };
 }
 
-async function safeCdpRequest(client, method, params) {
+async function safeCdpRequest(client, method, params, options = {}) {
   try {
-    await client.request(method, params);
+    await client.request(method, params, options);
   } catch {
     // Best effort cleanup for partially-open CDP sessions.
   }
@@ -10062,6 +11603,180 @@ function waitForTextFunction(text, timeoutMs, options = {}) {
     }
     throw new Error("Timed out waiting for " + (requireVisible ? "visible text: " : "text: ") + needle);
   }`;
+}
+
+function waitForReadyContentFunction(text, timeoutMs, options = {}) {
+  const minCards = Math.max(0, Number.parseInt(options.minCards ?? "0", 10) || 0);
+  const stableMs = Math.max(0, Number.parseInt(options.stableMs ?? "700", 10) || 0);
+  return `async () => {
+    const opts = ${JSON.stringify({
+      text: text || "",
+      selector: normalizeOptionalString(options.selector) ?? "",
+      cardSelector: normalizeOptionalString(options.cardSelector) ?? "",
+      minCards,
+      stableMs,
+      visualStable: Boolean(options.visualStable),
+      noSkeletons: Boolean(options.noSkeletons),
+      foregroundRequested: Boolean(options.foregroundRequested),
+    })};
+    const timeoutMs = ${timeoutMs};
+    const deadline = Date.now() + timeoutMs;
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const queryAll = (selector, root = document) => {
+      if (!selector) return [];
+      try {
+        return [...root.querySelectorAll(selector)];
+      } catch {
+        return [];
+      }
+    };
+    const visible = (el) => {
+      if (!(el instanceof Element)) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      if (rect.bottom < -innerHeight * 0.25 || rect.top > innerHeight * 2.5) return false;
+      const style = getComputedStyle(el);
+      return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || "1") > 0;
+    };
+    const cleanText = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visibleCardElements = () => {
+      const explicit = opts.cardSelector ? queryAll(opts.cardSelector).filter(visible) : [];
+      if (explicit.length) return explicit;
+      const feedChildren = queryAll('[role="feed"] > *, [role="list"] > *')
+        .filter(visible)
+        .filter((el) => cleanText(el.innerText || el.textContent || "").length >= 2 || el.querySelector("img,video,canvas,svg"));
+      if (feedChildren.length) return feedChildren;
+      return queryAll('main article, [role="main"] article, article, main [role="article"], [role="main"] [role="article"], [aria-posinset], main section, [role="main"] section')
+        .filter(visible)
+        .filter((el) => cleanText(el.innerText || el.textContent || "").length >= 2 || el.querySelector("img,video,canvas,svg"));
+    };
+    const skeletonCount = () => queryAll('[aria-busy="true"], [role="progressbar"], [data-visualcompletion="loading-state"], .skeleton, [class*="skeleton" i], [class*="loading" i]')
+      .filter(visible)
+      .length;
+    const sample = () => {
+      const root = opts.selector ? document.querySelector(opts.selector) : (document.body || document.documentElement);
+      const selectorVisible = opts.selector ? visible(root) : true;
+      const rootText = cleanText(root?.innerText || root?.textContent || "");
+      const bodyText = cleanText(document.body?.innerText || document.body?.textContent || "");
+      const cards = visibleCardElements();
+      const images = [...document.images];
+      const completeImages = images.filter((img) => img.complete && img.naturalWidth > 0).length;
+      const skeletons = skeletonCount();
+      return {
+        url: location.href,
+        title: document.title,
+        readyState: document.readyState,
+        visibility: document.visibilityState,
+        hasFocus: document.hasFocus(),
+        selector: opts.selector || undefined,
+        selectorVisible,
+        textMatched: opts.text ? bodyText.includes(opts.text) || rootText.includes(opts.text) : undefined,
+        textChars: bodyText.length,
+        rootTextChars: rootText.length,
+        cardCount: cards.length,
+        minCards: opts.minCards,
+        skeletonCount: skeletons,
+        images: images.length,
+        completeImages,
+        scrollHeight: Math.round(document.documentElement?.scrollHeight || document.body?.scrollHeight || 0),
+      };
+    };
+    const criteriaMet = (s) => {
+      if (!["interactive", "complete"].includes(s.readyState)) return false;
+      if (opts.selector && !s.selectorVisible) return false;
+      if (opts.text && !s.textMatched) return false;
+      if (opts.minCards > 0 && s.cardCount < opts.minCards) return false;
+      if (opts.noSkeletons && s.skeletonCount > 0) return false;
+      if (!opts.selector && !opts.text && opts.minCards <= 0 && s.textChars < 40 && s.cardCount < 1) return false;
+      return true;
+    };
+    const signatureFor = (s) => JSON.stringify({
+      textChars: s.textChars,
+      rootTextChars: s.rootTextChars,
+      cardCount: s.cardCount,
+      skeletonCount: s.skeletonCount,
+      images: s.images,
+      completeImages: s.completeImages,
+      scrollHeight: s.scrollHeight,
+    });
+    let last = sample();
+    let lastSignature = "";
+    let stableSince = 0;
+    while (Date.now() <= deadline) {
+      last = sample();
+      const signature = signatureFor(last);
+      if (signature !== lastSignature) {
+        lastSignature = signature;
+        stableSince = Date.now();
+      }
+      const stableForMs = Date.now() - stableSince;
+      const stable = !opts.visualStable || stableForMs >= opts.stableMs;
+      if (criteriaMet(last) && stable) {
+        return JSON.stringify({
+          ready: true,
+          ...last,
+          criteria: {
+            selector: opts.selector || undefined,
+            text: opts.text || undefined,
+            minCards: opts.minCards || undefined,
+            noSkeletons: opts.noSkeletons || undefined,
+            visualStable: opts.visualStable || undefined,
+            stableMs: opts.visualStable ? opts.stableMs : undefined,
+            foregroundRequested: opts.foregroundRequested || undefined,
+          },
+          stableForMs,
+          timeoutMs,
+        });
+      }
+      await sleep(100);
+    }
+    throw new Error("Timed out waiting for ready content: " + JSON.stringify({
+      ...last,
+      criteria: {
+        selector: opts.selector || undefined,
+        text: opts.text || undefined,
+        minCards: opts.minCards || undefined,
+        noSkeletons: opts.noSkeletons || undefined,
+        visualStable: opts.visualStable || undefined,
+      },
+      timeoutMs,
+    }));
+  }`;
+}
+
+function deviceScreenshotMetricsFunction() {
+  return `() => ({
+    url: location.href,
+    title: document.title,
+    innerWidth,
+    innerHeight,
+    devicePixelRatio,
+    visualViewport: {
+      width: visualViewport?.width,
+      height: visualViewport?.height,
+      scale: visualViewport?.scale
+    }
+  })`;
+}
+
+function formatReadyContentSummary(ready = {}) {
+  const criteria = ready.criteria ?? {};
+  const lines = [
+    `ready content: ${ready.ready ? "yes" : "no"}`,
+    ready.url ? `url: ${ready.url}` : "",
+    `state: readyState=${ready.readyState ?? "unknown"} visibility=${ready.visibility ?? "unknown"} focus=${ready.hasFocus === true ? "yes" : "no"}`,
+    criteria.selector ? `selector: ${criteria.selector} visible=${ready.selectorVisible === true ? "yes" : "no"}` : "",
+    criteria.text ? `text: ${criteria.text} matched=${ready.textMatched === true ? "yes" : "no"}` : "",
+    criteria.minCards ? `cards: ${ready.cardCount ?? 0}/${criteria.minCards}` : `cards: ${ready.cardCount ?? 0}`,
+    `text chars: body=${ready.textChars ?? 0} root=${ready.rootTextChars ?? 0}`,
+    `loading markers: ${ready.skeletonCount ?? 0}`,
+    `images: ${ready.completeImages ?? 0}/${ready.images ?? 0}`,
+    criteria.visualStable ? `stable: ${ready.stableForMs ?? 0}ms/${criteria.stableMs ?? 0}ms` : "",
+    criteria.foregroundRequested && ready.hasFocus === false
+      ? "note: tab was activated for browser automation, but document.hasFocus() is still false; this can mean the OS window is not frontmost."
+      : "",
+  ];
+  return lines.filter(Boolean).join("\n");
 }
 
 function waitForNetworkIdleFunction(timeoutMs) {
@@ -10344,6 +12059,7 @@ async function runSelfTest() {
   new Function(`return ${linksReadFunction({ filter: "docs", limit: "3", visible: true })}`)();
   new Function(`return ${linkReadBodyFunction({ textFilter: "docs", hrefFilter: "guide" })}`)();
   new Function(`return ${waitForSelectorFunction("main", 1000, { visible: true })}`)();
+  new Function(`return ${waitForReadyContentFunction("Loaded", 1000, { selector: "main", minCards: "2", visualStable: true })}`)();
   assertSelfTest(
     waitForTextFunction("Example Group", 1000, { visible: true, selector: "main" }).includes("visible text"),
     "wait text supports visible scoped reads",
@@ -10371,6 +12087,29 @@ async function runSelfTest() {
   assertSelfTest(parsedBackgroundOpen.flags.front !== true, "open defaults to background mode");
   const parsedForegroundOpen = parseArgv(["open", "https://example.com", "--front"]);
   assertSelfTest(parsedForegroundOpen.flags.front === true, "open --front opts into focus");
+  const parsedForegroundReadyOpen = parseArgv([
+    "open",
+    "https://example.com",
+    "--foreground-until-ready",
+    "--selector",
+    "main",
+    "--min-cards",
+    "3",
+    "--ready-text",
+    "Loaded",
+    "--visual-stable",
+    "--no-skeletons",
+  ]);
+  assertSelfTest(
+    parsedForegroundReadyOpen.flags.foregroundUntilReady === true &&
+      parsedForegroundReadyOpen.flags.front === true &&
+      parsedForegroundReadyOpen.flags.selector === "main" &&
+      parsedForegroundReadyOpen.flags.minCards === "3" &&
+      parsedForegroundReadyOpen.flags.readyText === "Loaded" &&
+      parsedForegroundReadyOpen.flags.visualStable === true &&
+      parsedForegroundReadyOpen.flags.noSkeletons === true,
+    "parser handles foreground readiness flags",
+  );
   const parsedHeadlessOpen = parseArgv(["open", "https://example.com", "--anonymous", "--headless"]);
   assertSelfTest(parsedHeadlessOpen.flags.headless === true, "parser handles headless flag");
   const parsedHeadedOpen = parseArgv(["open", "https://example.com", "--anonymous", "--headed"]);
@@ -10478,6 +12217,34 @@ async function runSelfTest() {
   }
   assertSelfTest(parseViewportSize("390x844").width === 390, "viewport parser reads width");
   assertSelfTest(parseViewportSize("390x844").height === 844, "viewport parser reads height");
+  const parsedDeviceScreenshots = parseArgv([
+    "device-screenshots",
+    "https://example.com/app",
+    "tmp/app",
+    "--devices",
+    "desktop:1440x900,phone:390x844",
+    "--settle-ms",
+    "250",
+    "--mobile-emulation",
+    "--target-id",
+    "ABC",
+  ]);
+  assertSelfTest(parsedDeviceScreenshots.command === "device-screenshots", "parser handles device-screenshots command");
+  assertSelfTest(parsedDeviceScreenshots.flags.devices === "desktop:1440x900,phone:390x844", "parser handles device screenshot devices flag");
+  assertSelfTest(parsedDeviceScreenshots.flags.settleMs === "250", "parser handles device screenshot settle-ms flag");
+  assertSelfTest(parsedDeviceScreenshots.flags.mobileEmulation === true, "parser handles device screenshot mobile-emulation flag");
+  assertSelfTest(parsedDeviceScreenshots.flags.targetId === "ABC", "parser handles target-id flag");
+  const parsedDeviceViewportsAlias = parseArgv(["responsive-exact", "tmp/app", "--viewports=desktop=1440x900;mobile=390x844"]);
+  assertSelfTest(parsedDeviceViewportsAlias.flags.devices === "desktop=1440x900;mobile=390x844", "parser handles device screenshot viewports alias");
+  const deviceViewports = parseDeviceScreenshotViewports("Desktop:1440x900,phone=390x844");
+  assertSelfTest(deviceViewports[0].name === "desktop" && deviceViewports[0].width === 1440, "device viewport parser handles named colon specs");
+  assertSelfTest(deviceViewports[1].name === "phone" && deviceViewports[1].height === 844, "device viewport parser handles named equals specs");
+  assertSelfTest(deviceScreenshotMobileMode(deviceViewports[1], { mobileEmulation: true }) === true, "mobile-emulation applies to phone-like device names");
+  assertSelfTest(deviceScreenshotMobileMode(deviceViewports[0], { mobileEmulation: true }) === false, "mobile-emulation does not apply to desktop-like device names");
+  assertSelfTest(deviceScreenshotMobileMode(deviceViewports[0], { mobile: true }) === true, "mobile flag forces device mobile mode");
+  assertSelfTest(resolveDeviceScreenshotsTarget(["https://example.com/app", "tmp/app"]).targetUrl === "https://example.com/app", "device screenshots target parser accepts explicit URL");
+  assertSelfTest(resolveDeviceScreenshotsTarget(["tmp/app"]).prefix.endsWith(path.join("tmp", "app")), "device screenshots target parser accepts prefix-only mode");
+  assertSelfTest(handleAwareCommands().has("responsive-exact"), "device screenshot aliases can consume handles");
   assertSelfTest(
     profileDirForMode(DEDICATED_MODE, { session: "codex-a" }) !== profileDirForMode(DEDICATED_MODE, { session: "codex-b" }),
     "named dedicated sessions use isolated managed profiles",
@@ -10741,6 +12508,23 @@ async function runSelfTest() {
     "daemon capability check covers visible selector waits",
   );
   assertSelfTest(
+    requiredCapabilitiesForPayload({ command: "wait-ready", args: [] }).has("foreground-readiness"),
+    "daemon capability check covers wait-ready",
+  );
+  assertSelfTest(
+    requiredCapabilitiesForPayload({ command: "open", args: [], flags: { foregroundUntilReady: true } }).has("foreground-readiness"),
+    "daemon capability check covers foreground readiness opens",
+  );
+  assertSelfTest(
+    requiredCapabilitiesForPayload({ command: "device-screenshots", args: [] }).has("device-screenshots"),
+    "daemon capability check covers device screenshots",
+  );
+  assertSelfTest(isDeviceScreenshotsCommand("responsive-exact") === true, "device screenshot aliases share the compatibility path");
+  assertSelfTest(
+    isMissingDaemonCapabilityError(new Error("does not support device-screenshots needed by device-screenshots"), "device-screenshots") === true,
+    "missing capability detection recognizes device screenshots",
+  );
+  assertSelfTest(
     requiredCapabilitiesForPayload({ command: "js", args: ["document.body.innerText"], flags: { raw: true } }).has("bounded-raw-output"),
     "daemon capability check covers bounded raw eval output",
   );
@@ -10777,6 +12561,11 @@ async function runSelfTest() {
   assertSelfTest(selectPayload.command === "open" && selectPayload.flags.select === true, "open --select stays daemon-owned");
   const foregroundPayload = daemonPayloadForCommand(parsedForegroundOpen.command, parsedForegroundOpen.args, parsedForegroundOpen.flags);
   assertSelfTest(foregroundPayload.command === "open" && foregroundPayload.flags.front === true, "open --front stays daemon-owned");
+  const foregroundReadyPayload = daemonPayloadForCommand(parsedForegroundReadyOpen.command, parsedForegroundReadyOpen.args, parsedForegroundReadyOpen.flags);
+  assertSelfTest(
+    foregroundReadyPayload.command === "open" && foregroundReadyPayload.flags.foregroundUntilReady === true,
+    "open --foreground-until-ready stays daemon-owned",
+  );
   const anonymousPayload = daemonPayloadForCommand(parsedAnonymousOpen.command, parsedAnonymousOpen.args, parsedAnonymousOpen.flags);
   assertSelfTest(anonymousPayload.command === "open", "anonymous open is handled by daemon to preserve incognito context");
   const anonymousFollowupPayload = daemonPayloadForCommand(
