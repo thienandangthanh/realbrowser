@@ -358,6 +358,8 @@ const CLI_COMMAND_GROUPS = [
 ];
 
 const HIDDEN_CLI_COMMANDS = [
+  { name: "help", usage: "realbrowser help [command]", summary: "Show realbrowser help." },
+  { name: "version", usage: "realbrowser version", summary: "Print the realbrowser CLI version." },
   { name: "daemon", usage: "realbrowser daemon" },
   { name: "self-test", usage: "realbrowser self-test" },
 ];
@@ -594,12 +596,9 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--version",
 ]);
 
-const COMMAND_ARGUMENT_OPTION_TOKENS = new Set([
-  "--accept",
-  "--dismiss",
-  "--domcontentloaded",
-  "--load",
-  "--networkidle",
+const COMMAND_ARGUMENT_OPTION_TOKENS_BY_COMMAND = new Map([
+  ["dialog", new Set(["--accept", "--dismiss"])],
+  ["wait", new Set(["--domcontentloaded", "--load", "--networkidle"])],
 ]);
 
 const KNOWN_FLAG_NAMES = new Set([
@@ -630,23 +629,51 @@ function isOptionLike(token) {
   return text.startsWith("--") || /^-[A-Za-z]/.test(text);
 }
 
+function argvBeforeDoubleDash(argv) {
+  const marker = argv.indexOf("--");
+  return marker === -1 ? argv : argv.slice(0, marker);
+}
+
 function outputFlagsFromArgv(argv) {
+  const controlArgv = argvBeforeDoubleDash(argv);
   const output = process.env.REALBROWSER_OUTPUT;
   return {
-    json: argv.includes("--json"),
-    quiet: argv.includes("-q") || argv.includes("--quiet") || output === "quiet",
-    raw: argv.includes("--raw") || output === "raw",
-    verbose: argv.includes("--verbose") || output === "verbose",
+    json: controlArgv.includes("--json"),
+    quiet: controlArgv.includes("-q") || controlArgv.includes("--quiet") || output === "quiet",
+    raw: controlArgv.includes("--raw") || output === "raw",
+    verbose: controlArgv.includes("--verbose") || output === "verbose",
   };
 }
 
+function positionalTokensFromArgv(argv) {
+  const tokens = [];
+  const controlArgv = argvBeforeDoubleDash(argv);
+  for (let index = 0; index < controlArgv.length; index += 1) {
+    const arg = controlArgv[index];
+    if (isOptionLike(arg)) {
+      const name = flagName(arg);
+      if (FLAG_VALUE_NAMES.has(name) && !arg.includes("=")) {
+        const next = controlArgv[index + 1];
+        if (next !== undefined && !isOptionLike(next)) {
+          index += 1;
+        }
+      }
+      continue;
+    }
+    tokens.push(arg);
+  }
+  return tokens;
+}
+
 function validateArgv(argv) {
+  const commandName = positionalTokensFromArgv(argv)[0] ?? "";
+  const allowedCommandTokens = COMMAND_ARGUMENT_OPTION_TOKENS_BY_COMMAND.get(commandName) ?? new Set();
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") {
       return;
     }
-    if (!isOptionLike(arg) || COMMAND_ARGUMENT_OPTION_TOKENS.has(arg)) {
+    if (!isOptionLike(arg) || allowedCommandTokens.has(arg)) {
       continue;
     }
     const name = flagName(arg);
@@ -678,15 +705,7 @@ function parseHelpArgv(argv) {
     ...outputFlagsFromArgv(argv),
     help: true,
   };
-  const positional = [];
-  for (const token of argv) {
-    if (token === "--") {
-      break;
-    }
-    if (token === "help" || !isOptionLike(token)) {
-      positional.push(token);
-    }
-  }
+  const positional = positionalTokensFromArgv(argv);
   if (positional[0] === "help") {
     return { command: "help", args: positional[1] ? [positional[1]] : [], flags };
   }
@@ -694,11 +713,12 @@ function parseHelpArgv(argv) {
 }
 
 function parseArgv(argv) {
-  const wantsHelp = argv.includes("--help") || argv.includes("-h") || argv[0] === "help";
+  const controlArgv = argvBeforeDoubleDash(argv);
+  const wantsHelp = controlArgv.includes("--help") || controlArgv.includes("-h") || controlArgv[0] === "help";
   if (wantsHelp) {
     return parseHelpArgv(argv);
   }
-  if (argv.includes("--version")) {
+  if (controlArgv.includes("--version")) {
     return {
       command: "version",
       args: [],
@@ -715,15 +735,13 @@ function parseArgv(argv) {
   validateArgv(argv);
   const args = [];
   const flags = { json: false, deep: false, full: false, verbose: false };
+  const commandName = positionalTokensFromArgv(argv)[0] ?? "";
+  const allowedCommandTokens = COMMAND_ARGUMENT_OPTION_TOKENS_BY_COMMAND.get(commandName) ?? new Set();
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") {
       args.push(...argv.slice(index + 1));
       break;
-    } else if (arg === "-h" || arg === "--help") {
-      flags.help = true;
-    } else if (arg === "--version") {
-      flags.version = true;
     } else if (arg === "--json") {
       flags.json = true;
     } else if (arg === "-q" || arg === "--quiet") {
@@ -1009,7 +1027,7 @@ function parseArgv(argv) {
       flags.downloadDir = argv[++index];
     } else if (arg?.startsWith("--download-dir=")) {
       flags.downloadDir = arg.slice("--download-dir=".length);
-    } else if (COMMAND_ARGUMENT_OPTION_TOKENS.has(arg)) {
+    } else if (allowedCommandTokens.has(arg)) {
       args.push(arg);
     } else if (isOptionLike(arg)) {
       throw usageError(`Unknown flag: ${flagName(arg)}`);
@@ -1023,9 +1041,8 @@ function parseArgv(argv) {
     if (envOutput === "verbose") flags.verbose = true;
     if (envOutput === "quiet") flags.quiet = true;
   }
-  let command = args[0] ?? "help";
-  let commandArgs = args.slice(1);
-  return { command, args: commandArgs, flags };
+  const command = args[0] ?? "help";
+  return { command, args: args.slice(1), flags };
 }
 
 function stateFileFromFlags(flags = {}) {
@@ -7841,21 +7858,31 @@ function runSelfTest() {
   assertSelfTest(parsedLiteralFlag.command === "type", "parser handles command before -- sentinel");
   assertSelfTest(parsedLiteralFlag.args.join(" ") === "--raw literal text", "parser preserves literal flag-like arguments after --");
   assertSelfTest(parsedLiteralFlag.flags.raw !== true, "parser does not parse flags after --");
+  const parsedLiteralVersion = parseArgv(["type", "--", "--version"]);
+  assertSelfTest(parsedLiteralVersion.command === "type", "parser does not treat literal --version as global version");
+  assertSelfTest(parsedLiteralVersion.args[0] === "--version", "parser preserves literal --version after --");
 
   const parsedJson = parseArgv(["chain", '[["type","hello world"],["press","Enter"]]']);
   assertSelfTest(parsedJson.args[0].includes("hello world"), "parser preserves JSON arguments with spaces");
+  const parsedPrefixedClaimHelp = parseArgv(["--session", "work", "claim", "--help"]);
+  assertSelfTest(parsedPrefixedClaimHelp.command === "claim" && parsedPrefixedClaimHelp.flags.help === true, "parser supports global flags before subcommand help");
   const parsedClaimHelp = parseArgv(["claim", "--help"]);
   assertSelfTest(parsedClaimHelp.command === "claim" && parsedClaimHelp.flags.help === true, "parser supports subcommand help flags");
   const parsedMalformedClaimHelp = parseArgv(["claim", "--session", "--help"]);
   assertSelfTest(parsedMalformedClaimHelp.command === "claim" && parsedMalformedClaimHelp.flags.help === true, "help stays side-effect-free after malformed flags");
   const parsedHelpCommand = parseArgv(["help", "claim"]);
   assertSelfTest(parsedHelpCommand.command === "help" && parsedHelpCommand.args[0] === "claim", "parser supports help subcommand");
+  const parsedHelpVersion = parseArgv(["help", "version"]);
+  assertSelfTest(parsedHelpVersion.command === "help" && parsedHelpVersion.args[0] === "version", "parser supports help for version");
   const parsedVersion = parseArgv(["--version"]);
   assertSelfTest(parsedVersion.flags.version === true, "parser supports version flag");
+  assertSelfTestThrows(() => parseArgv(["claim", "--accept"]), "command-owned argument tokens fail on unrelated commands");
   assertSelfTestThrows(() => parseArgv(["claim", "--hanlde", "ninzap"]), "unknown flags fail before daemon startup");
   assertSelfTestThrows(() => parseArgv(["claim", "--session"]), "missing flag values fail before daemon startup");
   const parsedWaitNetworkIdle = parseArgv(["wait", "--networkidle"]);
   assertSelfTest(parsedWaitNetworkIdle.args[0] === "--networkidle", "parser preserves wait readiness tokens");
+  const parsedDialogAccept = parseArgv(["dialog", "--accept", "ok"]);
+  assertSelfTest(parsedDialogAccept.args.join(" ") === "--accept ok", "parser preserves dialog action tokens");
   const parsedEmulateNetwork = parseArgv(["emulate", "--network", "Offline"]);
   assertSelfTest(parsedEmulateNetwork.flags.network === "Offline", "parser supports emulate network values");
   assertSelfTestThrows(() => validateCommandArgs("click", []), "missing positional args fail before daemon startup");
