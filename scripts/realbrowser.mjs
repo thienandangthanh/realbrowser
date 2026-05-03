@@ -257,10 +257,10 @@ const CLI_COMMAND_GROUPS = [
     title: "Daily workflow",
     commands: [
       { name: "status", usage: "realbrowser status [--deep] [--json]", summary: "Show current daemon and Chrome control state." },
-      { name: "claim", aliases: ["claim-tab", "handle-claim"], usage: "realbrowser claim [url] [--handle-out <path>|--handle-name <name>] [--session <name>] [--json]", summary: "Claim a tab and write a reusable handle." },
+      { name: "claim", aliases: ["claim-tab", "handle-claim"], usage: "realbrowser claim [url] [--handle-out <path>|--handle-name <name>] [--force] [--session <name>] [--json]", summary: "Claim a tab and write a reusable handle." },
       { name: "handles", aliases: ["list-handles", "handle-list"], usage: "realbrowser handles [--json]", summary: "List saved tab handles." },
       { name: "release-handle", aliases: ["handle-release", "delete-handle"], usage: "realbrowser release-handle <path-or-name> [--json]", summary: "Delete a saved tab handle.", minArgs: 1 },
-      { name: "mobile-screenshot", usage: "realbrowser mobile-screenshot [url] [path] [--viewport <WxH>] [--handle <path-or-name>] [--handle-out <path>] [--session <name>]", summary: "Capture a page-scoped mobile screenshot with dimension checks.", handle: true },
+      { name: "mobile-screenshot", usage: "realbrowser mobile-screenshot [url] [path] [--viewport <WxH>] [--handle <path-or-name>] [--handle-out <path>] [--force] [--session <name>]", summary: "Capture a page-scoped mobile screenshot with dimension checks.", handle: true },
       { name: "screenshot", usage: "realbrowser screenshot [path] [--full|--full-page] [--uid <uid>] [--labels|--annotate] [--format png|jpeg|webp] [--quality <0-100>] [--max-side <px>] [--max-bytes <bytes|5mb>] [--raw-size|--no-normalize] [--page <id>]", summary: "Capture a screenshot.", handle: true },
       { name: "observe", usage: "realbrowser observe [--screenshot] [--limit <n>] [--max-chars <n>] [--page <id>] [--json]", summary: "Read a compact page observation.", handle: true },
       { name: "snapshot", aliases: ["accessibility"], usage: "realbrowser snapshot [--page <id>] [--efficient] [--interactive] [--compact] [--depth <n>] [--max-chars <n>] [--max-nodes <n>] [--labels|--annotate] [--out <path>] [--raw|--verbose] [--json]", summary: "Read the accessibility tree.", handle: true },
@@ -277,7 +277,7 @@ const CLI_COMMAND_GROUPS = [
       { name: "clear-session", aliases: ["session-clear", "clear-active-session"], usage: "realbrowser clear-session [--json]", summary: "Clear the active session pointer." },
       { name: "find-tab", aliases: ["tabs-all", "search-tabs"], usage: "realbrowser find-tab [query] [--browser <key>] [--all-sessions] [--json]", summary: "Search tabs across browser/session inventory." },
       { name: "select-tab", aliases: ["attach-tab"], usage: "realbrowser select-tab <query> [--browser <key>] [--all-sessions] [--front] [--no-activate-session] [--json]", summary: "Select a matching tab for automation.", minArgs: 1 },
-      { name: "open-profile", aliases: ["profile-open"], usage: "realbrowser open-profile <profile-query> <url> [--browser <key>] [--select] [--front] [--json]", summary: "Open a URL in a specific browser UI profile.", minArgs: 2 },
+      { name: "open-profile", aliases: ["profile-open"], usage: "realbrowser open-profile <profile-query> <url> [--browser <key>] [--select] [--no-fallback] [--timeout <ms>] [--front] [--json]", summary: "Open a URL in a specific browser UI profile.", minArgs: 2 },
       { name: "cleanup-remote-debugging", aliases: ["cleanup"], usage: "realbrowser cleanup-remote-debugging [--allow-attach] [--json]", summary: "Turn off Chrome remote-debugging when possible." },
       { name: "stop", aliases: ["detach"], usage: "realbrowser stop|detach [--all-sessions] [--dismiss-banner] [--cleanup-remote-debugging] [--json]", summary: "Stop realbrowser session state." },
     ],
@@ -286,7 +286,7 @@ const CLI_COMMAND_GROUPS = [
     title: "Navigation and page actions",
     commands: [
       { name: "tabs", usage: "realbrowser tabs [--json]", summary: "List pages in the current session." },
-      { name: "open", aliases: ["newtab"], usage: "realbrowser open <url> [--front] [--anonymous|--profile <profile-query>] [--browser <key>] [--select] [--json]", summary: "Open a URL.", handle: false, minArgs: 1 },
+      { name: "open", aliases: ["newtab"], usage: "realbrowser open <url> [--front] [--anonymous|--profile <profile-query>] [--browser <key>] [--select] [--no-fallback] [--timeout <ms>] [--json]", summary: "Open a URL.", handle: false, minArgs: 1 },
       { name: "navigate", aliases: ["goto"], usage: "realbrowser navigate <url> [--page <id>]", summary: "Navigate the selected page.", handle: true, minArgs: 1 },
       { name: "back", usage: "realbrowser back [--page <id>]", summary: "Navigate back.", handle: true },
       { name: "forward", usage: "realbrowser forward [--page <id>]", summary: "Navigate forward.", handle: true },
@@ -392,6 +392,7 @@ const CLI_GLOBAL_FLAGS = [
   "--reload",
   "--duration <ms>",
   "--har <path>",
+  "--timeout <ms>",
   "-o, --output <path>",
   "--out <path>",
   "--no-network",
@@ -1321,12 +1322,18 @@ function readJsonSync(file) {
   }
 }
 
-async function writeJson(file, value, mode = 0o600) {
+async function writeJson(file, value, mode = 0o600, options = {}) {
   const dir = path.dirname(file);
   await fsp.mkdir(dir, { recursive: true });
+  const body = `${JSON.stringify(value, null, 2)}\n`;
+  if (options.overwrite === false) {
+    await fsp.writeFile(file, body, { mode, flag: "wx" });
+    await fsp.chmod(file, mode).catch(() => {});
+    return;
+  }
   const tempFile = path.join(dir, `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`);
   try {
-    await fsp.writeFile(tempFile, `${JSON.stringify(value, null, 2)}\n`, { mode });
+    await fsp.writeFile(tempFile, body, { mode });
     await fsp.chmod(tempFile, mode).catch(() => {});
     await fsp.rename(tempFile, file);
     await fsp.chmod(file, mode).catch(() => {});
@@ -1819,7 +1826,7 @@ async function runCli() {
     return;
   }
   if (command === "self-test") {
-    runSelfTest();
+    await runSelfTest();
     return;
   }
   if (command === "daemon") {
@@ -2154,7 +2161,14 @@ async function writePageHandle({ state, flags, page, handlePath }) {
     createdAt: now,
     updatedAt: now,
   };
-  await writeJson(resolvedPath, handle);
+  try {
+    await writeJson(resolvedPath, handle, 0o600, { overwrite: flags.force === true });
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      throw usageError(`Handle already exists: ${resolvedPath}. Use --force to replace it, or choose a project-specific --handle-out path.`);
+    }
+    throw error;
+  }
   return {
     path: resolvedPath,
     session,
@@ -7684,7 +7698,7 @@ function sendJson(res, status, value) {
   res.end(body);
 }
 
-function runSelfTest() {
+async function runSelfTest() {
   const sampleSnapshot = {
     role: "RootWebArea",
     name: "Demo",
@@ -7754,6 +7768,37 @@ function runSelfTest() {
     stateFileFromHandle({ path: "handle", session: "named", stateFile: customHandleStateFile, pageId: 7 }) === customHandleStateFile,
     "handles prefer their recorded state file over a session label",
   );
+  const handleTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "realbrowser-handle-self-test-"));
+  try {
+    const selfTestHandlePath = path.join(handleTempDir, "handle.json");
+    const selfTestStateFile = path.join(handleTempDir, "state.json");
+    const selfTestState = { session: "self-test" };
+    const selfTestPage = { id: 1, url: "https://example.com/" };
+    await writePageHandle({
+      state: selfTestState,
+      flags: { stateFile: selfTestStateFile },
+      page: selfTestPage,
+      handlePath: selfTestHandlePath,
+    });
+    await assertSelfTestRejects(
+      () => writePageHandle({
+        state: selfTestState,
+        flags: { stateFile: selfTestStateFile },
+        page: selfTestPage,
+        handlePath: selfTestHandlePath,
+      }),
+      "handle writes do not silently overwrite existing handle files",
+    );
+    await writePageHandle({
+      state: selfTestState,
+      flags: { stateFile: selfTestStateFile, force: true },
+      page: { ...selfTestPage, id: 2 },
+      handlePath: selfTestHandlePath,
+    });
+    assertSelfTest(readJsonSync(selfTestHandlePath)?.pageId === 2, "handle writes allow explicit force replacement");
+  } finally {
+    fs.rmSync(handleTempDir, { recursive: true, force: true });
+  }
   const previousRealbrowserSession = process.env.REALBROWSER_SESSION;
   delete process.env.REALBROWSER_SESSION;
   assertSelfTest(
@@ -7799,6 +7844,12 @@ function runSelfTest() {
   assertSelfTest(parsedNetworkCapture.flags.duration === "15000", "parser handles capture duration");
   assertSelfTest(parsedNetworkCapture.flags.har === "example.har", "parser handles HAR path");
   assertSelfTest(parsedNetworkCapture.flags.reload === true, "parser handles reload flag");
+  const parsedNetworkGet = parseArgv(["network", "get", "12", "--request-file", "tmp/request.txt", "--response-file=tmp/response.txt", "--raw"]);
+  assertSelfTest(parsedNetworkGet.command === "network", "parser handles network get command");
+  assertSelfTest(parsedNetworkGet.args.join(" ") === "get 12", "parser preserves network get reqid");
+  assertSelfTest(parsedNetworkGet.flags.requestFile === "tmp/request.txt", "parser handles network request-file flag");
+  assertSelfTest(parsedNetworkGet.flags.responseFile === "tmp/response.txt", "parser handles network response-file flag");
+  assertSelfTest(parsedNetworkGet.flags.raw === true, "parser handles raw network get output");
   const parsedConsoleCapture = parseArgv(["capture-console", "https://example.com", "--anonymous", "--duration", "3000", "--out", "console.json", "--errors"]);
   assertSelfTest(parsedConsoleCapture.command === "capture-console", "parser handles capture-console command");
   assertSelfTest(parsedConsoleCapture.flags.out === "console.json", "parser handles console capture output path");
@@ -7971,6 +8022,15 @@ function assertSelfTest(condition, message) {
 function assertSelfTestThrows(fn, message) {
   try {
     fn();
+  } catch {
+    return;
+  }
+  throw new Error(`self-test failed: ${message}`);
+}
+
+async function assertSelfTestRejects(fn, message) {
+  try {
+    await fn();
   } catch {
     return;
   }

@@ -42,19 +42,26 @@ to that tab even when another Codex tab selects a different page in the same
 browser profile:
 
 ```bash
-"$REALBROWSER_CLI" claim https://ninzap.dev --session work-profile --handle-name ninzap --json
-export REALBROWSER_HANDLE=ninzap
+HANDLE="tmp/realbrowser-handles/ninzap-dev-mobile.json"
+"$REALBROWSER_CLI" claim https://ninzap.dev --session work-profile --handle-out "$HANDLE" --json
+export REALBROWSER_HANDLE="$HANDLE"
 "$REALBROWSER_CLI" screenshot tmp/ninzap.png
 "$REALBROWSER_CLI" viewport 390x844
 "$REALBROWSER_CLI" handles
-"$REALBROWSER_CLI" release-handle ninzap
+"$REALBROWSER_CLI" release-handle "$HANDLE"
 ```
 
 Prefer `claim` + `--handle`/`REALBROWSER_HANDLE` for daily automation. Use
 `select` only for manual handoff or single-agent interactive browsing. Handles
 are live references, not restartable bookmarks: if the recorded daemon is gone
 or the page is closed, reclaim the tab instead of letting the command start a
-fresh daemon and reuse a stale `pageId`.
+fresh daemon and reuse a stale `pageId`. In parallel Codex/iTerm tabs, prefer a
+project/task-specific `--handle-out` path under the repo, such as
+`tmp/realbrowser-handles/<project>-<task>.json`. Short global names from
+`--handle-name` live in `~/.realbrowser/handles/` and can collide across
+projects. Do not share or release the same handle from more than one active
+task. If you intentionally want to replace an existing handle file, pass
+`--force`.
 
 Viewport and screenshot operations are page-scoped in Chrome DevTools. When a
 task depends on an exact viewport, especially mobile screenshots, capture the
@@ -116,7 +123,7 @@ When the user asks to check a URL that may already be open, search existing debu
 "$REALBROWSER_CLI" observe
 ```
 
-`find-tab`/`tabs-all` enumerate tabs from every discovered DevTools endpoint and show matching URL/title plus possible profiles. `select-tab` attaches to the matching endpoint and selects the matching page when there is exactly one candidate. A unique selection becomes the active session; use plain follow-up commands unless you intentionally pass another `--session`. If several tabs match, do not guess; show the candidates and ask the user which one to use. If no tab is debuggable, open the URL with `open --profile <id> <url>`.
+`find-tab`/`tabs-all` enumerate tabs from every discovered DevTools endpoint and show matching URL/title plus possible profiles. `select-tab` attaches to the matching endpoint and selects the matching page when there is exactly one candidate. A unique selection becomes the active session; use plain follow-up commands unless you intentionally pass another `--session`. If several tabs match, do not guess; show the candidates and ask the user which one to use. If no tab is debuggable and login state matters, run `open --profile <id> <url> --select --no-fallback --timeout 15000`; stop and report the missing DevTools endpoint if that cannot attach. Do not continue in the dedicated fallback for authenticated admin pages.
 
 ## Anonymous Sessions And Network Capture
 
@@ -212,6 +219,25 @@ For performance/network requests, start capture before navigation or reload:
 
 `capture-network` records browser performance entries plus DevTools network rows, summarizes slow requests, large transfers, failed/error lines, render-blocking resources, top hosts, and navigation timing. It does not capture response bodies or auth headers. URLs in summaries redact query strings unless `--values` or `--raw` is passed; HAR files preserve full URLs because they are local artifacts.
 
+For cache, header, 304, ETag, `Cache-Control`, auth, or response-body conclusions,
+do not stop at the `capture-network` summary. Pin the proof to an exact current
+request row after the navigation/reload:
+
+```bash
+"$REALBROWSER_CLI" select-tab ninzap.dev --no-fallback
+"$REALBROWSER_CLI" network --clear --limit 200
+"$REALBROWSER_CLI" capture-network --reload --duration 8000 --har tmp/ninzap-cache.har
+"$REALBROWSER_CLI" network --filter "/api/cache-target" --limit 20
+"$REALBROWSER_CLI" network get <reqid> --request-file tmp/cache-target.request.txt --response-file tmp/cache-target.response.txt --raw
+```
+
+Use the `reqid` from the filtered current-page rows, then inspect the raw
+request detail plus the saved request/response files. `network --clear` only
+clears realbrowser's compact line buffer for the daemon; it is not proof by
+itself. Avoid `--preserve` for cache verdicts unless you are intentionally
+comparing previous navigations, because preserved DevTools rows can mix older
+requests with the current reload.
+
 For render bugs or requests like "check ninzap.dev console log to see what is the problem", capture console logs into an artifact the agent can analyze. Chrome DevTools Console can also show network failures when "Network messages" is enabled, so `capture-console` includes failed DevTools network rows by default; use `--no-network` only when the user needs JavaScript console messages alone.
 
 ```bash
@@ -248,12 +274,12 @@ REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dis
 - `active-session` / `current-session`: show the remembered active session and whether it is running.
 - `use-session <name> [--force]`: make a running named session the active session. `--force` only remembers the name before the daemon starts; normal use should not need it.
 - `clear-session`: forget the active session pointer without stopping any browser daemon.
-- `claim [url] [--handle-out <path>|--handle-name <name>]`: claim the selected page or open a URL and write a reusable tab handle containing `session + pageId`.
+- `claim [url] [--handle-out <path>|--handle-name <name>] [--force]`: claim the selected page or open a URL and write a reusable tab handle containing `session + pageId`. Existing handle files are not overwritten unless `--force` is passed.
 - `handles` / `list-handles`: list saved tab handles.
 - `release-handle <path-or-name>`: delete a saved tab handle without closing the browser tab.
 - `find-tab [query] [--browser <key>] [--session <name>|--all-sessions]` / `tabs-all [query]`: search existing debuggable tabs across discovered browser/profile endpoints and, with `--all-sessions`, running realbrowser sessions. Without `--all-sessions`, it also searches the active running session.
 - `select-tab <query> [--browser <key>] [--session <name>|--all-sessions] [--front] [--no-activate-session]`: attach to the endpoint for a unique matching existing tab and select it for later commands. A unique match activates its session unless `--no-activate-session` is passed. If the match is ambiguous, it prints candidates instead of selecting.
-- `open-profile <profile-query> <url> [--select]`: open a URL in a selected browser UI profile. Equivalent to `open <url> --profile <profile-query>`.
+- `open-profile <profile-query> <url> [--select] [--no-fallback] [--timeout <ms>]`: open a URL in a selected browser UI profile. Equivalent to `open <url> --profile <profile-query>`.
 - `capture-network [url] [--anonymous|--profile <profile-query>|--browser-url <url>] [--reload] [--duration <ms>] [--har <path>]`: capture network/performance data from a fresh navigation, reload, or current selected page. Use `--anonymous` for clean-state checks, `--profile` or `select-tab` for authenticated checks, and `--har` for a local HAR-style artifact.
 - `capture-console [url] [--anonymous|--profile <profile-query>] [--reload] [--duration <ms>] [--out <path>] [--errors] [--filter <text>] [--no-network]`: capture console logs from a fresh navigation, reload, or current selected page. It also includes failed network rows because Chrome DevTools shows those in the Console when "Network messages" is enabled. Use it for render failures and JavaScript errors; `--out` writes the detailed JSON artifact for later analysis.
 - `stop` / `detach`: stop the selected daemon and close realbrowser's MCP connection. With an active session, plain `detach` stops that active session; use `--session <name>` to stop a specific named session or `--all-sessions` to stop every running session. Do not detach real signed-in profile sessions as routine cleanup. Plain detach leaves Chrome remote debugging enabled and does not touch browser UI. Add `--dismiss-banner` only when the user explicitly wants a best-effort click on the visible automation banner `X`. Add `--cleanup-remote-debugging` only when the user explicitly wants Chrome's remote-debugging setting turned off too.
@@ -284,7 +310,7 @@ REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dis
 - `wait <text> [more text...] [--timeout <ms>] [--page <id>]`: wait until one text value appears. Use `wait --load`, `wait --domcontentloaded`, or `wait --networkidle` for page readiness checks.
 - `scroll [selector|uid] [--page <id>]`: scroll a selector/ref into view, or scroll to bottom.
 - `viewport <WxH|reset> [--page <id>]`: emulate viewport size without resizing the real Chrome window, or clear emulation.
-- `mobile-screenshot [url] [path] [--viewport <WxH>] [--handle <path-or-name>]`: page-scoped mobile screenshot flow with viewport, network-idle wait, raw-size capture, and PNG dimension verification.
+- `mobile-screenshot [url] [path] [--viewport <WxH>] [--handle <path-or-name>] [--handle-out <path>] [--force]`: page-scoped mobile screenshot flow with viewport, network-idle wait, raw-size capture, and PNG dimension verification. Existing handle output files are not overwritten unless `--force` is passed.
 - `emulate`: set or reset Chrome MCP emulation options such as network, CPU, user agent, color scheme, and geolocation.
 - `useragent <ua|reset>`: gstack-compatible shortcut for `emulate --user-agent`.
 - `cookie <name=value>`: set a cookie on the current page path.
@@ -330,10 +356,11 @@ Global flags:
 - `--select`: after profile-targeted `open`/`newtab`, wait for the matching debuggable tab, attach to its endpoint, and select it for follow-up commands.
 - `--anonymous`: use Chrome DevTools MCP isolated browser state. This is clean browser state, not network anonymity.
 - `--keep-anonymous`: keep the temporary anonymous profile directory after detach for debugging.
-- `--force`: only for commands that explicitly document it, such as `use-session --force`.
+- `--force`: only for commands that explicitly document it. For handle-writing commands, it intentionally replaces an existing handle file; for `use-session`, it remembers a session name before that daemon starts.
 - `--reload`: reload the selected page for commands such as `capture-network`.
 - `--duration <ms>`: capture or wait duration for commands such as `capture-network`.
 - `--har <path>`: write a local HAR-style network artifact for `capture-network`.
+- `--timeout <ms>`: bound waits for commands such as profile `open --select`, readiness waits, downloads, and capture commands.
 - `--out <path>`: write command output artifacts such as console capture JSON or large read results.
 - `--no-network`: on `capture-console`, skip DevTools network failure rows and capture JavaScript console messages only.
 - `--dedicated`: force the dedicated fallback profile.
@@ -345,9 +372,9 @@ Global flags:
 1. Start with `doctor` when setup is uncertain. For login-state tasks, verify the intended Chrome profile, enable Chrome remote debugging/CDP in `chrome://inspect/#remote-debugging`, and run with `--no-fallback`.
 2. If several profiles or anonymous sessions may be open, run `sessions` and `find-tab <url-or-title> --all-sessions` first. Use `select-tab <query> --all-sessions` only when there is a unique match; it activates that context, so follow-up commands can be plain `observe`, `snapshot`, `console`, `capture-network`, or `screenshot`.
 3. If the user asks for anonymous/clean mode, run `open <url> --anonymous --session <task-name> --select`, do the UI checks, and `detach --session <task-name>` when finished so the isolated session is closed. If the anonymous session should remain available for more checks, leave it running and mention that it is the active session.
-4. If the user asks for network/performance issues, prefer `capture-network <url> --anonymous` for clean-state checks or `select-tab`/`--profile` plus `capture-network --reload` for authenticated checks.
+4. If the user asks for network/performance issues, prefer `capture-network <url> --anonymous` for clean-state checks or `select-tab`/`--profile` plus `capture-network --reload` for authenticated checks. For cache, header, auth, 304, or body claims, follow with `network --filter ...` to identify the current `reqid`, then `network get <reqid> --request-file ... --response-file ... --raw`.
 5. If the user asks for console logs, JavaScript errors, or "what is the render problem", use `capture-console <url> --anonymous --out <file>` for clean-state checks or `select-tab`/`--profile` plus `capture-console --reload --out <file>` for authenticated checks. Feed the JSON artifact back into analysis.
-6. If a specific signed-in profile matters and no suitable tab is open, run `profiles`, choose a stable id, and open the target URL with `open --profile <id> <url>` before attaching.
+6. If a specific signed-in profile matters and no suitable tab is open, run `profiles`, choose a stable id, and open the target URL with `open --profile <id> <url> --select --no-fallback --timeout 15000`. Stop if no DevTools endpoint is available; do not fall back to the dedicated profile when cookies/login state are required.
 7. Use `tabs` before opening new pages if prior attempts may have left tabs around.
 8. Use `observe` first for page state; use `snapshot --efficient` only when you need clickable `uid` refs.
 9. Act only on current snapshot `uid` refs.
@@ -374,7 +401,8 @@ Global flags:
 - Use `scripts/realbrowser` on macOS/Linux; use `scripts\realbrowser.ps1` on Windows PowerShell; use `scripts\realbrowser.cmd` on `cmd.exe`; `node scripts\realbrowser.mjs` and the npm bin are portable fallbacks.
 - Real-browser attach is delegated to Chrome DevTools MCP. If auto-connect cannot attach to a real profile on any OS, retry with `--backend dev` only when existing cookies/login state are not required.
 - Remote-debugging metadata checks understand common Chrome, Chromium, Chrome Beta/Testing, Brave, Edge, Vivaldi, Linux Flatpak, and Windows user-data locations. Set `REALBROWSER_BROWSER_USER_DATA_DIR` or `REALBROWSER_CHROME_USER_DATA_DIR` when the profile root is custom.
-- Profile discovery and profile launching are cross-platform for common Chromium-family browsers. Profile launch uses Chrome's `--profile-directory` flag; attach commands use Chrome DevTools MCP/CDP and cannot switch profiles unless the selected profile exposes a DevTools endpoint. Browser-level endpoints may include tabs from multiple profiles, so tab selection remains mandatory.
+- Profile discovery and profile launching are cross-platform only on the OS where the target browser is installed and running. In split-host setups such as WSL, Parallels, Docker, SSH, or a Linux guest controlling a macOS/Windows host browser, the guest filesystem and `127.0.0.1` are not the host browser/profile by default. Run the host-side wrapper on the host OS, or connect to the host browser's forwarded CDP endpoint with `--browser-url <host-cdp-url>`. Stop and report the host/guest boundary if the endpoint is not reachable.
+- Profile launch uses Chrome's `--profile-directory` flag; attach commands use Chrome DevTools MCP/CDP and cannot switch profiles unless the selected profile exposes a DevTools endpoint. Browser-level endpoints may include tabs from multiple profiles, so tab selection remains mandatory.
 - Anonymous mode uses Chrome DevTools MCP isolated state by default. `--keep-anonymous` uses a temporary `userDataDir` for inspection after detach. Neither mode masks IP address, device/browser fingerprint, or network identity.
 - Network capture uses in-browser PerformanceResourceTiming plus DevTools request rows; it is designed for UI/performance triage, not full proxy-grade packet capture.
 - Banner-X dismissal is an opt-in best-effort desktop UI action via `detach --dismiss-banner`. The core detach flow remains portable because it does not require that UI automation to succeed, and it never disables CDP unless `--cleanup-remote-debugging` is explicitly passed.

@@ -17,6 +17,42 @@ The default Codex browser automation path is useful, but it is not enough for we
 
 Playwright is excellent for isolated automation, but this project is for the opposite case: debugging a real browser session with the same login and state the developer already has. Realbrowser uses Chrome DevTools MCP first, then adds small local wrappers for the operations Codex needs to move quickly.
 
+## Skill Architecture
+
+Realbrowser is a Codex skill first and a small CLI second. Keep the project thin,
+portable, and copyable:
+
+- `SKILL.md` contains the agent workflow and should stay concise.
+- `scripts/realbrowser.mjs` is the main zero-dependency implementation.
+- `scripts/realbrowser`, `scripts/realbrowser.cmd`, and
+  `scripts/realbrowser.ps1` are portability wrappers only.
+- `scripts/realbrowser-helper.mjs` is for small shell-pipeline helpers that keep
+  examples portable across macOS, Linux, and Windows.
+
+Prefer improving section boundaries inside `scripts/realbrowser.mjs` over
+splitting it into an app-style module tree. A larger tree makes the skill harder
+to copy, inspect, and run from a fresh Codex environment. Split code only when a
+boundary has become stable enough to justify the extra files, such as shared
+logic used by multiple scripts, a state/session store that needs isolated tests,
+or a protocol adapter that can be validated independently.
+
+Within the single file, prefer metadata-driven structure over scattered special
+cases. Commands should be described in the command registry, help and minimum
+argument validation should come from that metadata, parser edge cases should be
+validated before the daemon starts, and each CLI/state regression should add a
+self-test. This keeps the portable script maintainable without turning the skill
+into a full package.
+
+The intended internal order is:
+
+1. Constants, platform data, and profile definitions.
+2. Command registry, help text, parser, and validation.
+3. State, sessions, handles, and locking.
+4. Browser/profile discovery and launch.
+5. Daemon lifecycle and MCP RPC adapter.
+6. Command handlers.
+7. Output formatting and self-tests.
+
 ## Quick Start
 
 Requirements:
@@ -119,6 +155,9 @@ Realbrowser is designed to keep Codex token use low:
 - Use `snapshot --labels` or `screenshot --labels` for annotated screenshots.
 - `open` and `newtab` open background tabs by default; pass `--front` only for an explicit visual handoff.
 - Use `console --errors --limit 20` and `network --failed --limit 30`.
+- Use project-specific `--handle-out tmp/realbrowser-handles/<task>.json`
+  paths for parallel Codex tabs. Existing handle files are not overwritten
+  unless `--force` is passed.
 - Use `errors` and `requests` if you want OpenClaw-style aliases.
 - Use `chain --return summary --trace ~/.realbrowser/trace.json` for multi-step flows.
 - Use `--raw`, `--verbose`, `--max-chars`, or `--out <path>` only when the compact result is not enough.
@@ -156,7 +195,7 @@ Default output is intentionally compact for agent token efficiency. Use these wh
 ./scripts/realbrowser snapshot --raw
 ./scripts/realbrowser text --max-chars 50000
 ./scripts/realbrowser html --out /tmp/page.html
-./scripts/realbrowser network get 12 --response-file /tmp/response.json
+./scripts/realbrowser network get 12 --request-file /tmp/request.txt --response-file /tmp/response.json --raw
 REALBROWSER_OUTPUT=verbose ./scripts/realbrowser observe
 REALBROWSER_OUTPUT=raw ./scripts/realbrowser snapshot
 ```
@@ -186,6 +225,9 @@ Realbrowser is implemented in Node.js and is intended to run on macOS, Linux, an
 - Windows PowerShell should prefer `scripts\realbrowser.ps1`, which passes arguments as an array. `scripts\realbrowser.cmd` is available for `cmd.exe`; `node scripts\realbrowser.mjs` and the npm `realbrowser` bin also work.
 - Screenshot normalization is dependency-free and uses Chrome DevTools MCP capture/emulation calls, so no native image library is required.
 - Real-browser attach depends on Chrome DevTools MCP and the local browser's remote debugging support. If attach is unavailable, use `--backend dev` for the dedicated profile.
+- Profile discovery and `open --profile` run where the browser runs. In WSL,
+  Parallels, Docker, SSH, or other split-host setups, use the host-side wrapper
+  or connect to the host browser's forwarded CDP endpoint with `--browser-url`.
 - CDP download interception requires Node's built-in `WebSocket` support, available in current Node 22+ builds.
 - Screenshots, snapshots, console, network, JavaScript evaluation, clicks, typing, dialogs, and downloads are protocol-driven and do not require the browser window to be focused.
 
