@@ -13,7 +13,6 @@ file, run the task, and open references only when the task needs their detail.
 
 ```bash
 REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
-REALBROWSER_HELPER="$HOME/.codex/skills/realbrowser/scripts/realbrowser-helper.mjs"
 "$REALBROWSER_CLI" open https://example.com --anonymous --session task --select --timeout 20000
 "$REALBROWSER_CLI" --session task observe --max-chars 2000
 ```

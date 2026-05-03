@@ -30,8 +30,6 @@ portable, and copyable:
 - `scripts/realbrowser.mjs` is the main zero-dependency implementation.
 - `scripts/realbrowser`, `scripts/realbrowser.cmd`, and
   `scripts/realbrowser.ps1` are portability wrappers only.
-- `scripts/realbrowser-helper.mjs` is for small shell-pipeline helpers that keep
-  examples portable across macOS, Linux, and Windows.
 
 Prefer improving section boundaries inside `scripts/realbrowser.mjs` over
 splitting it into an app-style module tree. A larger tree makes the skill harder
@@ -268,7 +266,7 @@ Output modes:
 Realbrowser is implemented in Node.js and is intended to run on macOS, Linux, and Windows.
 
 - macOS and Linux can run `scripts/realbrowser` directly.
-- Windows PowerShell should prefer `scripts\realbrowser.ps1`, which passes arguments as an array. `scripts\realbrowser.cmd` is available for `cmd.exe`; `node scripts\realbrowser.mjs` and the npm `realbrowser` bin also work.
+- Windows PowerShell should prefer `scripts\realbrowser.ps1`, which passes arguments as an array. `scripts\realbrowser.cmd` is available for `cmd.exe`; `node scripts\realbrowser.mjs` also works.
 - Screenshot normalization is dependency-free and uses Chrome DevTools MCP capture/emulation calls, so no native image library is required.
 - Real-browser attach depends on Chrome DevTools MCP and the local browser's remote debugging support. If attach is unavailable, use `--backend dev` for the dedicated profile.
 - Profile discovery and `open --profile` run where the browser runs. In WSL,
@@ -280,10 +278,11 @@ Realbrowser is implemented in Node.js and is intended to run on macOS, Linux, an
 ## Verification
 
 ```bash
-npm test
+node --check scripts/realbrowser.mjs
+node scripts/realbrowser.mjs self-test
 ```
 
-The test script runs a syntax check and a small self-test for compact snapshots, truncation, and capped log output. Live browser smoke checks should additionally verify:
+These commands run a syntax check and a small self-test for compact snapshots, truncation, and capped log output. Live browser smoke checks should additionally verify:
 
 ```bash
 ./scripts/realbrowser doctor --deep

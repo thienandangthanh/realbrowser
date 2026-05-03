@@ -115,27 +115,18 @@ Do not trust `Emulating viewport: ...` alone.
 
 ```bash
 REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
-REALBROWSER_HELPER="$HOME/.codex/skills/realbrowser/scripts/realbrowser-helper.mjs"
 SESSION="site-check"
 OUTDIR="/tmp/site-shots"
 mkdir -p "$OUTDIR"
 
-PAGE=$("$REALBROWSER_CLI" --session "$SESSION" tabs --json | node "$REALBROWSER_HELPER" selected-page-id)
-
-for item in "desktop:1440x900" "tablet:768x1024" "mobile:390x844"; do
-  name=${item%%:*}
-  size=${item#*:}
-  out="$OUTDIR/inbox-$name.png"
-  "$REALBROWSER_CLI" --session "$SESSION" viewport "$size" --page "$PAGE"
-  "$REALBROWSER_CLI" --session "$SESSION" wait --networkidle --timeout 20000 --page "$PAGE"
-  "$REALBROWSER_CLI" --session "$SESSION" js "({url: location.href, innerWidth, innerHeight, devicePixelRatio, title: document.title})" --page "$PAGE"
-  "$REALBROWSER_CLI" --session "$SESSION" screenshot "$out" --raw-size --page "$PAGE"
-  node "$REALBROWSER_HELPER" png-size "$out"
-done
+"$REALBROWSER_CLI" --session "$SESSION" device-screenshots "$OUTDIR/inbox" \
+  --devices desktop:1440x900,tablet:768x1024,mobile:390x844 \
+  --raw-size \
+  --settle-ms 500
 ```
 
-Use `view_image` on the saved PNGs when available. If dimensions do not match,
-reapply `viewport ... --page <id>` and recapture.
+Use `view_image` on the saved PNGs when available. `device-screenshots`
+sets each viewport and verifies the captured PNG dimensions.
 
 ## Atomic Mobile Screenshot
 
@@ -155,30 +146,23 @@ network idle, captures a raw-size PNG, and verifies dimensions.
 SESSION="site-mobile"
 OUT="/tmp/site-mobile.png"
 
-"$REALBROWSER_CLI" open https://example.com --anonymous --session "$SESSION" --select --timeout 20000
-PAGE=$("$REALBROWSER_CLI" --session "$SESSION" tabs --json | node "$REALBROWSER_HELPER" selected-page-id)
-"$REALBROWSER_CLI" --session "$SESSION" viewport 390x844 --page "$PAGE"
-"$REALBROWSER_CLI" --session "$SESSION" wait --networkidle --timeout 20000 --page "$PAGE"
-"$REALBROWSER_CLI" --session "$SESSION" js "({innerWidth,innerHeight,devicePixelRatio})" --page "$PAGE"
-"$REALBROWSER_CLI" --session "$SESSION" screenshot "$OUT" --raw-size --page "$PAGE"
-node "$REALBROWSER_HELPER" png-size "$OUT"
+"$REALBROWSER_CLI" mobile-screenshot https://example.com "$OUT" \
+  --session "$SESSION" \
+  --anonymous \
+  --viewport 390x844
 ```
 
 ## PowerShell Equivalent
 
 ```powershell
 $RealbrowserCli = Join-Path $HOME ".codex/skills/realbrowser/scripts/realbrowser.ps1"
-$RealbrowserHelper = Join-Path $HOME ".codex/skills/realbrowser/scripts/realbrowser-helper.mjs"
 $Session = "site-mobile"
 $Out = "/tmp/site-mobile.png"
 
-& $RealbrowserCli open https://example.com --anonymous --session $Session --select --timeout 20000
-$Page = & $RealbrowserCli --session $Session tabs --json | node $RealbrowserHelper selected-page-id
-& $RealbrowserCli --session $Session viewport 390x844 --page $Page
-& $RealbrowserCli --session $Session wait --networkidle --timeout 20000 --page $Page
-& $RealbrowserCli --session $Session js "({innerWidth,innerHeight,devicePixelRatio})" --page $Page
-& $RealbrowserCli --session $Session screenshot $Out --raw-size --page $Page
-node $RealbrowserHelper png-size $Out
+& $RealbrowserCli mobile-screenshot https://example.com $Out `
+  --session $Session `
+  --anonymous `
+  --viewport 390x844
 ```
 
 ## Screenshot Command Notes

@@ -549,6 +549,27 @@ function validateCommandArgs(commandName, args) {
   }
 }
 
+function applyModeFlag(flags, mode) {
+  flags.mode = mode;
+  if (flags.mode === "efficient") {
+    flags.efficient = true;
+  } else if (flags.mode === "raw") {
+    flags.raw = true;
+  } else if (flags.mode === "verbose") {
+    flags.verbose = true;
+  }
+}
+
+function applyBackendFlag(flags, backend) {
+  flags.backend = backend;
+  if (flags.backend === "dev" || flags.backend === "dedicated") {
+    flags.dedicated = true;
+  }
+  if (flags.backend === "real" || flags.backend === "auto") {
+    flags.dedicated = false;
+  }
+}
+
 const FLAG_VALUE_NAMES = new Set([
   "-d",
   "-o",
@@ -948,23 +969,9 @@ function parseArgv(argv) {
     } else if (arg?.startsWith("--trace=")) {
       flags.trace = arg.slice("--trace=".length);
     } else if (arg === "--mode") {
-      flags.mode = argv[++index];
-      if (flags.mode === "efficient") {
-        flags.efficient = true;
-      } else if (flags.mode === "raw") {
-        flags.raw = true;
-      } else if (flags.mode === "verbose") {
-        flags.verbose = true;
-      }
+      applyModeFlag(flags, argv[++index]);
     } else if (arg?.startsWith("--mode=")) {
-      flags.mode = arg.slice("--mode=".length);
-      if (flags.mode === "efficient") {
-        flags.efficient = true;
-      } else if (flags.mode === "raw") {
-        flags.raw = true;
-      } else if (flags.mode === "verbose") {
-        flags.verbose = true;
-      }
+      applyModeFlag(flags, arg.slice("--mode=".length));
     } else if (arg === "-a" || arg === "--annotate") {
       flags.annotate = true;
       flags.labels = true;
@@ -1105,21 +1112,9 @@ function parseArgv(argv) {
     } else if (arg === "--dedicated") {
       flags.dedicated = true;
     } else if (arg === "--backend") {
-      flags.backend = argv[++index];
-      if (flags.backend === "dev" || flags.backend === "dedicated") {
-        flags.dedicated = true;
-      }
-      if (flags.backend === "real" || flags.backend === "auto") {
-        flags.dedicated = false;
-      }
+      applyBackendFlag(flags, argv[++index]);
     } else if (arg?.startsWith("--backend=")) {
-      flags.backend = arg.slice("--backend=".length);
-      if (flags.backend === "dev" || flags.backend === "dedicated") {
-        flags.dedicated = true;
-      }
-      if (flags.backend === "real" || flags.backend === "auto") {
-        flags.dedicated = false;
-      }
+      applyBackendFlag(flags, arg.slice("--backend=".length));
     } else if (arg === "--state-file") {
       flags.stateFile = argv[++index];
     } else if (arg?.startsWith("--state-file=")) {
@@ -3330,6 +3325,25 @@ function readPngDimensions(filePath) {
   };
 }
 
+function assertDeviceScreenshotDimensions(device, png, flags = {}) {
+  if (!flags.full && (png.pixelWidth !== device.width || png.pixelHeight !== device.height)) {
+    throw new Error(`${device.name} screenshot dimension mismatch: expected ${device.width}x${device.height}, got ${png.pixelWidth}x${png.pixelHeight}`);
+  }
+}
+
+function deviceScreenshotCaptureResult({ device, outputPath, ready, png, mobile, extra = {} }) {
+  return {
+    name: device.name,
+    requested: device.requested,
+    filePath: path.resolve(outputPath),
+    metrics: ready.metrics,
+    ready: ready.ready,
+    png,
+    mobile,
+    ...extra,
+  };
+}
+
 function defaultMobileScreenshotPath() {
   return path.join(
     DEFAULT_SCREENSHOT_DIR,
@@ -5494,16 +5508,15 @@ async function selectBrowserTabForAutomation(query, flags = {}) {
   const pages = parseListPagesResult(pagesResult);
   const candidates = pageCandidatesForBrowserTab(pages, tab, query);
   if (candidates.length !== 1) {
-    return {
-      text: [
+    return ambiguousTabSelectionResult(
+      tab,
+      pages,
+      [
         `Attached to ${tab.browserUrl}, but could not map the CDP target to a single MCP page.`,
         `Matched tab: ${tab.title || "(untitled)"} ${tab.url}`,
         "Run `realbrowser tabs`, then `realbrowser select <pageId>` for the intended page.",
-      ].join("\n"),
-      tab: publicBrowserTabInfo(tab),
-      pages,
-      selected: null,
-    };
+      ],
+    );
   }
   const selected = await daemonRpc(state, {
     command: "select",
@@ -5546,6 +5559,15 @@ function autoSessionNameForBrowserTab(tab) {
   }
 }
 
+function ambiguousTabSelectionResult(tab, pages, lines) {
+  return {
+    text: lines.join("\n"),
+    tab: publicBrowserTabInfo(tab),
+    pages,
+    selected: null,
+  };
+}
+
 async function selectSessionTabForAutomation(tab, query, flags = {}) {
   const state = await readJson(tab.stateFile);
   if (!state || !isProcessAlive(state.pid)) {
@@ -5556,16 +5578,15 @@ async function selectSessionTabForAutomation(tab, query, flags = {}) {
   const pages = parseListPagesResult(pagesResult);
   const candidates = pageCandidatesForBrowserTab(pages, tab, query);
   if (candidates.length !== 1) {
-    return {
-      text: [
+    return ambiguousTabSelectionResult(
+      tab,
+      pages,
+      [
         `Attached to session ${tab.sessionName}, but could not map the tab to a single page.`,
         `Matched tab: ${tab.title || "(untitled)"} ${tab.url}`,
         `Run \`realbrowser --session "${tab.sessionName}" tabs\`, then \`realbrowser --session "${tab.sessionName}" select <pageId>\`.`,
-      ].join("\n"),
-      tab: publicBrowserTabInfo(tab),
-      pages,
-      selected: null,
-    };
+      ],
+    );
   }
   const selected = await daemonRpc(state, {
     command: "select",
@@ -5730,14 +5751,6 @@ function publicProfileInfo(profile) {
     devtoolsWsEndpoint: profile.devtoolsWsEndpoint,
     launchSupported: profile.launchSupported,
   };
-}
-
-function macBrowserExecutableCandidates(source) {
-  const binary = source.appName;
-  return [
-    path.join("/Applications", `${source.appName}.app`, "Contents", "MacOS", binary),
-    path.join(os.homedir(), "Applications", `${source.appName}.app`, "Contents", "MacOS", binary),
-  ];
 }
 
 function windowsBrowserExecutableCandidates(source) {
@@ -6799,7 +6812,7 @@ class BrowserDaemon {
     return { targetId, ref: normalized, info };
   }
 
-  async cdpRoleRefElementBox(ref, flags = {}) {
+  async callFunctionOnCdpRoleRef(ref, flags = {}, functionDeclaration, callArguments = []) {
     const { targetId, ref: normalized, info } = await this.cdpRoleRefInfo(ref, flags);
     return await this.withCdpPageSession(targetId, async (client, sessionId) => {
       const send = async (method, params = {}) => await client.request(method, params, { sessionId });
@@ -6811,31 +6824,36 @@ class BrowserDaemon {
       }
       const evaluated = await send("Runtime.callFunctionOn", {
         objectId,
-        functionDeclaration: `function() {
-          if (!(this instanceof Element)) return null;
-          this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
-          const rect = this.getBoundingClientRect();
-          return {
-            x: rect.left + rect.width / 2,
-            y: rect.top + rect.height / 2,
-            width: rect.width,
-            height: rect.height,
-            tag: this.tagName ? this.tagName.toLowerCase() : "",
-            text: String(this.innerText || this.textContent || this.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim().slice(0, 160),
-          };
-        }`,
+        functionDeclaration,
+        ...(callArguments.length ? { arguments: callArguments } : {}),
         awaitPromise: true,
         returnByValue: true,
       });
       if (evaluated?.exceptionDetails) {
         throw new Error(formatCdpException(evaluated.exceptionDetails));
       }
-      const box = evaluated?.result?.value;
-      if (!box || !(box.width > 0) || !(box.height > 0)) {
-        throw new Error(`CDP role ref "${normalized}" is not visible or has no box.`);
-      }
-      return { targetId, ref: normalized, box };
+      return { targetId, ref: normalized, value: evaluated?.result?.value };
     });
+  }
+
+  async cdpRoleRefElementBox(ref, flags = {}) {
+    const { targetId, ref: normalized, value: box } = await this.callFunctionOnCdpRoleRef(ref, flags, `function() {
+      if (!(this instanceof Element)) return null;
+      this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+      const rect = this.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+        width: rect.width,
+        height: rect.height,
+        tag: this.tagName ? this.tagName.toLowerCase() : "",
+        text: String(this.innerText || this.textContent || this.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim().slice(0, 160),
+      };
+    }`);
+    if (!box || !(box.width > 0) || !(box.height > 0)) {
+      throw new Error(`CDP role ref "${normalized}" is not visible or has no box.`);
+    }
+    return { targetId, ref: normalized, box };
   }
 
   async clickCdpRoleRef(ref, flags = {}) {
@@ -6859,45 +6877,26 @@ class BrowserDaemon {
   }
 
   async fillCdpRoleRef(ref, value, flags = {}) {
-    const { targetId, ref: normalized, info } = await this.cdpRoleRefInfo(ref, flags);
     const stringValue = String(value ?? "");
-    return await this.withCdpPageSession(targetId, async (client, sessionId) => {
-      const send = async (method, params = {}) => await client.request(method, params, { sessionId });
-      await prepareCdpPageSession(send);
-      const resolved = await send("DOM.resolveNode", { backendNodeId: info.backendDOMNodeId });
-      const objectId = resolved?.object?.objectId;
-      if (!objectId) {
-        throw new Error(`Could not resolve CDP role ref "${normalized}" to a runtime object.`);
+    const { targetId, ref: normalized } = await this.callFunctionOnCdpRoleRef(ref, flags, `function(value) {
+      if (!(this instanceof HTMLElement)) throw new Error("Target is not an HTMLElement");
+      this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+      this.focus();
+      if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this instanceof HTMLSelectElement) {
+        this.value = value;
+        this.dispatchEvent(new Event("input", { bubbles: true }));
+        this.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
       }
-      const evaluated = await send("Runtime.callFunctionOn", {
-        objectId,
-        functionDeclaration: `function(value) {
-          if (!(this instanceof HTMLElement)) throw new Error("Target is not an HTMLElement");
-          this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
-          this.focus();
-          if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this instanceof HTMLSelectElement) {
-            this.value = value;
-            this.dispatchEvent(new Event("input", { bubbles: true }));
-            this.dispatchEvent(new Event("change", { bubbles: true }));
-            return true;
-          }
-          if (this.isContentEditable) {
-            this.textContent = value;
-            this.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
-            this.dispatchEvent(new Event("change", { bubbles: true }));
-            return true;
-          }
-          throw new Error("Target is not fillable");
-        }`,
-        arguments: [{ value: stringValue }],
-        awaitPromise: true,
-        returnByValue: true,
-      });
-      if (evaluated?.exceptionDetails) {
-        throw new Error(formatCdpException(evaluated.exceptionDetails));
+      if (this.isContentEditable) {
+        this.textContent = value;
+        this.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+        this.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
       }
-      return { text: `filled ${normalized}`, cdp: true, targetId, ref: normalized };
-    });
+      throw new Error("Target is not fillable");
+    }`, [{ value: stringValue }]);
+    return { text: `filled ${normalized}`, cdp: true, targetId, ref: normalized };
   }
 
   async cdpActivateTarget(targetId) {
@@ -7530,14 +7529,18 @@ class BrowserDaemon {
     return null;
   }
 
+  daemonInfo() {
+    return {
+      pid: process.pid,
+      stateFile: this.stateFile,
+      mode: this.currentMode(),
+    };
+  }
+
   async doctor(deep) {
     const tools = await this.listTools();
     const out = {
-      daemon: {
-        pid: process.pid,
-        stateFile: this.stateFile,
-        mode: this.currentMode(),
-      },
+      daemon: this.daemonInfo(),
       browserControl: this.browserControlStatus(),
       runtime: {
         node: process.version,
@@ -7557,11 +7560,7 @@ class BrowserDaemon {
       const pages = await this.cdpPages().catch(() => []);
       const selected = pages.find((page) => page.selected) ?? null;
       return {
-        daemon: {
-          pid: process.pid,
-          stateFile: this.stateFile,
-          mode: this.currentMode(),
-        },
+        daemon: this.daemonInfo(),
         browserControl: this.browserControlStatus(),
         tabs: pages.length,
         selected,
@@ -7572,11 +7571,7 @@ class BrowserDaemon {
     const pages = parseListPagesResult(tabs);
     const selected = pages.find((page) => page.selected) ?? null;
     return {
-      daemon: {
-        pid: process.pid,
-        stateFile: this.stateFile,
-        mode: this.currentMode(),
-      },
+      daemon: this.daemonInfo(),
       browserControl: this.browserControlStatus(),
       tabs: pages.length,
       selected,
@@ -7723,24 +7718,15 @@ class BrowserDaemon {
           const rawText = formatValue(rawPayload);
           if (outPath) {
             await writeTextFile(outPath, `${rawText}\n`);
-            return {
-              text: readOutputSummary({
-                command: "snapshot",
-                outPath,
-                chars: rawText.length,
-                truncated: rawText.length > READ_STDOUT_HARD_MAX_CHARS,
-                raw: true,
-                maxCharsInfo: stdoutMaxCharsFromFlags(flags, String(READ_STDOUT_HARD_MAX_CHARS)),
-              }),
+            return snapshotRawOutResult({
+              outPath,
+              rawText,
+              flags,
               structuredContent: {
-                command: "snapshot",
-                raw: true,
-                chars: rawText.length,
-                out: outPath,
                 targetId: snap.targetId,
                 cdp: true,
               },
-            };
+            });
           }
           return {
             text: formatStdoutText(rawText, READ_STDOUT_HARD_MAX_CHARS, flags),
@@ -7806,22 +7792,7 @@ class BrowserDaemon {
       if (outPath) {
         const rawText = formatValue(snapshot);
         await writeTextFile(outPath, `${rawText}\n`);
-        return {
-          text: readOutputSummary({
-            command: "snapshot",
-            outPath,
-            chars: rawText.length,
-            truncated: rawText.length > READ_STDOUT_HARD_MAX_CHARS,
-            raw: true,
-            maxCharsInfo: stdoutMaxCharsFromFlags(flags, String(READ_STDOUT_HARD_MAX_CHARS)),
-          }),
-          structuredContent: {
-            command: "snapshot",
-            raw: true,
-            chars: rawText.length,
-            out: outPath,
-          },
-        };
+        return snapshotRawOutResult({ outPath, rawText, flags });
       }
       return snapshot;
     }
@@ -8257,12 +8228,14 @@ class BrowserDaemon {
     throw new Error(`Opened ${url}, but could not identify the new page id.`);
   }
 
-  async handleCaptureConsole(args, flags = {}) {
-    const targetUrl = args[0];
-    const durationMs = parsePositiveInteger(flags.duration ?? String(DEFAULT_CONSOLE_CAPTURE_DURATION_MS), "duration");
-    const timeoutMs = parsePositiveInteger(flags.timeout ?? String(DEFAULT_CONSOLE_CAPTURE_TIMEOUT_MS), "timeout");
+  async prepareCapturePage(targetUrl, flags = {}, options = {}) {
     let pageId;
     let action = "sample";
+    const beforeCaptureAction = async () => {
+      if (options.clearPerformance) {
+        await this.evaluateFunction(clearPerformanceEntriesFunction(), { ...flags, page: String(pageId) }).catch(() => null);
+      }
+    };
 
     if (targetUrl) {
       pageId = this.mode === ANONYMOUS_MODE
@@ -8271,6 +8244,7 @@ class BrowserDaemon {
       if (pageId === null || pageId === undefined) {
         pageId = await this.openPageForAutomation("about:blank", flags);
       }
+      await beforeCaptureAction();
       await this.callTool("navigate_page", {
         pageId,
         type: "url",
@@ -8279,6 +8253,7 @@ class BrowserDaemon {
       action = "navigate";
     } else {
       pageId = await this.resolvePageId(flags);
+      await beforeCaptureAction();
       if (flags.reload) {
         await this.callTool("navigate_page", {
           pageId,
@@ -8288,6 +8263,12 @@ class BrowserDaemon {
       }
     }
 
+    return { pageId, action };
+  }
+
+  async waitForCaptureSettled(pageId, flags = {}, options = {}) {
+    const timeoutMs = options.timeoutMs;
+    const durationMs = options.durationMs ?? 0;
     await this.handleWait(["load"], { ...flags, page: String(pageId), timeout: String(timeoutMs) }).catch(() => null);
     if (durationMs > 0) {
       await sleep(durationMs);
@@ -8297,6 +8278,14 @@ class BrowserDaemon {
       page: String(pageId),
       timeout: String(Math.min(10000, Math.max(1000, timeoutMs))),
     }).catch(() => null);
+  }
+
+  async handleCaptureConsole(args, flags = {}) {
+    const targetUrl = args[0];
+    const durationMs = parsePositiveInteger(flags.duration ?? String(DEFAULT_CONSOLE_CAPTURE_DURATION_MS), "duration");
+    const timeoutMs = parsePositiveInteger(flags.timeout ?? String(DEFAULT_CONSOLE_CAPTURE_TIMEOUT_MS), "timeout");
+    const { pageId, action } = await this.prepareCapturePage(targetUrl, flags);
+    await this.waitForCaptureSettled(pageId, flags, { timeoutMs, durationMs });
 
     return await this.collectConsoleCapture(pageId, flags, { action, durationMs });
   }
@@ -8448,44 +8437,8 @@ class BrowserDaemon {
     const targetUrl = args[0];
     const durationMs = parsePositiveInteger(flags.duration ?? String(DEFAULT_NETWORK_CAPTURE_DURATION_MS), "duration");
     const timeoutMs = parsePositiveInteger(flags.timeout ?? String(DEFAULT_NETWORK_CAPTURE_TIMEOUT_MS), "timeout");
-    let pageId;
-    let action = "sample";
-
-    if (targetUrl) {
-      pageId = this.mode === ANONYMOUS_MODE
-        ? await this.resolveAnonymousNavigationPageId(flags)
-        : null;
-      if (pageId === null || pageId === undefined) {
-        pageId = await this.openPageForAutomation("about:blank", flags);
-      }
-      await this.evaluateFunction(clearPerformanceEntriesFunction(), { ...flags, page: String(pageId) }).catch(() => null);
-      await this.callTool("navigate_page", {
-        pageId,
-        type: "url",
-        url: targetUrl,
-      });
-      action = "navigate";
-    } else {
-      pageId = await this.resolvePageId(flags);
-      await this.evaluateFunction(clearPerformanceEntriesFunction(), { ...flags, page: String(pageId) }).catch(() => null);
-      if (flags.reload) {
-        await this.callTool("navigate_page", {
-          pageId,
-          type: "reload",
-        });
-        action = "reload";
-      }
-    }
-
-    await this.handleWait(["load"], { ...flags, page: String(pageId), timeout: String(timeoutMs) }).catch(() => null);
-    if (durationMs > 0) {
-      await sleep(durationMs);
-    }
-    await this.handleWait(["networkidle"], {
-      ...flags,
-      page: String(pageId),
-      timeout: String(Math.min(10000, Math.max(1000, timeoutMs))),
-    }).catch(() => null);
+    const { pageId, action } = await this.prepareCapturePage(targetUrl, flags, { clearPerformance: true });
+    await this.waitForCaptureSettled(pageId, flags, { timeoutMs, durationMs });
 
     const perfResult = await this.evaluateFunction(networkPerformanceCaptureFunction(), {
       ...flags,
@@ -9849,24 +9802,14 @@ class BrowserDaemon {
 
   async readViewportMetricsInSession(client, sessionId, flags = {}) {
     const settleMs = Math.min(10000, parsePositiveInteger(flags.settleMs ?? "200", "settle-ms"));
+    const metricsFunction = deviceScreenshotMetricsFunction();
     const result = await client.request("Runtime.evaluate", {
       expression: `new Promise((resolve) => {
         let done = false;
         const sample = () => {
           if (done) return;
           done = true;
-          resolve({
-            url: location.href,
-            title: document.title,
-            innerWidth,
-            innerHeight,
-            devicePixelRatio,
-            visualViewport: {
-              width: visualViewport?.width,
-              height: visualViewport?.height,
-              scale: visualViewport?.scale
-            }
-          });
+          resolve((${metricsFunction})());
         };
         setTimeout(sample, ${settleMs + 250});
         requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(sample, ${settleMs})));
@@ -9952,20 +9895,15 @@ class BrowserDaemon {
             full: Boolean(flags.full),
           });
           const png = readPngDimensions(outputPath);
-          if (!flags.full && (png.pixelWidth !== device.width || png.pixelHeight !== device.height)) {
-            throw new Error(`${device.name} screenshot dimension mismatch: expected ${device.width}x${device.height}, got ${png.pixelWidth}x${png.pixelHeight}`);
-          }
-          results.push({
-            name: device.name,
-            requested: device.requested,
-            filePath: path.resolve(outputPath),
-            metrics: ready.metrics,
-            ready: ready.ready,
+          assertDeviceScreenshotDimensions(device, png, flags);
+          results.push(deviceScreenshotCaptureResult({
+            device,
+            outputPath,
+            ready,
             png,
             mobile,
-            targetId,
-            cdp: true,
-          });
+            extra: { targetId, cdp: true },
+          }));
         }
       } finally {
         await safeCdpRequest(client, "Emulation.clearDeviceMetricsOverride", {}, { sessionId });
@@ -9992,18 +9930,14 @@ class BrowserDaemon {
           format: "png",
         });
         const png = readPngDimensions(outputPath);
-        if (!flags.full && (png.pixelWidth !== device.width || png.pixelHeight !== device.height)) {
-          throw new Error(`${device.name} screenshot dimension mismatch: expected ${device.width}x${device.height}, got ${png.pixelWidth}x${png.pixelHeight}`);
-        }
-        results.push({
-          name: device.name,
-          requested: device.requested,
-          filePath: path.resolve(outputPath),
-          metrics: ready.metrics,
-          ready: ready.ready,
+        assertDeviceScreenshotDimensions(device, png, flags);
+        results.push(deviceScreenshotCaptureResult({
+          device,
+          outputPath,
+          ready,
           png,
           mobile,
-        });
+        }));
       }
     } finally {
       await this.handleViewport("reset", pageFlags).catch(() => {});
@@ -11267,6 +11201,26 @@ function readOutputSummary({ command, outPath, chars, count, shown, truncated, r
   ].filter(Boolean).join("\n");
 }
 
+function snapshotRawOutResult({ outPath, rawText, flags = {}, structuredContent = {} }) {
+  return {
+    text: readOutputSummary({
+      command: "snapshot",
+      outPath,
+      chars: rawText.length,
+      truncated: rawText.length > READ_STDOUT_HARD_MAX_CHARS,
+      raw: true,
+      maxCharsInfo: stdoutMaxCharsFromFlags(flags, String(READ_STDOUT_HARD_MAX_CHARS)),
+    }),
+    structuredContent: {
+      command: "snapshot",
+      raw: true,
+      chars: rawText.length,
+      out: outPath,
+      ...structuredContent,
+    },
+  };
+}
+
 function compactTextResult(result, flags = {}, defaultMaxChars = DEFAULT_READ_MAX_CHARS) {
   const maxChars = stdoutMaxCharsFromFlags(flags, String(defaultMaxChars));
   const rawText = String(result.text ?? "");
@@ -12020,10 +11974,6 @@ function parsePageId(value) {
   return pageId;
 }
 
-function isIntegerText(value) {
-  return typeof value === "string" && /^\d+$/.test(value.trim());
-}
-
 function isUidRef(value) {
   return typeof value === "string" && /^\d+_\d+$/.test(value);
 }
@@ -12592,6 +12542,18 @@ async function runSelfTest() {
   const fallbackSnapshot = buildCompactSnapshot(null, "x".repeat(READ_STDOUT_HARD_MAX_CHARS + 500), { maxChars: "1000000" });
   assertSelfTest(fallbackSnapshot.stats.stdoutMaxChars === READ_STDOUT_HARD_MAX_CHARS, "snapshot stdout has a hard max cap");
   assertSelfTest(fallbackSnapshot.text.includes("STDOUT CAPPED"), "snapshot hard cap is visible in text output");
+  const rawSnapshotOut = snapshotRawOutResult({
+    outPath: "tmp/snapshot.json",
+    rawText: "{\"ok\":true}",
+    flags: {},
+    structuredContent: { cdp: true },
+  });
+  assertSelfTest(
+    rawSnapshotOut.text.includes("raw output written") &&
+      rawSnapshotOut.structuredContent.out === "tmp/snapshot.json" &&
+      rawSnapshotOut.structuredContent.cdp === true,
+    "raw snapshot --out helper preserves summary shape",
+  );
   const readOutTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "realbrowser-read-out-self-test-"));
   try {
     const htmlDefault = await formatReadResult("html", { text: "x".repeat(DEFAULT_HTML_MAX_CHARS + 500) }, { outputDir: readOutTempDir });
@@ -12705,6 +12667,12 @@ async function runSelfTest() {
   assertSelfTest(parsedHeadlessOpen.flags.headless === true, "parser handles headless flag");
   const parsedHeadedOpen = parseArgv(["open", "https://example.com", "--anonymous", "--headed"]);
   assertSelfTest(parsedHeadedOpen.flags.headless === false && parsedHeadedOpen.flags.headed === true, "parser handles headed flag");
+  const parsedRawMode = parseArgv(["snapshot", "--mode=raw"]);
+  assertSelfTest(parsedRawMode.flags.mode === "raw" && parsedRawMode.flags.raw === true, "parser handles output mode aliases");
+  const parsedDedicatedBackend = parseArgv(["tabs", "--backend", "dev"]);
+  assertSelfTest(parsedDedicatedBackend.flags.backend === "dev" && parsedDedicatedBackend.flags.dedicated === true, "parser handles dedicated backend alias");
+  const parsedRealBackend = parseArgv(["tabs", "--backend=real"]);
+  assertSelfTest(parsedRealBackend.flags.backend === "real" && parsedRealBackend.flags.dedicated === false, "parser handles real backend alias");
   assertSelfTest(desiredHeadless({ anonymous: true }) === true, "anonymous sessions default to headless");
   assertSelfTest(desiredHeadless({ anonymous: true, front: true }) === false, "front opts managed sessions into headed mode");
   assertSelfTest(managedIdleTimeoutMsForMode(ANONYMOUS_MODE) > 0, "anonymous managed sessions have an idle timeout");
@@ -13202,6 +13170,28 @@ async function runSelfTest() {
   assertSelfTest(parsedScreenshotLimits.flags.maxBytes === "5mb", "parser handles screenshot max-bytes");
   assertSelfTest(parsedScreenshotLimits.flags.rawSize === true, "parser handles screenshot raw-size");
   assertSelfTest(parseByteSize("5mb", "max-bytes") === 5 * 1024 * 1024, "parseByteSize handles mb suffix");
+  const sampleDevice = { name: "mobile", requested: "390x844", width: 390, height: 844 };
+  const samplePng = { pixelWidth: 390, pixelHeight: 844 };
+  assertDeviceScreenshotDimensions(sampleDevice, samplePng, {});
+  assertSelfTestThrows(
+    () => assertDeviceScreenshotDimensions(sampleDevice, { pixelWidth: 391, pixelHeight: 844 }, {}),
+    "device screenshot dimensions reject mismatches",
+  );
+  const deviceResult = deviceScreenshotCaptureResult({
+    device: sampleDevice,
+    outputPath: "tmp/mobile.png",
+    ready: { metrics: { innerWidth: 390 }, ready: { ready: true } },
+    png: samplePng,
+    mobile: true,
+    extra: { cdp: true },
+  });
+  assertSelfTest(
+    deviceResult.name === "mobile" &&
+      deviceResult.metrics.innerWidth === 390 &&
+      deviceResult.ready.ready === true &&
+      deviceResult.cdp === true,
+    "device screenshot result helper preserves result shape",
+  );
 
   const parsedLiteralFlag = parseArgv(["type", "--", "--raw", "literal text"]);
   assertSelfTest(parsedLiteralFlag.command === "type", "parser handles command before -- sentinel");
