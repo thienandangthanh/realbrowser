@@ -1,6 +1,6 @@
 ---
 name: realbrowser
-description: Use when you need fast local real-browser automation from Codex, including opening tabs, taking snapshots or screenshots, clicking, typing, filling forms, reading console/network data, or debugging localhost/browser UI with Chrome DevTools MCP.
+description: Use when you need fast local real-browser automation from Codex, including listing/selecting Chrome profiles, anonymous clean-state sessions, network/performance capture, opening tabs, taking snapshots or screenshots, clicking, typing, filling forms, reading console/network data, or debugging localhost/browser UI with Chrome DevTools MCP.
 ---
 
 # Realbrowser
@@ -41,6 +41,79 @@ Chrome's "Chrome is being controlled by automated test software" banner is expec
 
 Keep this portable. The official portable boundary is Chrome DevTools MCP/CDP plus Chrome's own remote-debugging UI. OS browser-UI automation is best-effort only and must not be required for the core attach/detach flow.
 
+## Browser Profiles
+
+When a task depends on a specific logged-in Chrome profile, list and select profiles explicitly instead of relying on whichever profile Chrome DevTools MCP auto-connect chooses:
+
+```bash
+"$REALBROWSER_CLI" profiles
+"$REALBROWSER_CLI" open --profile "chrome:Profile 4" https://example.com
+"$REALBROWSER_CLI" --profile "chrome:Profile 4" tabs --no-fallback
+```
+
+`profiles` discovers Chromium-family profiles on macOS, Linux, and Windows from common Chrome, Chrome Beta, Chrome for Testing, Chromium, Brave, Edge, and Vivaldi user-data roots. It prints stable ids such as `chrome:Default` or `chrome:Profile 4`, plus display/account names when Chrome stores them.
+
+Use `--browser <key>` to disambiguate matching profiles. Use `--json` when you need exact `userDataDir`, `profilePath`, `devtoolsScope`, or detected DevTools endpoint fields.
+
+`open --profile <id> <url>` uses the OS browser launcher with Chrome's `--profile-directory=<dir>` flag. This is the right layer for opening a tab in a specific UI profile. After that, page automation still needs a debuggable backend: enable remote debugging in that profile and use `--profile <id> --no-fallback`, or pass `--browser-url <cdp-url>` when you already know the endpoint. Chrome may expose one browser-level DevTools endpoint for several profiles under the same user-data root; in that case, attach to the endpoint, then verify/select the intended tab by URL/title before taking action. If `profiles` shows no debug endpoint for the selected profile, do not continue in the dedicated fallback when login state matters.
+
+For requests like "go to staging.ninzap.com on Tom's browser profile, check inbox, take screenshot", use a profile-targeted open and select in one step:
+
+```bash
+"$REALBROWSER_CLI" profiles "tuyenhx.tanker" --browser chrome
+"$REALBROWSER_CLI" open --profile "chrome:Profile 4" https://staging.ninzap.com/ --select --no-fallback --timeout 15000
+"$REALBROWSER_CLI" observe
+"$REALBROWSER_CLI" snapshot --efficient
+"$REALBROWSER_CLI" screenshot staging-ninzap-inbox.png --full
+```
+
+Use the stable profile id when a human name is ambiguous. For example, `Tom` may match more than one account; `chrome:Profile 4`, `tuyenhx.tanker`, or the account email is safer. `--select` opens the tab with Chrome's profile selector, waits for a matching debuggable tab, attaches to the endpoint, and selects the page. If `--select` reports no endpoint, stop and ask the user to enable Chrome remote debugging for that profile instead of falling back to the dedicated profile.
+
+When the user asks to check a URL that may already be open, search existing debuggable tabs before opening a new one:
+
+```bash
+"$REALBROWSER_CLI" find-tab "developers.facebook.com/apps/1788280045116508"
+"$REALBROWSER_CLI" select-tab "developers.facebook.com/apps/1788280045116508" --no-fallback
+"$REALBROWSER_CLI" observe
+```
+
+`find-tab`/`tabs-all` enumerate tabs from every discovered DevTools endpoint and show matching URL/title plus possible profiles. `select-tab` attaches to the matching endpoint and selects the matching page when there is exactly one candidate. If several tabs match, do not guess; show the candidates and ask the user which one to use. If no tab is debuggable, open the URL with `open --profile <id> <url>`.
+
+## Anonymous Sessions And Network Capture
+
+`--anonymous` means Chrome DevTools MCP isolated browser state, not privacy/anonymity on the network. It starts Chrome DevTools MCP with isolated mode and an incognito Chrome argument when supported. Use it when the user asks for anonymous mode, clean login testing, first-run UI checks, or cookie-free behavior:
+
+```bash
+"$REALBROWSER_CLI" open https://ninzap.dev --anonymous --select
+"$REALBROWSER_CLI" observe
+"$REALBROWSER_CLI" screenshot ninzap-dev-anonymous.png --full
+"$REALBROWSER_CLI" detach
+```
+
+An anonymous daemon keeps its isolated browser state for follow-up commands until `detach`/`stop`; plain follow-up commands reuse the running daemon. Use `--keep-anonymous` only when you need a debuggable temporary `userDataDir` preserved after detach.
+
+For performance/network requests, start capture before navigation or reload:
+
+```bash
+"$REALBROWSER_CLI" capture-network https://ninzap.dev --anonymous --duration 15000 --har ninzap-dev.har
+"$REALBROWSER_CLI" select-tab ninzap.dev
+"$REALBROWSER_CLI" capture-network --reload --duration 15000 --har ninzap-dev-auth.har
+```
+
+`capture-network` records browser performance entries plus DevTools network rows, summarizes slow requests, large transfers, failed/error lines, render-blocking resources, top hosts, and navigation timing. It does not capture response bodies or auth headers. URLs in summaries redact query strings unless `--values` or `--raw` is passed; HAR files preserve full URLs because they are local artifacts.
+
+For render bugs or requests like "check ninzap.dev console log to see what is the problem", capture console logs into an artifact the agent can analyze:
+
+```bash
+"$REALBROWSER_CLI" capture-console https://ninzap.dev --anonymous --duration 5000 --out ninzap-dev-console.json
+"$REALBROWSER_CLI" select-tab ninzap.dev
+"$REALBROWSER_CLI" capture-console --reload --duration 5000 --out ninzap-dev-auth-console.json
+"$REALBROWSER_CLI" console --errors
+"$REALBROWSER_CLI" console get <msgid> --raw
+```
+
+`capture-console` lists `console.log`/`info`/`warn`/`error` messages, fetches per-message details, and writes JSON with message ids, argument values, and stack/source data when Chrome DevTools MCP exposes them. Use `--errors` to focus on errors and warnings, `--filter <text>` to narrow noisy apps, and `console get <msgid>` when you only need one detailed message. Console logs can contain user data, tokens, request payloads, or account details; keep artifacts local unless the user explicitly wants them shared.
+
 Useful overrides:
 
 ```bash
@@ -58,11 +131,18 @@ REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dis
 
 - `doctor [--deep]`: check Node, npm/npx, daemon, MCP tools, and optionally live tabs.
 - `status [--deep]`: show local daemon/control state without attaching by default. It may include default-local-browser remote-debugging metadata when that file is available; treat that as a diagnostic hint, not proof for dedicated profiles, `--browser-url`, or remote CDP. Pass `--deep` to attach and include tab count plus selected tab.
+- `profiles [query] [--browser <key>]`: list local Chromium-family browser profiles. Use the stable id from this output for profile-specific work.
+- `find-tab [query] [--browser <key>]` / `tabs-all [query]`: search existing debuggable tabs across discovered browser/profile endpoints by URL, title, profile id, or account label.
+- `select-tab <query> [--browser <key>] [--front]`: attach to the endpoint for a unique matching existing tab and select it for later commands. If the match is ambiguous, it prints candidates instead of selecting.
+- `open-profile <profile-query> <url> [--select]`: open a URL in a selected browser UI profile. Equivalent to `open <url> --profile <profile-query>`.
+- `capture-network [url] [--anonymous|--profile <profile-query>|--browser-url <url>] [--reload] [--duration <ms>] [--har <path>]`: capture network/performance data from a fresh navigation, reload, or current selected page. Use `--anonymous` for clean-state checks, `--profile` or `select-tab` for authenticated checks, and `--har` for a local HAR-style artifact.
+- `capture-console [url] [--anonymous|--profile <profile-query>] [--reload] [--duration <ms>] [--out <path>] [--errors] [--filter <text>]`: capture console logs from a fresh navigation, reload, or current selected page. Use it for render failures and JavaScript errors; `--out` writes the detailed JSON artifact for later analysis.
 - `stop` / `detach`: stop the local daemon and close realbrowser's MCP connection. Plain detach leaves Chrome remote debugging enabled and does not touch browser UI. Add `--dismiss-banner` only when the user explicitly wants a best-effort click on the visible automation banner `X`. Add `--cleanup-remote-debugging` only when the user explicitly wants Chrome's remote-debugging setting turned off too.
 - `cleanup-remote-debugging`: turn off Chrome's `chrome://inspect/#remote-debugging` setting through an existing realbrowser daemon, then stop the daemon. Add `--allow-attach` to start a fresh permission-gated attach when no daemon is running. Dedicated-profile mode skips user Chrome settings cleanup and just stops the managed session. `--browser-url` cleanup targets the configured backend through browser UI when possible; local Chrome metadata may not describe that backend.
 - `restart`: restart the persistent daemon's MCP/browser connection without changing the daemon token or port.
 - `tabs`: list open pages.
 - `open <url>` / `newtab <url>`: open a URL in a new background page without bringing Chrome to the front. Pass `--front` only when the user explicitly wants Chrome focused.
+- `open <url> --profile <profile-query> [--select]` / `newtab <url> --profile <profile-query> [--select]`: open the URL through the OS browser launcher in the selected Chrome/Chromium UI profile. This selects the profile for the visible browser tab; `--select` then attaches to the detected endpoint and selects the matching page for later commands.
 - `navigate <url>` / `goto <url>`: navigate the selected page to a URL.
 - `back`, `forward`, `reload`: navigate browser history or reload the page.
 - `select <pageId> [--front]` / `tab <pageId>`: select a page for later commands. It does not bring Chrome to the front unless `--front` is passed.
@@ -91,7 +171,7 @@ REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dis
 - `eval <js>` / `js <js> [--page <id>]`: run JavaScript in the page. Expressions are wrapped automatically. Output is capped unless `--raw` is passed.
 - `text`, `html`, `links`, `forms`, `cookies`, `storage`, `perf`, `url`: fast read helpers backed by page JavaScript. Use `--limit`, `--max-chars`, and `--out <path>` for large pages. `cookies` and `storage` redact values unless `--values` is passed.
 - `css <selector|uid> <property>`, `attrs <selector|uid>`, `is <state> <selector|uid>`: inspect elements by CSS selector or snapshot uid.
-- `console [get <msgid>] [--errors] [--filter <text>] [--limit <n>] [--clear] [--preserve]`: list capped console messages, or fetch one message by id. `--clear` hides already-seen lines for the current daemon.
+- `console [get <msgid>] [--errors] [--filter <text>] [--limit <n>] [--clear] [--preserve]`: list capped console messages, or fetch one message by id. `--clear` hides already-seen lines for the current daemon. Use `capture-console --out` when the user needs logs copied into a durable artifact for debugging.
 - `network [get <reqid>] [--failed] [--filter <text>] [--limit <n>] [--clear] [--preserve] [--request-file path] [--response-file path]`: list capped network requests, or fetch one request by id. Use files for large request/response bodies.
 - `errors` / `requests`: OpenClaw-style aliases for `console --errors` and `network`.
 - `screenshot [path] [--full|--full-page] [--uid <uid>] [--labels|--annotate] [--format png|jpeg|webp] [--max-side <px>] [--max-bytes <bytes|5mb>] [--raw-size|--no-normalize]`: save a screenshot. `--labels` overlays snapshot uid labels before capture and removes them afterward. Screenshots use OpenClaw-style size targets by default: max side 2000px and max target size 5mb. To stay portable, realbrowser reduces capture size through Chrome/MCP screenshot viewport emulation and JPEG quality instead of native image post-processing. Use `--raw-size` for exact physical browser pixels. If `path` is omitted, a timestamped image is written under `~/.realbrowser/screenshots`.
@@ -120,6 +200,15 @@ Global flags:
 - `--backend real|dev`: choose real-browser auto-connect or the dedicated dev profile.
 - `--browser-url <url>`: connect to an existing CDP endpoint instead of autoConnect.
 - `--cdp-url <url>`: use a CDP endpoint for download interception while keeping the browser backend unchanged.
+- `--profile <profile-query>`: select a discovered local browser profile by stable id, profile directory, display name, account email, or path. On `open`/`newtab`, this launches the selected UI profile. On attach commands, it uses that profile's detected DevTools endpoint and fails if none is available. If the endpoint is browser-level, verify/select the intended tab after attach.
+- `--browser <key>`: narrow profile discovery/selection to a browser such as `chrome`, `brave`, `edge`, `chromium`, or `vivaldi`.
+- `--select`: after profile-targeted `open`/`newtab`, wait for the matching debuggable tab, attach to its endpoint, and select it for follow-up commands.
+- `--anonymous`: use Chrome DevTools MCP isolated browser state. This is clean browser state, not network anonymity.
+- `--keep-anonymous`: keep the temporary anonymous profile directory after detach for debugging.
+- `--reload`: reload the selected page for commands such as `capture-network`.
+- `--duration <ms>`: capture or wait duration for commands such as `capture-network`.
+- `--har <path>`: write a local HAR-style network artifact for `capture-network`.
+- `--out <path>`: write command output artifacts such as console capture JSON or large read results.
 - `--dedicated`: force the dedicated fallback profile.
 - `--no-fallback`: require real Chrome/Chrome MCP attach to work; do not switch to the dedicated profile. Use this whenever existing cookies/login state are required.
 - `--dismiss-banner`: explicitly request the best-effort browser-UI click that hides Chrome's automation banner during detach. This does not change remote-debugging/CDP settings. On unsupported platforms, the CLI prints the manual banner-X instruction instead of failing.
@@ -127,15 +216,20 @@ Global flags:
 ## Operating Loop
 
 1. Start with `doctor` when setup is uncertain. For login-state tasks, verify the intended Chrome profile, enable Chrome remote debugging/CDP in `chrome://inspect/#remote-debugging`, and run with `--no-fallback`.
-2. Use `tabs` before opening new pages if prior attempts may have left tabs around.
-3. Use `observe` first for page state; use `snapshot --efficient` only when you need clickable `uid` refs.
-4. Act only on current snapshot `uid` refs.
-5. After navigation, modal changes, or form submission, run `observe` or `snapshot --efficient` again before the next action.
-6. If a `uid` is stale, snapshot once and retry with the new ref.
-7. For workflows with several actions, prefer `chain --return summary --trace ~/.realbrowser/trace.json`.
-8. Do not restart the daemon during normal browser work; restarting can trigger Chrome's remote-debugging approval dialog again.
-9. Ask for explicit user approval before submitting sensitive data, making purchases, deleting data, changing account/security settings, granting permissions, or taking any action that is hard to undo.
-10. Stop and report manual blockers such as login, 2FA, captcha, camera/microphone permission, or Chrome remote debugging approval.
+2. If the target may already be open, run `find-tab <url-or-title>` first. Use `select-tab <query>` only when there is a unique match.
+3. If the user asks for anonymous/clean mode, run `open <url> --anonymous --select`, do the UI checks, and `detach` when finished so the isolated session is closed.
+4. If the user asks for network/performance issues, prefer `capture-network <url> --anonymous` for clean-state checks or `select-tab`/`--profile` plus `capture-network --reload` for authenticated checks.
+5. If the user asks for console logs, JavaScript errors, or "what is the render problem", use `capture-console <url> --anonymous --out <file>` for clean-state checks or `select-tab`/`--profile` plus `capture-console --reload --out <file>` for authenticated checks. Feed the JSON artifact back into analysis.
+6. If a specific signed-in profile matters and no suitable tab is open, run `profiles`, choose a stable id, and open the target URL with `open --profile <id> <url>` before attaching.
+7. Use `tabs` before opening new pages if prior attempts may have left tabs around.
+8. Use `observe` first for page state; use `snapshot --efficient` only when you need clickable `uid` refs.
+9. Act only on current snapshot `uid` refs.
+10. After navigation, modal changes, or form submission, run `observe` or `snapshot --efficient` again before the next action.
+11. If a `uid` is stale, snapshot once and retry with the new ref.
+12. For workflows with several actions, prefer `chain --return summary --trace ~/.realbrowser/trace.json`.
+13. Do not restart the daemon during normal browser work; restarting can trigger Chrome's remote-debugging approval dialog again.
+14. Ask for explicit user approval before submitting sensitive data, making purchases, deleting data, changing account/security settings, granting permissions, or taking any action that is hard to undo.
+15. Stop and report manual blockers such as login, 2FA, captcha, camera/microphone permission, or Chrome remote debugging approval.
 
 ## Token And Speed Rules
 
@@ -153,6 +247,9 @@ Global flags:
 - Use `scripts/realbrowser` on macOS/Linux; use `scripts\realbrowser.ps1` on Windows PowerShell; use `scripts\realbrowser.cmd` on `cmd.exe`; `node scripts\realbrowser.mjs` and the npm bin are portable fallbacks.
 - Real-browser attach is delegated to Chrome DevTools MCP. If auto-connect cannot attach to a real profile on any OS, retry with `--backend dev` only when existing cookies/login state are not required.
 - Remote-debugging metadata checks understand common Chrome, Chromium, Chrome Beta/Testing, Brave, Edge, Vivaldi, Linux Flatpak, and Windows user-data locations. Set `REALBROWSER_BROWSER_USER_DATA_DIR` or `REALBROWSER_CHROME_USER_DATA_DIR` when the profile root is custom.
+- Profile discovery and profile launching are cross-platform for common Chromium-family browsers. Profile launch uses Chrome's `--profile-directory` flag; attach commands use Chrome DevTools MCP/CDP and cannot switch profiles unless the selected profile exposes a DevTools endpoint. Browser-level endpoints may include tabs from multiple profiles, so tab selection remains mandatory.
+- Anonymous mode uses Chrome DevTools MCP isolated state by default. `--keep-anonymous` uses a temporary `userDataDir` for inspection after detach. Neither mode masks IP address, device/browser fingerprint, or network identity.
+- Network capture uses in-browser PerformanceResourceTiming plus DevTools request rows; it is designed for UI/performance triage, not full proxy-grade packet capture.
 - Banner-X dismissal is an opt-in best-effort desktop UI action via `detach --dismiss-banner`. The core detach flow remains portable because it does not require that UI automation to succeed, and it never disables CDP unless `--cleanup-remote-debugging` is explicitly passed.
 - Screenshot normalization is dependency-free and uses Chrome DevTools MCP capture/emulation calls on macOS, Linux, and Windows.
 - Protocol actions, screenshots, snapshots, console, network, and downloads should not require focusing the browser window.

@@ -22,6 +22,7 @@ const MCP_START_TIMEOUT_MS = Number.parseInt(process.env.REALBROWSER_MCP_TIMEOUT
 const PACKAGE_SPEC = process.env.REALBROWSER_MCP_PACKAGE ?? "chrome-devtools-mcp@latest";
 const AUTO_MODE = "auto";
 const DEDICATED_MODE = "dedicated";
+const ANONYMOUS_MODE = "anonymous";
 const LABEL_OVERLAY_ATTR = "data-realbrowser-labels";
 const DEFAULT_SNAPSHOT_MAX_CHARS = 8_000;
 const DEFAULT_READ_MAX_CHARS = 12_000;
@@ -32,6 +33,11 @@ const DEFAULT_OBSERVE_TEXT_CHARS = 900;
 const DEFAULT_SCREENSHOT_JPEG_QUALITY = 85;
 const SCREENSHOT_QUALITY_STEPS = [85, 75, 65, 55, 45, 35];
 const SCREENSHOT_SCALE_STEPS = [1, 0.82, 0.67, 0.55];
+const DEFAULT_NETWORK_CAPTURE_DURATION_MS = 5000;
+const DEFAULT_NETWORK_CAPTURE_TIMEOUT_MS = 30000;
+const DEFAULT_CONSOLE_CAPTURE_DURATION_MS = 3000;
+const DEFAULT_CONSOLE_CAPTURE_TIMEOUT_MS = 30000;
+const DEFAULT_CONSOLE_CAPTURE_LIMIT = 100;
 const NPX_COMMAND = process.platform === "win32" ? "npx.cmd" : "npx";
 const CONTROLLED_BANNER_TEXT = "Chrome is being controlled by automated test software";
 const REMOTE_DEBUGGING_SETTINGS_URL = "chrome://inspect/#remote-debugging";
@@ -82,6 +88,112 @@ const LINUX_FLATPAK_BROWSER_CONFIG_PATHS = [
   ["com.brave.Browser", ["BraveSoftware", "Brave-Browser"]],
   ["com.microsoft.Edge", ["microsoft-edge"]],
   ["com.vivaldi.Vivaldi", ["vivaldi"]],
+];
+const MAC_BROWSER_PROFILE_SOURCES = [
+  { key: "chrome", name: "Google Chrome", appName: "Google Chrome", userDataPath: ["Google", "Chrome"] },
+  { key: "chrome-beta", name: "Google Chrome Beta", appName: "Google Chrome Beta", userDataPath: ["Google", "Chrome Beta"] },
+  { key: "chrome-for-testing", name: "Google Chrome for Testing", appName: "Google Chrome for Testing", userDataPath: ["Google", "Chrome for Testing"] },
+  { key: "chromium", name: "Chromium", appName: "Chromium", userDataPath: ["Chromium"] },
+  { key: "brave", name: "Brave Browser", appName: "Brave Browser", userDataPath: ["BraveSoftware", "Brave-Browser"] },
+  { key: "edge", name: "Microsoft Edge", appName: "Microsoft Edge", userDataPath: ["Microsoft Edge"] },
+  { key: "vivaldi", name: "Vivaldi", appName: "Vivaldi", userDataPath: ["Vivaldi"] },
+];
+const WINDOWS_BROWSER_PROFILE_SOURCES = [
+  {
+    key: "chrome",
+    name: "Google Chrome",
+    userDataPath: ["Google", "Chrome", "User Data"],
+    executablePaths: [
+      ["ProgramFiles", "Google", "Chrome", "Application", "chrome.exe"],
+      ["ProgramFiles(x86)", "Google", "Chrome", "Application", "chrome.exe"],
+      ["LOCALAPPDATA", "Google", "Chrome", "Application", "chrome.exe"],
+    ],
+    commands: ["chrome.exe"],
+  },
+  {
+    key: "chrome-beta",
+    name: "Google Chrome Beta",
+    userDataPath: ["Google", "Chrome Beta", "User Data"],
+    executablePaths: [
+      ["ProgramFiles", "Google", "Chrome Beta", "Application", "chrome.exe"],
+      ["ProgramFiles(x86)", "Google", "Chrome Beta", "Application", "chrome.exe"],
+      ["LOCALAPPDATA", "Google", "Chrome Beta", "Application", "chrome.exe"],
+    ],
+    commands: ["chrome.exe"],
+  },
+  {
+    key: "chrome-for-testing",
+    name: "Google Chrome for Testing",
+    userDataPath: ["Google", "Chrome for Testing", "User Data"],
+    executablePaths: [
+      ["ProgramFiles", "Google", "Chrome for Testing", "Application", "chrome.exe"],
+      ["ProgramFiles(x86)", "Google", "Chrome for Testing", "Application", "chrome.exe"],
+      ["LOCALAPPDATA", "Google", "Chrome for Testing", "Application", "chrome.exe"],
+    ],
+    commands: ["chrome.exe"],
+  },
+  {
+    key: "chromium",
+    name: "Chromium",
+    userDataPath: ["Chromium", "User Data"],
+    executablePaths: [
+      ["LOCALAPPDATA", "Chromium", "Application", "chrome.exe"],
+      ["ProgramFiles", "Chromium", "Application", "chrome.exe"],
+      ["ProgramFiles(x86)", "Chromium", "Application", "chrome.exe"],
+    ],
+    commands: ["chromium.exe", "chrome.exe"],
+  },
+  {
+    key: "brave",
+    name: "Brave Browser",
+    userDataPath: ["BraveSoftware", "Brave-Browser", "User Data"],
+    executablePaths: [
+      ["ProgramFiles", "BraveSoftware", "Brave-Browser", "Application", "brave.exe"],
+      ["ProgramFiles(x86)", "BraveSoftware", "Brave-Browser", "Application", "brave.exe"],
+      ["LOCALAPPDATA", "BraveSoftware", "Brave-Browser", "Application", "brave.exe"],
+    ],
+    commands: ["brave.exe"],
+  },
+  {
+    key: "edge",
+    name: "Microsoft Edge",
+    userDataPath: ["Microsoft", "Edge", "User Data"],
+    executablePaths: [
+      ["ProgramFiles(x86)", "Microsoft", "Edge", "Application", "msedge.exe"],
+      ["ProgramFiles", "Microsoft", "Edge", "Application", "msedge.exe"],
+      ["LOCALAPPDATA", "Microsoft", "Edge", "Application", "msedge.exe"],
+    ],
+    commands: ["msedge.exe"],
+  },
+  {
+    key: "vivaldi",
+    name: "Vivaldi",
+    userDataPath: ["Vivaldi", "User Data"],
+    executablePaths: [
+      ["LOCALAPPDATA", "Vivaldi", "Application", "vivaldi.exe"],
+      ["ProgramFiles", "Vivaldi", "Application", "vivaldi.exe"],
+      ["ProgramFiles(x86)", "Vivaldi", "Application", "vivaldi.exe"],
+    ],
+    commands: ["vivaldi.exe"],
+  },
+];
+const LINUX_BROWSER_PROFILE_SOURCES = [
+  { key: "chrome", name: "Google Chrome", userDataPath: ["google-chrome"], commands: ["google-chrome", "google-chrome-stable"] },
+  { key: "chrome-beta", name: "Google Chrome Beta", userDataPath: ["google-chrome-beta"], commands: ["google-chrome-beta"] },
+  { key: "chrome-for-testing", name: "Google Chrome for Testing", userDataPath: ["chrome-for-testing"], commands: ["chrome-for-testing", "google-chrome-for-testing"] },
+  { key: "chromium", name: "Chromium", userDataPath: ["chromium"], commands: ["chromium", "chromium-browser"] },
+  { key: "chromium-browser", name: "Chromium Browser", userDataPath: ["chromium-browser"], commands: ["chromium-browser", "chromium"] },
+  { key: "brave", name: "Brave Browser", userDataPath: ["BraveSoftware", "Brave-Browser"], commands: ["brave-browser", "brave"] },
+  { key: "edge", name: "Microsoft Edge", userDataPath: ["microsoft-edge"], commands: ["microsoft-edge", "microsoft-edge-stable"] },
+  { key: "vivaldi", name: "Vivaldi", userDataPath: ["vivaldi"], commands: ["vivaldi"] },
+  { key: "vivaldi-snapshot", name: "Vivaldi Snapshot", userDataPath: ["vivaldi-snapshot"], commands: ["vivaldi-snapshot"] },
+];
+const LINUX_FLATPAK_BROWSER_PROFILE_SOURCES = [
+  { key: "flatpak-chrome", name: "Google Chrome Flatpak", appId: "com.google.Chrome", userDataPath: ["google-chrome"] },
+  { key: "flatpak-chromium", name: "Chromium Flatpak", appId: "org.chromium.Chromium", userDataPath: ["chromium"] },
+  { key: "flatpak-brave", name: "Brave Browser Flatpak", appId: "com.brave.Browser", userDataPath: ["BraveSoftware", "Brave-Browser"] },
+  { key: "flatpak-edge", name: "Microsoft Edge Flatpak", appId: "com.microsoft.Edge", userDataPath: ["microsoft-edge"] },
+  { key: "flatpak-vivaldi", name: "Vivaldi Flatpak", appId: "com.vivaldi.Vivaldi", userDataPath: ["vivaldi"] },
 ];
 
 const INTERACTIVE_ROLES = new Set([
@@ -141,10 +253,16 @@ function usage() {
 Usage:
   realbrowser doctor [--deep] [--json]
   realbrowser status [--deep] [--json]
+  realbrowser profiles [query] [--browser <key>] [--json]
+  realbrowser find-tab|tabs-all [query] [--browser <key>] [--json]
+  realbrowser select-tab <query> [--browser <key>] [--front] [--json]
+  realbrowser open-profile <profile-query> <url> [--browser <key>] [--select] [--front] [--json]
+  realbrowser capture-network [url] [--anonymous|--profile <profile-query>|--browser-url <url>] [--reload] [--duration <ms>] [--har <path>] [--json]
+  realbrowser capture-console [url] [--anonymous|--profile <profile-query>|--reload] [--duration <ms>] [--out <path>] [--errors] [--json]
   realbrowser restart [--json]
   realbrowser cleanup-remote-debugging [--allow-attach] [--json]
   realbrowser tabs [--json]
-  realbrowser open|newtab <url> [--front] [--json]
+  realbrowser open|newtab <url> [--front] [--anonymous|--profile <profile-query>] [--browser <key>] [--select] [--json]
   realbrowser navigate|goto <url>
   realbrowser back|forward|reload [--page <id>]
   realbrowser select <pageId> [--front]
@@ -207,6 +325,15 @@ Global flags:
   --backend real|dev
   --browser-url <url>
   --cdp-url <url>
+  --profile <profile-query>
+  --browser <browser-key>
+  --select
+  --anonymous
+  --keep-anonymous
+  --reload
+  --duration <ms>
+  --har <path>
+  --out <path>
   --dedicated
   --no-fallback
   --cleanup-remote-debugging
@@ -319,6 +446,31 @@ function parseArgv(argv) {
       flags.maxLabels = arg.slice("--max-labels=".length);
     } else if (arg === "--front" || arg === "--bring-to-front") {
       flags.front = true;
+    } else if (arg === "--select") {
+      flags.select = true;
+    } else if (arg === "--no-select") {
+      flags.select = false;
+    } else if (arg === "--anonymous" || arg === "--isolated" || arg === "--clean-profile") {
+      flags.anonymous = true;
+      flags.dedicated = false;
+    } else if (arg === "--keep-anonymous" || arg === "--keep-isolated") {
+      flags.keepAnonymous = true;
+    } else if (arg === "--reload") {
+      flags.reload = true;
+    } else if (arg === "--no-reload") {
+      flags.reload = false;
+    } else if (arg === "--duration") {
+      flags.duration = argv[++index];
+    } else if (arg?.startsWith("--duration=")) {
+      flags.duration = arg.slice("--duration=".length);
+    } else if (arg === "--har") {
+      flags.har = argv[++index];
+    } else if (arg?.startsWith("--har=")) {
+      flags.har = arg.slice("--har=".length);
+    } else if (arg === "--summary") {
+      flags.summary = true;
+    } else if (arg === "--no-summary") {
+      flags.summary = false;
     } else if (arg === "--no-fallback") {
       flags.noFallback = true;
     } else if (
@@ -359,6 +511,14 @@ function parseArgv(argv) {
       flags.browserUrl = argv[++index];
     } else if (arg?.startsWith("--browser-url=")) {
       flags.browserUrl = arg.slice("--browser-url=".length);
+    } else if (arg === "--profile") {
+      flags.profile = argv[++index];
+    } else if (arg?.startsWith("--profile=")) {
+      flags.profile = arg.slice("--profile=".length);
+    } else if (arg === "--browser") {
+      flags.browser = argv[++index];
+    } else if (arg?.startsWith("--browser=")) {
+      flags.browser = arg.slice("--browser=".length);
     } else if (arg === "--cdp-url") {
       flags.cdpUrl = argv[++index];
     } else if (arg?.startsWith("--cdp-url=")) {
@@ -548,17 +708,87 @@ async function health(state) {
 }
 
 function desiredMode(flags = {}) {
-  return flags.dedicated ? DEDICATED_MODE : (process.env.REALBROWSER_MODE ?? AUTO_MODE);
+  if (flags.anonymous || process.env.REALBROWSER_ANONYMOUS === "1") {
+    return ANONYMOUS_MODE;
+  }
+  if (flags.dedicated) {
+    return DEDICATED_MODE;
+  }
+  const envMode = process.env.REALBROWSER_MODE;
+  if (envMode === ANONYMOUS_MODE || envMode === DEDICATED_MODE || envMode === AUTO_MODE) {
+    return envMode;
+  }
+  return AUTO_MODE;
+}
+
+function profileDirForMode(mode, flags = {}) {
+  if (
+    mode === ANONYMOUS_MODE &&
+    !flags.keepAnonymous &&
+    process.env.REALBROWSER_KEEP_ANONYMOUS !== "1"
+  ) {
+    return "";
+  }
+  return (
+    flags.profileDir ??
+    process.env.REALBROWSER_PROFILE_DIR ??
+    (mode === ANONYMOUS_MODE ? "" : DEFAULT_PROFILE_DIR)
+  );
 }
 
 function modeKey(flags = {}) {
+  const mode = desiredMode(flags);
   return JSON.stringify({
-    mode: desiredMode(flags),
+    mode,
     browserUrl: flags.browserUrl ?? process.env.REALBROWSER_BROWSER_URL ?? "",
-    profileDir: process.env.REALBROWSER_PROFILE_DIR ?? DEFAULT_PROFILE_DIR,
+    profileDir: profileDirForMode(mode, flags),
     packageSpec: PACKAGE_SPEC,
     noFallback: Boolean(flags.noFallback || process.env.REALBROWSER_NO_FALLBACK === "1"),
+    keepAnonymous: Boolean(flags.keepAnonymous || process.env.REALBROWSER_KEEP_ANONYMOUS === "1"),
   });
+}
+
+function hasExplicitDaemonSelection(flags = {}) {
+  return Boolean(
+    flags.anonymous ||
+    flags.dedicated ||
+    flags.backend ||
+    flags.browserUrl ||
+    flags.profileDir ||
+    flags.noFallback ||
+    flags.keepAnonymous ||
+    process.env.REALBROWSER_MODE ||
+    process.env.REALBROWSER_ANONYMOUS ||
+    process.env.REALBROWSER_BROWSER_URL ||
+    process.env.REALBROWSER_PROFILE_DIR ||
+    process.env.REALBROWSER_NO_FALLBACK,
+  );
+}
+
+async function anonymousProfileDirForStart(flags = {}) {
+  const configured = flags.profileDir ?? process.env.REALBROWSER_PROFILE_DIR;
+  if (configured) {
+    return path.resolve(configured);
+  }
+  return await fsp.mkdtemp(path.join(os.tmpdir(), "realbrowser-anonymous-"));
+}
+
+function shouldReplaceExistingDaemon(state, expectedModeKey, flags = {}, explicitSelection = false) {
+  if (!state || state.modeKey === expectedModeKey) {
+    return false;
+  }
+  if (!explicitSelection) {
+    return false;
+  }
+  if (
+    desiredMode(flags) === ANONYMOUS_MODE &&
+    !flags.profileDir &&
+    !process.env.REALBROWSER_PROFILE_DIR &&
+    modeFromState(state) === ANONYMOUS_MODE
+  ) {
+    return false;
+  }
+  return true;
 }
 
 async function stopState(state) {
@@ -592,7 +822,9 @@ async function stopState(state) {
 async function ensureDaemon(flags = {}) {
   const stateFile = stateFileFromFlags(flags);
   const existing = await readJson(stateFile);
-  if (existing && existing.modeKey !== modeKey(flags)) {
+  const expectedModeKey = modeKey(flags);
+  const explicitSelection = hasExplicitDaemonSelection(flags);
+  if (shouldReplaceExistingDaemon(existing, expectedModeKey, flags, explicitSelection)) {
     await stopState(existing);
   } else if (existing && isProcessAlive(existing.pid)) {
     try {
@@ -606,7 +838,7 @@ async function ensureDaemon(flags = {}) {
   const release = await acquireLock(`${stateFile}.lock`);
   try {
     const afterLock = await readJson(stateFile);
-    if (afterLock && afterLock.modeKey !== modeKey(flags)) {
+    if (shouldReplaceExistingDaemon(afterLock, expectedModeKey, flags, explicitSelection)) {
       await stopState(afterLock);
     } else if (afterLock && isProcessAlive(afterLock.pid)) {
       try {
@@ -619,12 +851,19 @@ async function ensureDaemon(flags = {}) {
 
     await fsp.rm(stateFile, { force: true });
     await fsp.mkdir(stateDir(stateFile), { recursive: true });
+    const startMode = desiredMode(flags);
+    const keepAnonymous = flags.keepAnonymous || process.env.REALBROWSER_KEEP_ANONYMOUS === "1";
+    const startProfileDir = startMode === ANONYMOUS_MODE && keepAnonymous
+      ? await anonymousProfileDirForStart(flags)
+      : profileDirForMode(startMode, flags);
     const env = {
       ...process.env,
       REALBROWSER_STATE_FILE: stateFile,
-      REALBROWSER_MODE: desiredMode(flags),
+      REALBROWSER_MODE: startMode,
+      REALBROWSER_PROFILE_DIR: startProfileDir,
       ...(flags.browserUrl ? { REALBROWSER_BROWSER_URL: flags.browserUrl } : {}),
       ...(flags.noFallback ? { REALBROWSER_NO_FALLBACK: "1" } : {}),
+      ...(keepAnonymous ? { REALBROWSER_KEEP_ANONYMOUS: "1" } : {}),
     };
     const logFile = path.join(stateDir(stateFile), "daemon.log");
     const out = fs.openSync(logFile, "a");
@@ -701,6 +940,36 @@ async function runCli() {
   }
   if (command === "daemon") {
     await runDaemon();
+    return;
+  }
+
+  if (command === "profiles" || command === "profile-list" || command === "list-profiles") {
+    const profiles = await listBrowserProfiles({ query: args[0], browser: flags.browser });
+    printResult({
+      text: formatProfileListText(profiles),
+      profiles: profiles.map(publicProfileInfo),
+    }, flags);
+    return;
+  }
+
+  if (command === "find-tab" || command === "tabs-all" || command === "search-tabs") {
+    const tabs = await findBrowserTabs({ query: args.join(" "), browser: flags.browser });
+    printResult({
+      text: formatBrowserTabListText(tabs),
+      tabs: tabs.map(publicBrowserTabInfo),
+    }, flags);
+    return;
+  }
+
+  if (command === "select-tab" || command === "attach-tab") {
+    requireArgs(command, args, 1);
+    printResult(await selectBrowserTabForAutomation(args.join(" "), flags), flags);
+    return;
+  }
+
+  if (command === "open-profile" || command === "profile-open") {
+    requireArgs(command, args, 2);
+    printResult(await openUrlInBrowserProfile(args[1], args[0], flags), flags);
     return;
   }
 
@@ -800,6 +1069,20 @@ async function runCli() {
     return;
   }
 
+  if ((command === "open" || command === "newtab") && flags.profile) {
+    requireArgs(command, args, 1);
+    printResult(await openUrlInBrowserProfile(args[0], flags.profile, flags), flags);
+    return;
+  }
+
+  if (flags.profile && !flags.browserUrl) {
+    const profile = await resolveBrowserProfileSelection(flags.profile, flags);
+    if (!profile.devtoolsHttpUrl) {
+      throw new Error(`Profile ${profile.id} is not exposing a DevTools endpoint. Open it with \`realbrowser open --profile "${profile.id}" <url>\`, enable Chrome remote debugging in that profile, then retry with \`--no-fallback\`.`);
+    }
+    flags.browserUrl = profile.devtoolsWsEndpoint ?? profile.devtoolsHttpUrl;
+  }
+
   const state = await ensureDaemon(flags);
   const response = await daemonRpc(state, daemonPayloadForCommand(command, args, flags));
   printResult(response, flags);
@@ -826,13 +1109,15 @@ function daemonPayloadForCommand(command, args, flags = {}) {
 
 async function cleanupRemoteDebuggingViaDaemon(state) {
   const mode = modeFromState(state) ?? AUTO_MODE;
-  if (mode === DEDICATED_MODE) {
+  if (mode === DEDICATED_MODE || mode === ANONYMOUS_MODE) {
     return {
-      text: "Remote-debugging settings cleanup skipped for the dedicated realbrowser profile; stopping the daemon closes the managed browser session.",
+      text: mode === ANONYMOUS_MODE
+        ? "Remote-debugging settings cleanup skipped for the anonymous realbrowser profile; stopping the daemon closes the temporary browser session."
+        : "Remote-debugging settings cleanup skipped for the dedicated realbrowser profile; stopping the daemon closes the managed browser session.",
       cleanupRemoteDebugging: {
         attempted: false,
         confirmed: true,
-        reason: "dedicated-managed-profile",
+        reason: mode === ANONYMOUS_MODE ? "anonymous-managed-profile" : "dedicated-managed-profile",
       },
     };
   }
@@ -913,7 +1198,10 @@ function formatRemoteDebuggingCleanupText(cleanup, before, after, options = {}) 
   if (options.stoppedPid) {
     lines.push(`stopped daemon pid ${options.stoppedPid}`);
   }
-  if (cleanup?.cleanupRemoteDebugging?.reason === "dedicated-managed-profile") {
+  if (
+    cleanup?.cleanupRemoteDebugging?.reason === "dedicated-managed-profile" ||
+    cleanup?.cleanupRemoteDebugging?.reason === "anonymous-managed-profile"
+  ) {
     lines.push(cleanup.text);
   } else if (before?.known && before.userEnabled === false && !cleanup?.cleanupRemoteDebugging?.attempted) {
     lines.push("Chrome remote debugging was already disabled.");
@@ -929,7 +1217,11 @@ function formatRemoteDebuggingCleanupText(cleanup, before, after, options = {}) 
   if (options.mode && options.mode !== AUTO_MODE) {
     lines.push(remoteDebuggingMetadataCaveat(options.mode));
   }
-  if (cleanup?.cleanupRemoteDebugging?.reason !== "dedicated-managed-profile" && (!after?.known || after.userEnabled)) {
+  if (
+    cleanup?.cleanupRemoteDebugging?.reason !== "dedicated-managed-profile" &&
+    cleanup?.cleanupRemoteDebugging?.reason !== "anonymous-managed-profile" &&
+    (!after?.known || after.userEnabled)
+  ) {
     lines.push(`If the banner remains, turn off Chrome remote debugging from ${REMOTE_DEBUGGING_SETTINGS_URL}.`);
   }
   return lines.join("\n");
@@ -944,6 +1236,9 @@ function remoteDebuggingMetadataLabel(mode) {
 function remoteDebuggingMetadataCaveat(mode) {
   if (mode === DEDICATED_MODE) {
     return "That metadata is not used by the dedicated realbrowser profile.";
+  }
+  if (mode === ANONYMOUS_MODE) {
+    return "That metadata is not used by the temporary anonymous realbrowser profile.";
   }
   if (mode === "browserUrl") {
     return "That metadata may not describe the configured browser URL backend.";
@@ -989,6 +1284,767 @@ function appendPathCandidates(candidates, baseDir, relativePaths) {
   for (const relativePath of relativePaths) {
     candidates.push(path.join(baseDir, ...relativePath));
   }
+}
+
+async function pathExists(file) {
+  try {
+    await fsp.access(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function browserProfileSourcesForPlatform() {
+  const home = os.homedir();
+  let sources;
+  if (process.platform === "darwin") {
+    const baseDir = path.join(home, "Library", "Application Support");
+    sources = MAC_BROWSER_PROFILE_SOURCES.map((source) => ({
+      ...source,
+      platform: "darwin",
+      userDataDir: path.join(baseDir, ...source.userDataPath),
+    }));
+  } else if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
+    sources = WINDOWS_BROWSER_PROFILE_SOURCES.map((source) => ({
+      ...source,
+      platform: "win32",
+      userDataDir: path.join(localAppData, ...source.userDataPath),
+    }));
+  } else {
+    const configHome = process.env.XDG_CONFIG_HOME || path.join(home, ".config");
+    const normal = LINUX_BROWSER_PROFILE_SOURCES.map((source) => ({
+      ...source,
+      platform: process.platform,
+      userDataDir: path.join(configHome, ...source.userDataPath),
+    }));
+    const flatpak = LINUX_FLATPAK_BROWSER_PROFILE_SOURCES.map((source) => ({
+      ...source,
+      platform: process.platform,
+      userDataDir: path.join(home, ".var", "app", source.appId, "config", ...source.userDataPath),
+    }));
+    sources = [...normal, ...flatpak];
+  }
+  return withCustomBrowserProfileSources(sources);
+}
+
+function withCustomBrowserProfileSources(sources) {
+  const seen = new Set(sources.map((source) => path.resolve(source.userDataDir)));
+  const customDirs = [
+    process.env.REALBROWSER_BROWSER_USER_DATA_DIR,
+    process.env.REALBROWSER_CHROME_USER_DATA_DIR,
+  ].filter(Boolean);
+  const customSources = [];
+  for (const customDir of customDirs) {
+    const userDataDir = path.resolve(customDir);
+    if (seen.has(userDataDir)) {
+      continue;
+    }
+    seen.add(userDataDir);
+    customSources.push({
+      key: customSources.length === 0 ? "custom" : `custom-${customSources.length + 1}`,
+      name: "Custom Chromium",
+      platform: process.platform,
+      userDataDir,
+    });
+  }
+  return [...customSources, ...sources];
+}
+
+async function listBrowserProfiles(options = {}) {
+  const browserFilter = options.browser ? normalizeProfileToken(options.browser) : "";
+  const profiles = [];
+  for (const source of browserProfileSourcesForPlatform()) {
+    if (browserFilter && !profileSourceMatchesBrowser(source, browserFilter)) {
+      continue;
+    }
+    if (!(await pathExists(source.userDataDir))) {
+      continue;
+    }
+    const localState = await readJson(path.join(source.userDataDir, "Local State"));
+    const profileDirs = await browserProfileDirectories(source.userDataDir);
+    for (const profileDirectory of profileDirs) {
+      const profilePath = path.join(source.userDataDir, profileDirectory);
+      const preferences = await readJson(path.join(profilePath, "Preferences"));
+      const info = browserProfileDisplayInfo(profileDirectory, preferences, localState);
+      const devtools = await readDevToolsActivePort(source.userDataDir, profilePath);
+      profiles.push({
+        id: `${source.key}:${profileDirectory}`,
+        browser: source.key,
+        browserName: source.name,
+        profileDirectory,
+        displayName: info.displayName,
+        email: info.email,
+        accountName: info.accountName,
+        userDataDir: source.userDataDir,
+        profilePath,
+        devtoolsPortFile: devtools?.portFile ?? null,
+        devtoolsScope: devtools?.scope ?? null,
+        devtoolsHttpUrl: devtools?.httpUrl ?? null,
+        devtoolsWsEndpoint: devtools?.wsEndpoint ?? null,
+        launchSupported: isBrowserProfileLaunchSupported(source),
+        source,
+      });
+    }
+  }
+  profiles.sort((a, b) => (
+    a.browserName.localeCompare(b.browserName) ||
+    a.profileDirectory.localeCompare(b.profileDirectory, undefined, { numeric: true }) ||
+    a.displayName.localeCompare(b.displayName)
+  ));
+  if (!options.query) {
+    return profiles;
+  }
+  return profiles.filter((profile) => browserProfileMatchesQuery(profile, options.query));
+}
+
+async function browserProfileDirectories(userDataDir) {
+  const entries = await fsp.readdir(userDataDir, { withFileTypes: true }).catch(() => []);
+  const names = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) {
+      continue;
+    }
+    if (entry.name === "System Profile" || entry.name === "Guest Profile") {
+      continue;
+    }
+    const preferencesPath = path.join(userDataDir, entry.name, "Preferences");
+    if (entry.name === "Default" || /^Profile \d+$/u.test(entry.name) || await pathExists(preferencesPath)) {
+      names.push(entry.name);
+    }
+  }
+  return [...new Set(names)].sort((a, b) => {
+    if (a === "Default") return -1;
+    if (b === "Default") return 1;
+    return a.localeCompare(b, undefined, { numeric: true });
+  });
+}
+
+function browserProfileDisplayInfo(profileDirectory, preferences, localState) {
+  const localInfo = localState?.profile?.info_cache?.[profileDirectory] ?? {};
+  const accountInfo = Array.isArray(preferences?.account_info) ? preferences.account_info[0] : null;
+  const email = stringOrNull(accountInfo?.email) ?? stringOrNull(localInfo.user_name);
+  const accountName = stringOrNull(accountInfo?.full_name) ?? stringOrNull(localInfo.gaia_name);
+  const displayName = (
+    stringOrNull(localInfo.name) ??
+    stringOrNull(localInfo.shortcut_name) ??
+    stringOrNull(preferences?.profile?.name) ??
+    email ??
+    profileDirectory
+  );
+  return { displayName, email, accountName };
+}
+
+function stringOrNull(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+async function readDevToolsActivePort(userDataDir, profilePath) {
+  const candidates = [
+    { portFile: path.join(profilePath, "DevToolsActivePort"), scope: "profile" },
+    { portFile: path.join(userDataDir, "DevToolsActivePort"), scope: "browser" },
+  ];
+  for (const candidate of candidates) {
+    const { portFile, scope } = candidate;
+    const text = await fsp.readFile(portFile, "utf8").catch(() => "");
+    const [port, browserPath] = text.trim().split(/\r?\n/u);
+    if (!port || !browserPath) {
+      continue;
+    }
+    const host = process.env.REALBROWSER_CDP_HOST || process.env.CDP_HOST || "127.0.0.1";
+    return {
+      portFile,
+      scope,
+      httpUrl: `http://${host}:${port}`,
+      wsEndpoint: `ws://${host}:${port}${browserPath}`,
+    };
+  }
+  return null;
+}
+
+function profileSourceMatchesBrowser(source, browserFilter) {
+  return [
+    source.key,
+    source.name,
+    source.appName,
+    ...(source.commands ?? []),
+    source.appId,
+  ].filter(Boolean).some((value) => normalizeProfileToken(value) === browserFilter);
+}
+
+function browserProfileMatchesQuery(profile, query) {
+  const needle = normalizeProfileToken(query);
+  if (!needle) {
+    return true;
+  }
+  const resolvedQuery = resolveProfilePathQuery(query);
+  return [
+    profile.id,
+    profile.browser,
+    profile.browserName,
+    profile.profileDirectory,
+    profile.displayName,
+    profile.email,
+    profile.accountName,
+  ].filter(Boolean).some((value) => normalizeProfileToken(value).includes(needle)) ||
+    (resolvedQuery && [profile.profilePath, profile.userDataDir].some((value) => path.resolve(value) === resolvedQuery));
+}
+
+async function resolveBrowserProfileSelection(query, flags = {}) {
+  const profileQuery = query ?? flags.profile ?? process.env.REALBROWSER_BROWSER_PROFILE;
+  if (!profileQuery) {
+    throw new Error("Missing browser profile. Run `realbrowser profiles`, then pass `--profile <id>` or use `realbrowser open-profile <id> <url>`.");
+  }
+  const profiles = await listBrowserProfiles({ browser: flags.browser });
+  const selected = selectBrowserProfile(profiles, profileQuery);
+  if (!selected) {
+    throw new Error(`No browser profile matched "${profileQuery}".\n${formatProfileListText(profiles)}`);
+  }
+  return selected;
+}
+
+function selectBrowserProfile(profiles, query) {
+  const needle = normalizeProfileToken(query);
+  const resolvedQuery = resolveProfilePathQuery(query);
+  const exact = profiles.filter((profile) => [
+    profile.id,
+    profile.profileDirectory,
+    profile.displayName,
+    profile.email,
+    profile.accountName,
+  ].filter(Boolean).some((value) => normalizeProfileToken(value) === needle) ||
+    (resolvedQuery && [profile.profilePath, profile.userDataDir].some((value) => path.resolve(value) === resolvedQuery)));
+  if (exact.length === 1) {
+    return exact[0];
+  }
+  if (exact.length > 1) {
+    throw new Error(`Profile query "${query}" is ambiguous:\n${formatProfileCandidates(exact)}`);
+  }
+  const fuzzy = profiles.filter((profile) => browserProfileMatchesQuery(profile, query));
+  if (fuzzy.length === 1) {
+    return fuzzy[0];
+  }
+  if (fuzzy.length > 1) {
+    throw new Error(`Profile query "${query}" is ambiguous:\n${formatProfileCandidates(fuzzy)}`);
+  }
+  return null;
+}
+
+function normalizeProfileToken(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function resolveProfilePathQuery(query) {
+  const value = String(query ?? "");
+  if (!value || (!value.includes(path.sep) && !(process.platform === "win32" && /[\\/]/u.test(value)))) {
+    return null;
+  }
+  return path.resolve(value);
+}
+
+function formatProfileListText(profiles) {
+  if (profiles.length === 0) {
+    return "No Chromium-family browser profiles found. If the browser uses a custom user-data root, set REALBROWSER_BROWSER_USER_DATA_DIR or REALBROWSER_CHROME_USER_DATA_DIR.";
+  }
+  const rows = profiles.map((profile) => ({
+    id: profile.id,
+    browser: profile.browserName,
+    profile: profile.profileDirectory,
+    name: [profile.displayName, profile.email ? `<${profile.email}>` : ""].filter(Boolean).join(" "),
+    debug: profile.devtoolsHttpUrl ? `${profile.devtoolsHttpUrl}${profile.devtoolsScope === "browser" ? " (browser)" : ""}` : "-",
+  }));
+  const widths = {
+    id: Math.max("ID".length, ...rows.map((row) => row.id.length)),
+    browser: Math.max("Browser".length, ...rows.map((row) => row.browser.length)),
+    profile: Math.max("Profile".length, ...rows.map((row) => row.profile.length)),
+    name: Math.max("Name / account".length, ...rows.map((row) => row.name.length)),
+  };
+  const line = (row) => [
+    row.id.padEnd(widths.id),
+    row.browser.padEnd(widths.browser),
+    row.profile.padEnd(widths.profile),
+    row.name.padEnd(widths.name),
+    row.debug,
+  ].join("  ");
+  return [
+    line({ id: "ID", browser: "Browser", profile: "Profile", name: "Name / account", debug: "Debug endpoint" }),
+    line({ id: "-".repeat(widths.id), browser: "-".repeat(widths.browser), profile: "-".repeat(widths.profile), name: "-".repeat(widths.name), debug: "--------------" }),
+    ...rows.map(line),
+    "",
+    'Use: realbrowser open --profile "<id>" <url>',
+    'Attach to a detected debugging endpoint with: realbrowser --profile "<id>" tabs',
+  ].join("\n");
+}
+
+function formatProfileCandidates(profiles) {
+  return profiles.map((profile) => `- ${profile.id} (${profile.browserName}, ${profile.displayName}${profile.email ? `, ${profile.email}` : ""})`).join("\n");
+}
+
+function isBrowserProfileLaunchSupported(source) {
+  if (process.platform === "darwin") {
+    return Boolean(source.appName);
+  }
+  if (process.platform === "win32") {
+    return Boolean(source.executablePaths?.length || source.commands?.length);
+  }
+  return Boolean(source.commands?.length || source.appId);
+}
+
+async function openUrlInBrowserProfile(url, profileQuery, flags = {}) {
+  const profile = await resolveBrowserProfileSelection(profileQuery, flags);
+  if (flags.select && !profile.devtoolsHttpUrl && !profile.devtoolsWsEndpoint) {
+    throw new Error(`Profile ${profile.id} is not exposing a DevTools endpoint, so realbrowser cannot auto-select the new tab. Enable Chrome remote debugging in that profile, or run without --select to only open the tab.`);
+  }
+  const launch = await launchBrowserProfile(profile, url, flags);
+  const selected = flags.select
+    ? await waitAndSelectBrowserTab(url, {
+      ...flags,
+      browserUrl: profile.devtoolsWsEndpoint ?? profile.devtoolsHttpUrl,
+      noFallback: true,
+    })
+    : null;
+  return {
+    text: [
+      `Opened ${url} in ${profile.browserName} profile ${profile.profileDirectory} (${profile.displayName}).`,
+      selected?.text,
+      profile.devtoolsHttpUrl
+        ? `Debug endpoint detected: ${profile.devtoolsHttpUrl}${profile.devtoolsScope === "browser" ? " (browser-level)" : ""}. Use \`realbrowser --profile "${profile.id}" tabs\` to attach, then verify/select the intended tab.`
+        : `No DevToolsActivePort was found for that profile yet. If automation needs existing login state, enable Chrome remote debugging in that profile, then run \`realbrowser --profile "${profile.id}" tabs --no-fallback\`.`,
+    ].filter(Boolean).join("\n"),
+    quiet: profile.id,
+    profile: publicProfileInfo(profile),
+    launch,
+    selected,
+  };
+}
+
+async function waitAndSelectBrowserTab(query, flags = {}) {
+  const timeoutMs = parsePositiveInteger(flags.timeout ?? "10000", "timeout");
+  const startedAt = Date.now();
+  let lastTabs = [];
+  while (Date.now() - startedAt <= timeoutMs) {
+    lastTabs = await findBrowserTabs({
+      query,
+      browser: flags.browser,
+      browserUrl: flags.browserUrl,
+      cdpUrl: flags.cdpUrl,
+    });
+    if (lastTabs.length > 0) {
+      return await selectBrowserTabForAutomation(query, flags);
+    }
+    await sleep(250);
+  }
+  throw new Error(`Opened the URL but no debuggable matching tab appeared within ${timeoutMs}ms.\n${formatBrowserTabListText(lastTabs)}`);
+}
+
+async function findBrowserTabs(options = {}) {
+  const profiles = await listBrowserProfiles({ browser: options.browser });
+  const endpoints = browserTabEndpoints(profiles, options);
+  const tabs = [];
+  for (const endpoint of endpoints) {
+    const targets = await fetchCdpTargetList(endpoint).catch(() => []);
+    for (const target of targets) {
+      if (target?.type && target.type !== "page") {
+        continue;
+      }
+      tabs.push({
+        id: `${endpoint.index}:${String(target.id ?? target.targetId ?? "").slice(0, 12)}`,
+        targetId: String(target.id ?? target.targetId ?? ""),
+        browserUrl: endpoint.httpUrl,
+        browserWsEndpoint: endpoint.wsEndpoint,
+        webSocketDebuggerUrl: target.webSocketDebuggerUrl ?? null,
+        url: String(target.url ?? ""),
+        title: String(target.title ?? ""),
+        browserNames: endpoint.browserNames,
+        profileIds: endpoint.profileIds,
+        profileNames: endpoint.profileNames,
+      });
+    }
+  }
+  const filtered = options.query ? tabs.filter((tab) => browserTabMatchesQuery(tab, options.query)) : tabs;
+  return filtered.sort((a, b) => (
+    (a.url || "").localeCompare(b.url || "") ||
+    (a.title || "").localeCompare(b.title || "")
+  ));
+}
+
+function browserTabEndpoints(profiles, options = {}) {
+  const endpoints = [];
+  const byUrl = new Map();
+  const addEndpoint = (httpUrl, profile = null, wsEndpoint = null) => {
+    if (!httpUrl) {
+      return;
+    }
+    const normalized = normalizeCdpHttpUrl(httpUrl);
+    if (!normalized) {
+      return;
+    }
+    let endpoint = byUrl.get(normalized);
+    if (!endpoint) {
+      endpoint = {
+        index: endpoints.length + 1,
+        httpUrl: normalized,
+        wsEndpoint: normalizeCdpWsEndpoint(wsEndpoint),
+        profiles: [],
+        profileIds: [],
+        profileNames: [],
+        browserNames: [],
+      };
+      byUrl.set(normalized, endpoint);
+      endpoints.push(endpoint);
+    }
+    if (!endpoint.wsEndpoint && wsEndpoint) {
+      endpoint.wsEndpoint = normalizeCdpWsEndpoint(wsEndpoint);
+    }
+    if (profile) {
+      endpoint.profiles.push(profile);
+      endpoint.profileIds.push(profile.id);
+      endpoint.profileNames.push(profile.displayName);
+      endpoint.browserNames.push(profile.browserName);
+    }
+  };
+  for (const profile of profiles) {
+    addEndpoint(profile.devtoolsHttpUrl, profile, profile.devtoolsWsEndpoint);
+  }
+  addEndpoint(options.browserUrl ?? process.env.REALBROWSER_BROWSER_URL, null, options.browserUrl ?? process.env.REALBROWSER_BROWSER_URL);
+  addEndpoint(options.cdpUrl ?? process.env.REALBROWSER_CDP_URL, null, options.cdpUrl ?? process.env.REALBROWSER_CDP_URL);
+  for (const endpoint of endpoints) {
+    endpoint.profileIds = [...new Set(endpoint.profileIds)];
+    endpoint.profileNames = [...new Set(endpoint.profileNames.filter(Boolean))];
+    endpoint.browserNames = [...new Set(endpoint.browserNames.filter(Boolean))];
+  }
+  return endpoints;
+}
+
+function normalizeCdpHttpUrl(value) {
+  if (!value) {
+    return null;
+  }
+  try {
+    const parsed = new URL(String(value));
+    if (parsed.protocol === "ws:" || parsed.protocol === "wss:") {
+      parsed.protocol = parsed.protocol === "wss:" ? "https:" : "http:";
+    }
+    parsed.pathname = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/u, "");
+  } catch {
+    return null;
+  }
+}
+
+function normalizeCdpWsEndpoint(value) {
+  if (!value) {
+    return null;
+  }
+  try {
+    const parsed = new URL(String(value));
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return null;
+    }
+    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchCdpTargetList(endpoint) {
+  if (endpoint.wsEndpoint) {
+    const client = new CdpClient(endpoint.wsEndpoint);
+    await client.connect();
+    try {
+      const result = await client.request("Target.getTargets", {});
+      return Array.isArray(result?.targetInfos) ? result.targetInfos : [];
+    } finally {
+      client.close();
+    }
+  }
+  const response = await fetch(`${endpoint.httpUrl.replace(/\/$/u, "")}/json/list`, {
+    signal: AbortSignal.timeout(2000),
+  });
+  if (!response.ok) {
+    throw new Error(`CDP target list failed for ${endpoint.httpUrl}: HTTP ${response.status}`);
+  }
+  const body = await response.json();
+  return Array.isArray(body) ? body : [];
+}
+
+function browserTabMatchesQuery(tab, query) {
+  const needle = normalizeProfileToken(query);
+  if (!needle) {
+    return true;
+  }
+  return [
+    tab.id,
+    tab.targetId,
+    tab.url,
+    tab.title,
+    tab.browserUrl,
+    ...(tab.browserNames ?? []),
+    ...(tab.profileIds ?? []),
+    ...(tab.profileNames ?? []),
+  ].filter(Boolean).some((value) => normalizeProfileToken(value).includes(needle));
+}
+
+function selectBrowserTabCandidate(tabs, query) {
+  const exactUrl = tabs.filter((tab) => tab.url === query);
+  if (exactUrl.length === 1) {
+    return exactUrl[0];
+  }
+  if (exactUrl.length > 1) {
+    throw new Error(`Tab query "${query}" matched multiple exact URLs:\n${formatBrowserTabCandidates(exactUrl)}`);
+  }
+  const exactId = tabs.filter((tab) => tab.id === query || tab.targetId === query);
+  if (exactId.length === 1) {
+    return exactId[0];
+  }
+  if (exactId.length > 1) {
+    throw new Error(`Tab query "${query}" matched multiple target IDs:\n${formatBrowserTabCandidates(exactId)}`);
+  }
+  if (tabs.length === 1) {
+    return tabs[0];
+  }
+  if (tabs.length > 1) {
+    throw new Error(`Tab query "${query}" is ambiguous:\n${formatBrowserTabCandidates(tabs)}`);
+  }
+  return null;
+}
+
+async function selectBrowserTabForAutomation(query, flags = {}) {
+  const tabs = await findBrowserTabs({ query, browser: flags.browser, browserUrl: flags.browserUrl, cdpUrl: flags.cdpUrl });
+  const tab = selectBrowserTabCandidate(tabs, query);
+  if (!tab) {
+    throw new Error(`No debuggable tab matched "${query}". Run \`realbrowser find-tab "${query}"\`; if nothing appears, open the URL with \`realbrowser open --profile <id> <url>\` and enable remote debugging for that profile.`);
+  }
+  const attachFlags = { ...flags, browserUrl: tab.browserWsEndpoint ?? tab.browserUrl, noFallback: true };
+  const state = await ensureDaemon(attachFlags);
+  const pagesResult = await daemonRpc(state, { command: "tabs", args: [], flags: {} });
+  const pages = parseListPagesResult(pagesResult);
+  const candidates = pages.filter((page) => page.url === tab.url || page.url.includes(query) || tab.url.includes(page.url));
+  if (candidates.length !== 1) {
+    return {
+      text: [
+        `Attached to ${tab.browserUrl}, but could not map the CDP target to a single MCP page.`,
+        `Matched tab: ${tab.title || "(untitled)"} ${tab.url}`,
+        "Run `realbrowser tabs`, then `realbrowser select <pageId>` for the intended page.",
+      ].join("\n"),
+      tab: publicBrowserTabInfo(tab),
+      pages,
+      selected: null,
+    };
+  }
+  const selected = await daemonRpc(state, {
+    command: "select",
+    args: [String(candidates[0].id)],
+    flags: { front: Boolean(flags.front) },
+  });
+  return {
+    text: [
+      `Selected tab ${candidates[0].id} on ${tab.browserUrl}.`,
+      `${tab.title || "(untitled)"}`,
+      tab.url,
+      tab.profileNames?.length ? `Possible profiles: ${tab.profileNames.join(", ")}` : "",
+    ].filter(Boolean).join("\n"),
+    quiet: String(candidates[0].id),
+    tab: publicBrowserTabInfo(tab),
+    page: candidates[0],
+    selected,
+  };
+}
+
+function formatBrowserTabListText(tabs) {
+  if (tabs.length === 0) {
+    return "No debuggable tabs found. Enable remote debugging in the target browser/profile, or open a URL with `realbrowser open --profile <id> <url>` first.";
+  }
+  const rows = tabs.map((tab) => ({
+    id: tab.id,
+    profiles: compactList(tab.profileNames, 32) || "-",
+    title: truncateOneLine(tab.title || "(untitled)", 42),
+    url: tab.url || "-",
+  }));
+  const widths = {
+    id: Math.max("ID".length, ...rows.map((row) => row.id.length)),
+    profiles: Math.max("Possible profiles".length, ...rows.map((row) => row.profiles.length)),
+    title: Math.max("Title".length, ...rows.map((row) => row.title.length)),
+  };
+  const line = (row) => [
+    row.id.padEnd(widths.id),
+    row.profiles.padEnd(widths.profiles),
+    row.title.padEnd(widths.title),
+    row.url,
+  ].join("  ");
+  return [
+    line({ id: "ID", profiles: "Possible profiles", title: "Title", url: "URL" }),
+    line({ id: "-".repeat(widths.id), profiles: "-".repeat(widths.profiles), title: "-".repeat(widths.title), url: "---" }),
+    ...rows.map(line),
+    "",
+    'Use: realbrowser select-tab "<url-or-title-fragment>"',
+  ].join("\n");
+}
+
+function formatBrowserTabCandidates(tabs) {
+  return tabs.map((tab) => `- ${tab.id} ${tab.title || "(untitled)"} ${tab.url}`).join("\n");
+}
+
+function publicBrowserTabInfo(tab) {
+  return {
+    id: tab.id,
+    targetId: tab.targetId,
+    browserUrl: tab.browserUrl,
+    browserWsEndpoint: tab.browserWsEndpoint,
+    webSocketDebuggerUrl: tab.webSocketDebuggerUrl,
+    title: tab.title,
+    url: tab.url,
+    browserNames: tab.browserNames,
+    profileIds: tab.profileIds,
+    profileNames: tab.profileNames,
+  };
+}
+
+function compactList(values, maxChars) {
+  const text = [...new Set((values ?? []).filter(Boolean))].join(", ");
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, maxChars - 1))}...`;
+}
+
+function truncateOneLine(value, maxChars) {
+  const text = String(value ?? "").replace(/\s+/gu, " ").trim();
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, maxChars - 1))}...`;
+}
+
+async function launchBrowserProfile(profile, url, flags = {}) {
+  const profileArg = `--profile-directory=${profile.profileDirectory}`;
+  const newTabArg = "--new-tab";
+  if (process.platform === "darwin") {
+    const executable = await firstExistingPath(macBrowserExecutableCandidates(profile.source));
+    if (executable) {
+      return await spawnDetached(executable, [profileArg, newTabArg, url]);
+    }
+    return await spawnDetached("open", ["-a", profile.source.appName, "--args", profileArg, newTabArg, url]);
+  }
+  if (process.platform === "win32") {
+    const executable = await firstExistingPath(windowsBrowserExecutableCandidates(profile.source)) ??
+      findCommandOnPath(profile.source.commands ?? []);
+    if (!executable) {
+      throw new Error(`Cannot find an executable for ${profile.browserName}. Open the browser manually with ${profileArg}, or pass --browser-url after enabling remote debugging.`);
+    }
+    return await spawnDetached(executable, [profileArg, newTabArg, url]);
+  }
+  if (profile.source.appId) {
+    const flatpak = findCommandOnPath(["flatpak"]);
+    if (flatpak) {
+      return await spawnDetached(flatpak, ["run", profile.source.appId, profileArg, newTabArg, url]);
+    }
+  }
+  const command = findCommandOnPath(profile.source.commands ?? []);
+  if (!command) {
+    throw new Error(`Cannot find a launcher for ${profile.browserName}. Open the browser manually with ${profileArg}, or pass --browser-url after enabling remote debugging.`);
+  }
+  return await spawnDetached(command, [profileArg, newTabArg, url]);
+}
+
+function publicProfileInfo(profile) {
+  return {
+    id: profile.id,
+    browser: profile.browser,
+    browserName: profile.browserName,
+    profileDirectory: profile.profileDirectory,
+    displayName: profile.displayName,
+    email: profile.email,
+    accountName: profile.accountName,
+    userDataDir: profile.userDataDir,
+    profilePath: profile.profilePath,
+    devtoolsScope: profile.devtoolsScope,
+    devtoolsHttpUrl: profile.devtoolsHttpUrl,
+    devtoolsWsEndpoint: profile.devtoolsWsEndpoint,
+    launchSupported: profile.launchSupported,
+  };
+}
+
+function macBrowserExecutableCandidates(source) {
+  const binary = source.appName;
+  return [
+    path.join("/Applications", `${source.appName}.app`, "Contents", "MacOS", binary),
+    path.join(os.homedir(), "Applications", `${source.appName}.app`, "Contents", "MacOS", binary),
+  ];
+}
+
+function windowsBrowserExecutableCandidates(source) {
+  const candidates = [];
+  for (const candidate of source.executablePaths ?? []) {
+    const [envName, ...relativePath] = candidate;
+    const base = process.env[envName];
+    if (base) {
+      candidates.push(path.join(base, ...relativePath));
+    }
+  }
+  return candidates;
+}
+
+async function firstExistingPath(candidates) {
+  for (const candidate of candidates ?? []) {
+    if (candidate && await pathExists(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function findCommandOnPath(commands) {
+  for (const command of commands) {
+    const resolved = findExecutableOnPath(command);
+    if (resolved) {
+      return resolved;
+    }
+  }
+  return null;
+}
+
+function findExecutableOnPath(command) {
+  if (!command) {
+    return null;
+  }
+  if (command.includes(path.sep) || (process.platform === "win32" && /[\\/]/u.test(command))) {
+    return fs.existsSync(command) ? command : null;
+  }
+  const pathEntries = String(process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  const extensions = process.platform === "win32"
+    ? String(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";")
+    : [""];
+  for (const entry of pathEntries) {
+    for (const extension of extensions) {
+      const fullPath = path.join(entry, process.platform === "win32" && !path.extname(command) ? `${command}${extension.toLowerCase()}` : command);
+      if (fs.existsSync(fullPath)) {
+        return fullPath;
+      }
+    }
+  }
+  return null;
+}
+
+function spawnDetached(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve({ command, args, pid: child.pid ?? null });
+    });
+  });
 }
 
 function modeFromState(state) {
@@ -1179,7 +2235,7 @@ function backgroundNewPageArgs(url, flags = {}) {
     "new_page",
     JSON.stringify({
       url,
-      background: !flags.front,
+      background: !(flags.front || flags.select),
       ...(flags.timeout ? { timeout: parsePositiveInteger(flags.timeout, "timeout") } : {}),
     }),
   ];
@@ -1425,9 +2481,20 @@ function withTimeout(promise, timeoutMs, label) {
 function buildMcpArgs(config) {
   const args = ["-y", PACKAGE_SPEC];
   if (config.browserUrl) {
-    args.push(`--browserUrl=${config.browserUrl}`);
+    if (/^wss?:/iu.test(config.browserUrl)) {
+      args.push(`--wsEndpoint=${config.browserUrl}`);
+    } else {
+      args.push(`--browserUrl=${config.browserUrl}`);
+    }
   } else if (config.mode === AUTO_MODE) {
     args.push("--autoConnect");
+  } else if (config.mode === ANONYMOUS_MODE) {
+    if (config.keepAnonymous && config.profileDir) {
+      args.push(`--userDataDir=${config.profileDir}`);
+    } else {
+      args.push("--isolated=true");
+    }
+    args.push("--chromeArg=--incognito");
   } else {
     args.push(`--userDataDir=${config.profileDir}`);
   }
@@ -1517,10 +2584,15 @@ function toolError(result, name) {
 class BrowserDaemon {
   constructor(stateFile) {
     this.stateFile = stateFile;
-    this.mode = process.env.REALBROWSER_MODE === DEDICATED_MODE ? DEDICATED_MODE : AUTO_MODE;
+    this.mode = process.env.REALBROWSER_MODE === ANONYMOUS_MODE
+      ? ANONYMOUS_MODE
+      : process.env.REALBROWSER_MODE === DEDICATED_MODE
+        ? DEDICATED_MODE
+        : AUTO_MODE;
     this.browserUrl = process.env.REALBROWSER_BROWSER_URL?.trim() || "";
-    this.profileDir = process.env.REALBROWSER_PROFILE_DIR ?? DEFAULT_PROFILE_DIR;
+    this.profileDir = process.env.REALBROWSER_PROFILE_DIR ?? (this.mode === ANONYMOUS_MODE ? "" : DEFAULT_PROFILE_DIR);
     this.noFallback = process.env.REALBROWSER_NO_FALLBACK === "1";
+    this.keepAnonymous = process.env.REALBROWSER_KEEP_ANONYMOUS === "1";
     this.mcp = null;
     this.tools = null;
     this.hiddenConsoleLines = new Set();
@@ -1531,12 +2603,15 @@ class BrowserDaemon {
     if (this.mcp) {
       return this.mcp;
     }
-    await fsp.mkdir(this.profileDir, { recursive: true });
+    if (this.profileDir) {
+      await fsp.mkdir(this.profileDir, { recursive: true });
+    }
     const mode = this.browserUrl ? "browserUrl" : this.mode;
     const client = new McpClient({
       mode: this.browserUrl ? DEDICATED_MODE : this.mode,
       browserUrl: this.browserUrl,
       profileDir: this.profileDir,
+      keepAnonymous: this.keepAnonymous,
     });
     await client.initialize();
     this.mcp = client;
@@ -1639,7 +2714,7 @@ class BrowserDaemon {
         requireArgs(command, args, 1);
         return await this.callTool("new_page", {
           url: args[0],
-          background: !flags.front,
+          background: !(flags.front || flags.select),
         });
       case "navigate":
       case "goto":
@@ -1776,6 +2851,15 @@ class BrowserDaemon {
         return await this.handleConsole(args, { ...flags, errors: true });
       case "requests":
         return await this.handleNetwork(args, flags);
+      case "capture-network":
+      case "network-capture":
+      case "capture-requests":
+        return await this.handleCaptureNetwork(args, flags);
+      case "capture-console":
+      case "console-capture":
+      case "capture-logs":
+      case "logs-capture":
+        return await this.handleCaptureConsole(args, flags);
       case "screenshot":
         return await this.handleScreenshot(args, flags);
       case "responsive":
@@ -1797,6 +2881,9 @@ class BrowserDaemon {
         return await this.handleCleanupRemoteDebugging(flags);
       case "stop":
         await this.mcp?.close().catch(() => {});
+        if (this.mode === ANONYMOUS_MODE && !this.keepAnonymous && this.profileDir) {
+          await fsp.rm(this.profileDir, { recursive: true, force: true }).catch(() => {});
+        }
         await fsp.rm(this.stateFile, { force: true }).catch(() => {});
         setTimeout(() => process.exit(0), 10).unref();
         return { text: "stopping" };
@@ -2315,6 +3402,114 @@ class BrowserDaemon {
     });
   }
 
+  async handleCaptureConsole(args, flags = {}) {
+    const targetUrl = args[0];
+    const durationMs = parsePositiveInteger(flags.duration ?? String(DEFAULT_CONSOLE_CAPTURE_DURATION_MS), "duration");
+    const timeoutMs = parsePositiveInteger(flags.timeout ?? String(DEFAULT_CONSOLE_CAPTURE_TIMEOUT_MS), "timeout");
+    let pageId;
+    let action = "sample";
+
+    if (targetUrl) {
+      await this.callTool("new_page", { url: "about:blank", background: false });
+      pageId = await this.resolvePageId(flags);
+      await this.callTool("navigate_page", {
+        pageId,
+        type: "url",
+        url: targetUrl,
+      });
+      action = "navigate";
+    } else {
+      pageId = await this.resolvePageId(flags);
+      if (flags.reload) {
+        await this.callTool("navigate_page", {
+          pageId,
+          type: "reload",
+        });
+        action = "reload";
+      }
+    }
+
+    await this.handleWait(["load"], { ...flags, page: String(pageId), timeout: String(timeoutMs) }).catch(() => null);
+    if (durationMs > 0) {
+      await sleep(durationMs);
+    }
+    await this.handleWait(["networkidle"], {
+      ...flags,
+      page: String(pageId),
+      timeout: String(Math.min(10000, Math.max(1000, timeoutMs))),
+    }).catch(() => null);
+
+    return await this.collectConsoleCapture(pageId, flags, { action, durationMs });
+  }
+
+  async collectConsoleCapture(pageId, flags = {}, meta = {}) {
+    const listResult = await this.callTool("list_console_messages", {
+      pageId,
+      ...(flags.errors ? { types: ["error", "warn"] } : {}),
+      ...(flags.preserve ? { includePreservedMessages: true } : {}),
+    });
+    const pageInfoResult = await this.evaluateFunction(consolePageInfoFunction(), {
+      ...flags,
+      page: String(pageId),
+    }).catch(() => null);
+    const pageInfo = pageInfoResult ? parseEvaluateJsonResult(pageInfoResult, "capture-console page info") : {};
+    const filter = normalizeOptionalString(flags.filter)?.toLowerCase();
+    const limit = parsePositiveInteger(flags.limit ?? String(DEFAULT_CONSOLE_CAPTURE_LIMIT), "limit");
+    const allMessages = normalizeConsoleMessages(listResult);
+    const filteredMessages = filter
+      ? allMessages.filter((message) => consoleMessageSearchText(message).toLowerCase().includes(filter))
+      : allMessages;
+    const selectedMessages = filteredMessages.slice(Math.max(0, filteredMessages.length - limit));
+    const messages = [];
+    for (const message of selectedMessages) {
+      const msgid = Number.parseInt(String(message.id ?? ""), 10);
+      if (!Number.isFinite(msgid)) {
+        messages.push(message);
+        continue;
+      }
+      const detail = await this.callTool("get_console_message", {
+        pageId,
+        msgid,
+      }).catch((error) => ({
+        text: `console detail unavailable for ${msgid}: ${error instanceof Error ? error.message : String(error)}`,
+      }));
+      messages.push(mergeConsoleMessageDetail(message, detail));
+    }
+    const capture = {
+      capturedAt: new Date().toISOString(),
+      action: meta.action ?? "sample",
+      durationMs: meta.durationMs ?? 0,
+      pageId,
+      url: pageInfo.url ?? "",
+      title: pageInfo.title ?? "",
+      readyState: pageInfo.readyState ?? "",
+      userAgent: pageInfo.userAgent ?? "",
+      filter: filter ?? undefined,
+      errorsOnly: Boolean(flags.errors),
+      includePreservedMessages: Boolean(flags.preserve),
+      totalBeforeFilter: allMessages.length,
+      totalAfterFilter: filteredMessages.length,
+      truncated: filteredMessages.length > selectedMessages.length,
+      messages,
+      counts: countConsoleTypes(messages),
+      rawListText: String(listResult.text ?? ""),
+    };
+    const outPath = flags.out ?? flags.output;
+    let resolvedOutPath = null;
+    if (outPath) {
+      resolvedOutPath = path.resolve(outPath);
+      await writeJson(resolvedOutPath, capture);
+    }
+    return {
+      text: formatConsoleCaptureText(capture, { outPath: resolvedOutPath, flags }),
+      quiet: resolvedOutPath ?? capture.url,
+      pageId,
+      url: capture.url,
+      capture,
+      outPath: resolvedOutPath,
+    };
+  }
+
   async handleEval(args, flags = {}) {
     const pageId = await this.resolvePageId(flags);
     const result = await this.callTool("evaluate_script", {
@@ -2363,6 +3558,81 @@ class BrowserDaemon {
       lineLimit: DEFAULT_LINE_LIMIT,
       linePredicate: flags.failed ? isFailedNetworkLine : undefined,
     });
+  }
+
+  async handleCaptureNetwork(args, flags = {}) {
+    const targetUrl = args[0];
+    const durationMs = parsePositiveInteger(flags.duration ?? String(DEFAULT_NETWORK_CAPTURE_DURATION_MS), "duration");
+    const timeoutMs = parsePositiveInteger(flags.timeout ?? String(DEFAULT_NETWORK_CAPTURE_TIMEOUT_MS), "timeout");
+    let pageId;
+    let action = "sample";
+
+    if (targetUrl) {
+      await this.callTool("new_page", { url: "about:blank", background: false });
+      pageId = await this.resolvePageId(flags);
+      await this.evaluateFunction(clearPerformanceEntriesFunction(), { ...flags, page: String(pageId) }).catch(() => null);
+      await this.callTool("navigate_page", {
+        pageId,
+        type: "url",
+        url: targetUrl,
+      });
+      action = "navigate";
+    } else {
+      pageId = await this.resolvePageId(flags);
+      await this.evaluateFunction(clearPerformanceEntriesFunction(), { ...flags, page: String(pageId) }).catch(() => null);
+      if (flags.reload) {
+        await this.callTool("navigate_page", {
+          pageId,
+          type: "reload",
+        });
+        action = "reload";
+      }
+    }
+
+    await this.handleWait(["load"], { ...flags, page: String(pageId), timeout: String(timeoutMs) }).catch(() => null);
+    if (durationMs > 0) {
+      await sleep(durationMs);
+    }
+    await this.handleWait(["networkidle"], {
+      ...flags,
+      page: String(pageId),
+      timeout: String(Math.min(10000, Math.max(1000, timeoutMs))),
+    }).catch(() => null);
+
+    const perfResult = await this.evaluateFunction(networkPerformanceCaptureFunction(), {
+      ...flags,
+      page: String(pageId),
+    });
+    const capture = parseEvaluateJsonResult(perfResult, "capture-network");
+    capture.action = action;
+    capture.pageId = pageId;
+    capture.durationMs = durationMs;
+
+    const networkResult = await this.callTool("list_network_requests", {
+      pageId,
+      includePreservedRequests: true,
+    }).catch((error) => ({
+      text: `network list unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    }));
+    const networkText = String(networkResult.text ?? "");
+    const summary = summarizeNetworkCapture(capture, networkText, flags);
+    let harPath = null;
+    if (flags.har) {
+      harPath = path.resolve(flags.har);
+      await fsp.mkdir(path.dirname(harPath), { recursive: true });
+      await fsp.writeFile(harPath, `${JSON.stringify(buildHarFromNetworkCapture(capture), null, 2)}\n`, "utf8");
+    }
+
+    return {
+      text: formatNetworkCaptureText(summary, { harPath, networkText, flags }),
+      quiet: harPath ?? summary.url,
+      pageId,
+      url: summary.url,
+      summary,
+      capture,
+      harPath,
+      networkText,
+    };
   }
 
   async handleRead(command, args, flags = {}) {
@@ -3064,6 +4334,621 @@ class BrowserDaemon {
     }
     throw new Error("trace expects start, stop, or analyze <insightName>");
   }
+}
+
+function clearPerformanceEntriesFunction() {
+  return `() => {
+    performance.clearResourceTimings?.();
+    performance.clearMarks?.();
+    performance.clearMeasures?.();
+    return true;
+  }`;
+}
+
+function networkPerformanceCaptureFunction() {
+  return `() => {
+    const number = (value) => Number.isFinite(value) ? Math.round(value * 10) / 10 : 0;
+    const serialize = (entry) => ({
+      name: entry.name || "",
+      entryType: entry.entryType || "",
+      initiatorType: entry.initiatorType || "",
+      startTime: number(entry.startTime),
+      duration: number(entry.duration),
+      workerStart: number(entry.workerStart),
+      redirectStart: number(entry.redirectStart),
+      redirectEnd: number(entry.redirectEnd),
+      fetchStart: number(entry.fetchStart),
+      domainLookupStart: number(entry.domainLookupStart),
+      domainLookupEnd: number(entry.domainLookupEnd),
+      connectStart: number(entry.connectStart),
+      secureConnectionStart: number(entry.secureConnectionStart),
+      connectEnd: number(entry.connectEnd),
+      requestStart: number(entry.requestStart),
+      responseStart: number(entry.responseStart),
+      responseEnd: number(entry.responseEnd),
+      transferSize: Number.isFinite(entry.transferSize) ? entry.transferSize : 0,
+      encodedBodySize: Number.isFinite(entry.encodedBodySize) ? entry.encodedBodySize : 0,
+      decodedBodySize: Number.isFinite(entry.decodedBodySize) ? entry.decodedBodySize : 0,
+      nextHopProtocol: entry.nextHopProtocol || "",
+      renderBlockingStatus: entry.renderBlockingStatus || "",
+      responseStatus: Number.isFinite(entry.responseStatus) ? entry.responseStatus : 0,
+      domContentLoadedEventStart: number(entry.domContentLoadedEventStart),
+      domContentLoadedEventEnd: number(entry.domContentLoadedEventEnd),
+      loadEventStart: number(entry.loadEventStart),
+      loadEventEnd: number(entry.loadEventEnd),
+    });
+    const navigation = performance.getEntriesByType("navigation").map(serialize)[0] || null;
+    const resources = performance.getEntriesByType("resource").map(serialize);
+    return JSON.stringify({
+      capturedAt: new Date().toISOString(),
+      timeOrigin: performance.timeOrigin,
+      url: location.href,
+      title: document.title,
+      navigation,
+      resources,
+    });
+  }`;
+}
+
+function parseEvaluateJsonResult(result, label) {
+  const text = String(result?.text ?? "").trim();
+  const candidates = [text];
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/u);
+  if (fence?.[1]) {
+    candidates.unshift(fence[1].trim());
+  }
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start !== -1 && end > start) {
+    candidates.push(text.slice(start, end + 1));
+  }
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (typeof parsed === "string") {
+        return JSON.parse(parsed);
+      }
+      return parsed;
+    } catch {
+      // Try the next representation.
+    }
+  }
+  throw new Error(`${label} did not return JSON: ${truncateOneLine(text, 240)}`);
+}
+
+function summarizeNetworkCapture(capture, networkText = "", flags = {}) {
+  const resources = Array.isArray(capture.resources) ? capture.resources : [];
+  const navigation = capture.navigation ?? null;
+  const totalTransfer = resources.reduce((sum, entry) => sum + positiveNumber(entry.transferSize), 0);
+  const totalEncoded = resources.reduce((sum, entry) => sum + positiveNumber(entry.encodedBodySize), 0);
+  const totalDecoded = resources.reduce((sum, entry) => sum + positiveNumber(entry.decodedBodySize), 0);
+  const failedLines = networkText.split(/\r?\n/u).filter(isFailedNetworkLine).slice(-20);
+  const slowRequests = [...resources]
+    .filter((entry) => positiveNumber(entry.duration) >= 1000)
+    .sort((a, b) => positiveNumber(b.duration) - positiveNumber(a.duration))
+    .slice(0, 10)
+    .map((entry) => summarizeNetworkEntry(entry, flags));
+  const largeRequests = [...resources]
+    .filter((entry) => Math.max(positiveNumber(entry.transferSize), positiveNumber(entry.decodedBodySize)) >= 512 * 1024)
+    .sort((a, b) => Math.max(positiveNumber(b.transferSize), positiveNumber(b.decodedBodySize)) - Math.max(positiveNumber(a.transferSize), positiveNumber(a.decodedBodySize)))
+    .slice(0, 10)
+    .map((entry) => summarizeNetworkEntry(entry, flags));
+  const renderBlocking = resources
+    .filter((entry) => entry.renderBlockingStatus && entry.renderBlockingStatus !== "non-blocking")
+    .slice(0, 10)
+    .map((entry) => summarizeNetworkEntry(entry, flags));
+  const byHost = topCounts(resources.map((entry) => hostFromUrl(entry.name)).filter(Boolean), 8);
+  const byType = topCounts(resources.map((entry) => entry.initiatorType || "other"), 8);
+  const navSummary = navigation ? {
+    duration: positiveNumber(navigation.duration),
+    ttfb: Math.max(0, positiveNumber(navigation.responseStart) - positiveNumber(navigation.requestStart)),
+    domContentLoaded: positiveNumber(navigation.domContentLoadedEventEnd || navigation.domContentLoadedEventStart),
+    load: positiveNumber(navigation.loadEventEnd || navigation.duration),
+    transferSize: positiveNumber(navigation.transferSize),
+    decodedBodySize: positiveNumber(navigation.decodedBodySize),
+    protocol: navigation.nextHopProtocol || "",
+    status: navigation.responseStatus || 0,
+  } : null;
+  return {
+    url: capture.url,
+    title: capture.title,
+    capturedAt: capture.capturedAt,
+    action: capture.action,
+    durationMs: capture.durationMs,
+    navigation: navSummary,
+    resources: resources.length,
+    totalTransfer,
+    totalEncoded,
+    totalDecoded,
+    failedLines,
+    slowRequests,
+    largeRequests,
+    renderBlocking,
+    byHost,
+    byType,
+  };
+}
+
+function summarizeNetworkEntry(entry, flags = {}) {
+  return {
+    url: displayNetworkUrl(entry.name, flags),
+    host: hostFromUrl(entry.name),
+    type: entry.initiatorType || "other",
+    duration: positiveNumber(entry.duration),
+    transferSize: positiveNumber(entry.transferSize),
+    decodedBodySize: positiveNumber(entry.decodedBodySize),
+    status: entry.responseStatus || 0,
+    protocol: entry.nextHopProtocol || "",
+    renderBlockingStatus: entry.renderBlockingStatus || "",
+  };
+}
+
+function formatNetworkCaptureText(summary, { harPath = null, networkText = "", flags = {} } = {}) {
+  const lines = [
+    `Network capture: ${summary.url}`,
+    summary.title ? `Title: ${summary.title}` : "",
+    `Resources: ${summary.resources} | transfer ${formatBytes(summary.totalTransfer)} | decoded ${formatBytes(summary.totalDecoded)}`,
+  ].filter(Boolean);
+  if (summary.navigation) {
+    lines.push(
+      `Navigation: ${formatMs(summary.navigation.duration)} total, ${formatMs(summary.navigation.ttfb)} TTFB, ${formatMs(summary.navigation.load)} load${summary.navigation.status ? `, status ${summary.navigation.status}` : ""}`,
+    );
+  }
+  if (summary.failedLines.length > 0) {
+    lines.push("");
+    lines.push(`Failed/error requests (${summary.failedLines.length}):`);
+    lines.push(...summary.failedLines.slice(0, 8));
+  }
+  if (summary.slowRequests.length > 0) {
+    lines.push("");
+    lines.push("Slow requests:");
+    for (const entry of summary.slowRequests.slice(0, 8)) {
+      lines.push(`- ${formatMs(entry.duration)} ${entry.type} ${entry.url}`);
+    }
+  }
+  if (summary.largeRequests.length > 0) {
+    lines.push("");
+    lines.push("Large transfers:");
+    for (const entry of summary.largeRequests.slice(0, 8)) {
+      lines.push(`- ${formatBytes(Math.max(entry.transferSize, entry.decodedBodySize))} ${entry.type} ${entry.url}`);
+    }
+  }
+  if (summary.renderBlocking.length > 0) {
+    lines.push("");
+    lines.push("Render-blocking resources:");
+    for (const entry of summary.renderBlocking.slice(0, 8)) {
+      lines.push(`- ${entry.renderBlockingStatus} ${entry.type} ${entry.url}`);
+    }
+  }
+  if (summary.byHost.length > 0) {
+    lines.push("");
+    lines.push(`Top hosts: ${summary.byHost.map((entry) => `${entry.key} (${entry.count})`).join(", ")}`);
+  }
+  if (summary.byType.length > 0) {
+    lines.push(`Types: ${summary.byType.map((entry) => `${entry.key} ${entry.count}`).join(", ")}`);
+  }
+  if (harPath) {
+    lines.push(`HAR: ${harPath}`);
+  }
+  if (flags.raw && networkText) {
+    lines.push("");
+    lines.push("Raw DevTools network list:");
+    lines.push(networkText);
+  }
+  return lines.join("\n");
+}
+
+function consolePageInfoFunction() {
+  return `() => JSON.stringify({
+    url: location.href,
+    title: document.title,
+    readyState: document.readyState,
+    userAgent: navigator.userAgent,
+  })`;
+}
+
+function normalizeConsoleMessages(result) {
+  const structured = result?.structuredContent ?? {};
+  const entries = Array.isArray(structured.consoleMessages)
+    ? structured.consoleMessages
+    : Array.isArray(structured.messages)
+      ? structured.messages
+      : [];
+  if (entries.length > 0) {
+    return entries.map((entry, index) => normalizeConsoleMessage(entry, index)).filter(Boolean);
+  }
+  return String(result?.text ?? "")
+    .split(/\r?\n/u)
+    .map((line, index) => normalizeConsoleLine(line, index))
+    .filter(Boolean);
+}
+
+function normalizeConsoleLine(line, index) {
+  const text = String(line ?? "").trim();
+  if (!text) {
+    return null;
+  }
+  const match = text.match(/^\s*(?:(\d+)[\s:.-]+)?(?:\[(log|info|warn|warning|error|debug|issue)\]|(log|info|warn|warning|error|debug|issue))?[\s:.-]*(.*)$/iu);
+  const id = match?.[1] ? Number.parseInt(match[1], 10) : null;
+  const type = (match?.[2] ?? match?.[3] ?? "").toLowerCase();
+  const messageText = (match?.[4] ?? text).trim() || text;
+  return {
+    id: Number.isFinite(id) ? id : null,
+    type: normalizeConsoleType(type),
+    text: messageText,
+    argsCount: undefined,
+    order: index,
+  };
+}
+
+function normalizeConsoleMessage(entry, index) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  const id = parseOptionalNumber(entry.id ?? entry.msgid ?? entry.messageId ?? entry.messageID);
+  const text = String(
+    entry.text ??
+      entry.message ??
+      entry.description ??
+      entry.value ??
+      entry.preview ??
+      "",
+  );
+  return {
+    id,
+    type: normalizeConsoleType(entry.type ?? entry.level ?? entry.source ?? ""),
+    text,
+    argsCount: parseOptionalNumber(entry.argsCount ?? entry.argumentCount) ?? (Array.isArray(entry.args) ? entry.args.length : undefined),
+    source: normalizeConsoleSource(entry),
+    timestamp: entry.timestamp ?? undefined,
+    order: index,
+  };
+}
+
+function mergeConsoleMessageDetail(message, detailResult) {
+  const structured = detailResult?.structuredContent ?? extractJsonFromToolText(detailResult?.text ?? "") ?? {};
+  const detail = structured.consoleMessage ?? structured.message ?? structured;
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) {
+    return {
+      ...message,
+      detailText: truncateOneLine(detailResult?.text ?? "", 2000),
+    };
+  }
+  const args = normalizeConsoleArgs(detail.args ?? detail.arguments ?? detail.parameters ?? structured.args);
+  const stackTrace = normalizeConsoleStackTrace(detail.stackTrace ?? detail.stack ?? structured.stackTrace ?? structured.stack);
+  const detailArgsCount = parseOptionalNumber(detail.argsCount ?? detail.argumentCount);
+  return {
+    ...message,
+    type: normalizeConsoleType(detail.type ?? detail.level ?? message.type),
+    text: String(detail.text ?? detail.message ?? detail.description ?? message.text ?? ""),
+    argsCount: detailArgsCount ?? (args.length > 0 ? args.length : message.argsCount),
+    args,
+    stackTrace,
+    source: normalizeConsoleSource(detail, message.source),
+    detailText: structured === detail && Object.keys(structured).length === 0
+      ? truncateOneLine(detailResult?.text ?? "", 2000)
+      : undefined,
+  };
+}
+
+function normalizeConsoleArgs(args) {
+  if (!Array.isArray(args)) {
+    return [];
+  }
+  return args.slice(0, 50).map((arg) => normalizeConsoleArg(arg));
+}
+
+function normalizeConsoleArg(arg) {
+  if (!arg || typeof arg !== "object") {
+    return { value: arg };
+  }
+  const normalized = {};
+  for (const key of ["type", "subtype", "className", "description", "unserializableValue", "objectId"]) {
+    if (arg[key] !== undefined) {
+      normalized[key] = arg[key];
+    }
+  }
+  if (arg.value !== undefined) {
+    normalized.value = arg.value;
+  }
+  if (arg.preview !== undefined) {
+    normalized.preview = arg.preview;
+  }
+  return normalized;
+}
+
+function normalizeConsoleStackTrace(stackTrace) {
+  if (!stackTrace) {
+    return [];
+  }
+  if (typeof stackTrace === "string") {
+    return stackTrace.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean).slice(0, 30);
+  }
+  const frames = [];
+  const visit = (trace) => {
+    if (!trace) {
+      return;
+    }
+    if (Array.isArray(trace)) {
+      for (const frame of trace) {
+        pushConsoleFrame(frames, frame);
+      }
+      return;
+    }
+    if (Array.isArray(trace.callFrames)) {
+      for (const frame of trace.callFrames) {
+        pushConsoleFrame(frames, frame);
+      }
+    }
+    if (trace.parent) {
+      visit(trace.parent);
+    }
+  };
+  visit(stackTrace);
+  return frames.slice(0, 30);
+}
+
+function pushConsoleFrame(frames, frame) {
+  if (!frame || typeof frame !== "object") {
+    return;
+  }
+  frames.push({
+    functionName: frame.functionName || frame.name || "",
+    url: frame.url || frame.scriptId || "",
+    lineNumber: parseOptionalNumber(frame.lineNumber) !== null ? parseOptionalNumber(frame.lineNumber) + 1 : undefined,
+    columnNumber: parseOptionalNumber(frame.columnNumber) !== null ? parseOptionalNumber(frame.columnNumber) + 1 : undefined,
+  });
+}
+
+function normalizeConsoleSource(entry, fallback = undefined) {
+  const url = entry.url ?? entry.sourceURL ?? entry.location?.url ?? fallback?.url;
+  const lineNumber = parseOptionalNumber(entry.lineNumber ?? entry.location?.lineNumber ?? fallback?.lineNumber);
+  const columnNumber = parseOptionalNumber(entry.columnNumber ?? entry.location?.columnNumber ?? fallback?.columnNumber);
+  if (!url && lineNumber === null && columnNumber === null) {
+    return fallback;
+  }
+  return {
+    url: url ? String(url) : undefined,
+    lineNumber: lineNumber !== null ? lineNumber + 1 : undefined,
+    columnNumber: columnNumber !== null ? columnNumber + 1 : undefined,
+  };
+}
+
+function normalizeConsoleType(value) {
+  const type = String(value ?? "").trim().toLowerCase();
+  if (type === "warning") {
+    return "warn";
+  }
+  return type || "log";
+}
+
+function consoleMessageSearchText(message) {
+  return [
+    message.type,
+    message.text,
+    message.source?.url,
+    ...(message.args ?? []).map((arg) => formatConsoleArgPreview(arg)),
+  ].filter(Boolean).join(" ");
+}
+
+function countConsoleTypes(messages) {
+  const counts = { total: messages.length, error: 0, warn: 0, log: 0, info: 0, debug: 0, issue: 0, other: 0 };
+  for (const message of messages) {
+    if (Object.hasOwn(counts, message.type)) {
+      counts[message.type] += 1;
+    } else {
+      counts.other += 1;
+    }
+  }
+  return counts;
+}
+
+function isProblemConsoleMessage(message) {
+  return message.type === "error" || message.type === "warn" || message.type === "issue";
+}
+
+function formatConsoleCaptureText(capture, { outPath = null, flags = {} } = {}) {
+  const counts = capture.counts ?? countConsoleTypes(capture.messages ?? []);
+  const lines = [
+    `Console capture: ${capture.url || "(unknown page)"}`,
+    capture.title ? `Title: ${capture.title}` : "",
+    `Messages: ${counts.total} shown${capture.truncated ? ` of ${capture.totalAfterFilter}` : ""} | errors ${counts.error} | warnings ${counts.warn} | logs ${counts.log}`,
+  ].filter(Boolean);
+  if (capture.readyState) {
+    lines.push(`Ready state: ${capture.readyState}`);
+  }
+  const problems = (capture.messages ?? []).filter(isProblemConsoleMessage);
+  if (problems.length > 0) {
+    lines.push("");
+    lines.push("Errors/warnings:");
+    for (const message of problems.slice(-20)) {
+      lines.push(formatConsoleMessageLine(message));
+      for (const frame of formatConsoleStackLines(message).slice(0, 3)) {
+        lines.push(`  ${frame}`);
+      }
+    }
+  }
+  const logs = flags.errors ? [] : (capture.messages ?? []).filter((message) => !isProblemConsoleMessage(message));
+  if (logs.length > 0) {
+    lines.push("");
+    lines.push("Recent logs:");
+    for (const message of logs.slice(-20)) {
+      lines.push(formatConsoleMessageLine(message));
+    }
+  }
+  if (capture.truncated) {
+    lines.push(`[...${capture.totalAfterFilter - capture.messages.length} earlier messages hidden - use --limit or --out]`);
+  }
+  if (outPath) {
+    lines.push(`JSON: ${outPath}`);
+  }
+  if (flags.raw && capture.rawListText) {
+    lines.push("");
+    lines.push("Raw DevTools console list:");
+    lines.push(capture.rawListText);
+  }
+  return lines.join("\n");
+}
+
+function formatConsoleMessageLine(message) {
+  const id = message.id !== null && message.id !== undefined ? `msgid=${message.id}` : `msg=${message.order ?? "?"}`;
+  const argsPreview = message.args?.length ? `args=${message.args.slice(0, 3).map(formatConsoleArgPreview).join(", ")}` : "";
+  return `- ${id} [${message.type || "console"}] ${truncateOneLine(message.text || argsPreview || "(no message text)", 400)}${argsPreview && message.text ? ` | ${argsPreview}` : ""}`;
+}
+
+function formatConsoleArgPreview(arg) {
+  if (!arg || typeof arg !== "object") {
+    return truncateOneLine(String(arg), 160);
+  }
+  if (arg.value !== undefined) {
+    return truncateOneLine(formatValue(arg.value), 160);
+  }
+  if (arg.unserializableValue !== undefined) {
+    return truncateOneLine(String(arg.unserializableValue), 160);
+  }
+  if (arg.description !== undefined) {
+    return truncateOneLine(String(arg.description), 160);
+  }
+  if (arg.preview !== undefined) {
+    return truncateOneLine(formatValue(arg.preview), 160);
+  }
+  return arg.type ? String(arg.type) : truncateOneLine(formatValue(arg), 160);
+}
+
+function formatConsoleStackLines(message) {
+  const stackTrace = message.stackTrace;
+  if (!Array.isArray(stackTrace)) {
+    return [];
+  }
+  return stackTrace.map((frame) => {
+    if (typeof frame === "string") {
+      return frame;
+    }
+    const location = [frame.url, frame.lineNumber, frame.columnNumber].filter((value) => value !== undefined && value !== "").join(":");
+    return `at ${frame.functionName || "(anonymous)"}${location ? ` (${location})` : ""}`;
+  });
+}
+
+function parseOptionalNumber(value) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function buildHarFromNetworkCapture(capture) {
+  const entries = [];
+  const timeOrigin = Number.isFinite(capture.timeOrigin) ? capture.timeOrigin : Date.now();
+  for (const entry of [capture.navigation, ...(capture.resources ?? [])].filter(Boolean)) {
+    const url = entry.name || capture.url;
+    if (!url) continue;
+    entries.push({
+      startedDateTime: new Date(timeOrigin + positiveNumber(entry.startTime)).toISOString(),
+      time: positiveNumber(entry.duration),
+      request: {
+        method: "GET",
+        url,
+        httpVersion: "HTTP/2",
+        headers: [],
+        queryString: queryStringForHar(url),
+        cookies: [],
+        headersSize: -1,
+        bodySize: 0,
+      },
+      response: {
+        status: entry.responseStatus || 0,
+        statusText: "",
+        httpVersion: entry.nextHopProtocol || "",
+        headers: [],
+        cookies: [],
+        content: {
+          size: positiveNumber(entry.decodedBodySize),
+          mimeType: "",
+        },
+        redirectURL: "",
+        headersSize: -1,
+        bodySize: positiveNumber(entry.encodedBodySize),
+      },
+      cache: {},
+      timings: {
+        blocked: Math.max(0, positiveNumber(entry.fetchStart) - positiveNumber(entry.startTime)),
+        dns: timingDelta(entry.domainLookupStart, entry.domainLookupEnd),
+        connect: timingDelta(entry.connectStart, entry.connectEnd),
+        send: Math.max(0, positiveNumber(entry.responseStart) - positiveNumber(entry.requestStart)),
+        wait: Math.max(0, positiveNumber(entry.responseStart) - positiveNumber(entry.requestStart)),
+        receive: Math.max(0, positiveNumber(entry.responseEnd) - positiveNumber(entry.responseStart)),
+        ssl: entry.secureConnectionStart ? timingDelta(entry.secureConnectionStart, entry.connectEnd) : -1,
+      },
+    });
+  }
+  return {
+    log: {
+      version: "1.2",
+      creator: { name: "realbrowser", version: "0.1.0" },
+      pages: [{
+        startedDateTime: new Date(timeOrigin).toISOString(),
+        id: "page_1",
+        title: capture.title ?? "",
+        pageTimings: {},
+      }],
+      entries,
+    },
+  };
+}
+
+function queryStringForHar(url) {
+  try {
+    return [...new URL(url).searchParams.entries()].map(([name, value]) => ({ name, value }));
+  } catch {
+    return [];
+  }
+}
+
+function timingDelta(start, end) {
+  const delta = positiveNumber(end) - positiveNumber(start);
+  return delta >= 0 ? delta : -1;
+}
+
+function topCounts(values, limit) {
+  const counts = new Map();
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([key, count]) => ({ key, count }))
+    .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key))
+    .slice(0, limit);
+}
+
+function hostFromUrl(value) {
+  try {
+    return new URL(value).host;
+  } catch {
+    return "";
+  }
+}
+
+function displayNetworkUrl(value, flags = {}) {
+  if (flags.values || flags.raw) {
+    return String(value ?? "");
+  }
+  try {
+    const parsed = new URL(value);
+    parsed.search = parsed.search ? "?..." : "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return String(value ?? "");
+  }
+}
+
+function positiveNumber(value) {
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function formatMs(value) {
+  return `${Math.round(positiveNumber(value))}ms`;
 }
 
 function normalizeReturnMode(value) {
@@ -4165,8 +6050,11 @@ async function runDaemon() {
     script: SCRIPT_PATH,
     stateFile,
     modeKey: modeKey({
+      anonymous: process.env.REALBROWSER_MODE === ANONYMOUS_MODE,
       dedicated: process.env.REALBROWSER_MODE === DEDICATED_MODE,
       browserUrl: process.env.REALBROWSER_BROWSER_URL?.trim() || undefined,
+      profileDir: process.env.REALBROWSER_PROFILE_DIR || undefined,
+      keepAnonymous: process.env.REALBROWSER_KEEP_ANONYMOUS === "1",
     }),
   });
 }
@@ -4251,6 +6139,31 @@ function runSelfTest() {
   assertSelfTest(parsedCleanupDetach.flags.cleanupRemoteDebugging === true, "parser handles cleanup remote debugging flag");
   const parsedNoFallbackOpen = parseArgv(["open", "https://example.com", "--no-fallback"]);
   assertSelfTest(parsedNoFallbackOpen.flags.noFallback === true, "parser handles no-fallback flag");
+  const parsedProfileOpen = parseArgv(["open", "https://example.com", "--profile", "chrome:Profile 4", "--browser=chrome"]);
+  assertSelfTest(parsedProfileOpen.flags.profile === "chrome:Profile 4", "parser handles browser profile flag");
+  assertSelfTest(parsedProfileOpen.flags.browser === "chrome", "parser handles browser filter flag");
+  const parsedProfileOpenSelect = parseArgv(["open", "https://example.com", "--profile", "chrome:Profile 4", "--select", "--timeout", "15000"]);
+  assertSelfTest(parsedProfileOpenSelect.flags.select === true, "parser handles profile open select flag");
+  assertSelfTest(parsedProfileOpenSelect.flags.timeout === "15000", "parser preserves profile open select timeout");
+  const parsedAnonymousOpen = parseArgv(["open", "https://example.com", "--anonymous", "--select"]);
+  assertSelfTest(parsedAnonymousOpen.flags.anonymous === true, "parser handles anonymous flag");
+  assertSelfTest(parsedAnonymousOpen.flags.select === true, "parser handles anonymous select flag");
+  const parsedNetworkCapture = parseArgv(["capture-network", "https://example.com", "--anonymous", "--duration", "15000", "--har", "example.har", "--reload"]);
+  assertSelfTest(parsedNetworkCapture.command === "capture-network", "parser handles capture-network command");
+  assertSelfTest(parsedNetworkCapture.flags.duration === "15000", "parser handles capture duration");
+  assertSelfTest(parsedNetworkCapture.flags.har === "example.har", "parser handles HAR path");
+  assertSelfTest(parsedNetworkCapture.flags.reload === true, "parser handles reload flag");
+  const parsedConsoleCapture = parseArgv(["capture-console", "https://example.com", "--anonymous", "--duration", "3000", "--out", "console.json", "--errors"]);
+  assertSelfTest(parsedConsoleCapture.command === "capture-console", "parser handles capture-console command");
+  assertSelfTest(parsedConsoleCapture.flags.out === "console.json", "parser handles console capture output path");
+  assertSelfTest(parsedConsoleCapture.flags.errors === true, "parser handles console capture errors flag");
+  assertSelfTest(desiredMode({ anonymous: true }) === ANONYMOUS_MODE, "anonymous flag selects anonymous mode");
+  const mockProfiles = [
+    { id: "chrome:Default", browserName: "Google Chrome", profileDirectory: "Default", displayName: "Person 1", email: "one@example.com" },
+    { id: "chrome:Profile 4", browserName: "Google Chrome", profileDirectory: "Profile 4", displayName: "Tom", email: "tom@example.com" },
+  ];
+  assertSelfTest(selectBrowserProfile(mockProfiles, "chrome:Profile 4")?.displayName === "Tom", "profile selection supports stable id");
+  assertSelfTest(selectBrowserProfile(mockProfiles, "tom@example.com")?.profileDirectory === "Profile 4", "profile selection supports account email");
   const parsedDismissDetach = parseArgv(["detach", "--dismiss-banner"]);
   assertSelfTest(parsedDismissDetach.flags.dismissBanner === true, "parser handles dismiss banner flag");
   const parsedNoDismissDetach = parseArgv(["detach", "--no-dismiss-banner"]);
