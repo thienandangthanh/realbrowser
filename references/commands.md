@@ -108,6 +108,16 @@ Read this when you need command syntax beyond the common recipes in `SKILL.md`.
 - `screenshot [path] [--full|--full-page] [--uid <uid>] [--labels|--annotate]
   [--format png|jpeg|webp] [--max-side <px>] [--max-bytes <bytes|5mb>]
   [--raw-size|--no-normalize]`: save a screenshot.
+- `full-screenshot [path] [--viewport <WxH>] [--selector <css>]
+  [--mobile|--mobile-emulation] [--settle-ms <ms>] [--page <id>]`: save a
+  full-size screenshot. It uses browser-native full-page capture when the
+  document scrolls; when the document is fixed-height but a dominant internal
+  scroll container exists, it scrolls and stitches that container. Aliases:
+  `full-size-screenshot`, `fullpage-screenshot`.
+- `area-screenshot [path] (--uid <uid>|--selector <css>) [--page <id>]
+  [--raw-size]`: save a specific element/region. Use `--uid` from a snapshot
+  when available, or `--selector` for a CSS-selected box. Aliases:
+  `element-screenshot`, `part-screenshot`.
 - `responsive <path-prefix>`: save mobile, tablet, and desktop screenshots in
   one daemon call.
 - `capture-network [url] [--anonymous|--profile <profile-query>|--browser-url

@@ -34,7 +34,9 @@ const DAEMON_CAPABILITIES = Object.freeze([
   "content-posts",
   "device-screenshots",
   "endpoint-session-manager",
+  "area-screenshot",
   "filtered-links",
+  "full-screenshot",
   "foreground-readiness",
   "managed-headless",
   "managed-idle-timeout",
@@ -287,6 +289,8 @@ const CLI_COMMAND_GROUPS = [
       { name: "mobile-screenshot", usage: "realbrowser mobile-screenshot [url] [path] [--viewport <WxH>] [--handle <path-or-name>] [--handle-out <path>] [--force] [--session <name>]", summary: "Capture a page-scoped mobile screenshot with dimension checks.", handle: true },
       { name: "device-screenshots", aliases: ["exact-screenshots", "responsive-exact"], usage: "realbrowser device-screenshots [url] [path-prefix] [--devices desktop:1440x900,tablet:768x1024,mobile:390x844] [--settle-ms <ms>] [--mobile-emulation] [--full] [--handle <path-or-name>] [--session <name>]", summary: "Capture exact desktop/tablet/mobile PNG screenshots with dimension checks.", handle: true },
       { name: "screenshot", usage: "realbrowser screenshot [path] [--full|--full-page] [--uid <uid>] [--labels|--annotate] [--format png|jpeg|webp] [--quality <0-100>] [--max-side <px>] [--max-bytes <bytes|5mb>] [--raw-size|--no-normalize] [--page <id>]", summary: "Capture a screenshot.", handle: true },
+      { name: "full-screenshot", aliases: ["full-size-screenshot", "fullpage-screenshot"], usage: "realbrowser full-screenshot [path] [--viewport <WxH>] [--selector <css>] [--mobile|--mobile-emulation] [--settle-ms <ms>] [--page <id>]", summary: "Capture a full page, or stitch a dominant internal scroll container when the document itself does not scroll.", handle: true },
+      { name: "area-screenshot", aliases: ["element-screenshot", "part-screenshot"], usage: "realbrowser area-screenshot [path] (--uid <uid>|--selector <css>) [--page <id>] [--raw-size]", summary: "Capture a specific element or selector area.", handle: true },
       { name: "observe", usage: "realbrowser observe [--screenshot] [--limit <n>] [--max-chars <n>] [--page <id>] [--json]", summary: "Read a compact page observation.", handle: true },
       { name: "snapshot", aliases: ["accessibility"], usage: "realbrowser snapshot [--page <id>] [--efficient] [--interactive] [--compact] [--depth <n>] [--max-chars <n>] [--max-nodes <n>] [--labels|--annotate] [--out <path>] [--raw|--verbose] [--json]", summary: "Read the accessibility tree.", handle: true },
     ],
@@ -2314,6 +2318,16 @@ function isDeviceScreenshotsCommand(command) {
   return command === "device-screenshots" || command === "exact-screenshots" || command === "responsive-exact";
 }
 
+function screenshotUtilityCapability(command) {
+  if (command === "full-screenshot" || command === "full-size-screenshot" || command === "fullpage-screenshot") {
+    return "full-screenshot";
+  }
+  if (command === "area-screenshot" || command === "element-screenshot" || command === "part-screenshot") {
+    return "area-screenshot";
+  }
+  return "";
+}
+
 function isMissingDaemonCapabilityError(error, capability) {
   return String(error?.message ?? error).includes(`does not support ${capability}`);
 }
@@ -2348,6 +2362,18 @@ async function maybeRunDeviceScreenshotsWithTemporaryDaemon(state, payload, flag
   if (!isDeviceScreenshotsCommand(payload?.command) || !isMissingDaemonCapabilityError(error, "device-screenshots")) {
     return null;
   }
+  return await runPayloadWithTemporaryCurrentDaemon(state, payload, flags, "device-screenshots");
+}
+
+async function maybeRunScreenshotUtilityWithTemporaryDaemon(state, payload, flags = {}, error) {
+  const capability = screenshotUtilityCapability(payload?.command);
+  if (!capability || !isMissingDaemonCapabilityError(error, capability)) {
+    return null;
+  }
+  return await runPayloadWithTemporaryCurrentDaemon(state, payload, flags, capability);
+}
+
+async function runPayloadWithTemporaryCurrentDaemon(state, payload, flags = {}, capability = "command") {
   const browserUrl = browserUrlFromState(state);
   if (!browserUrl || !isRealProfileSessionMode(modeFromState(state))) {
     return null;
@@ -2358,7 +2384,7 @@ async function maybeRunDeviceScreenshotsWithTemporaryDaemon(state, payload, flag
     noFallback: true,
     noActiveSession: true,
     session: "",
-    stateFile: path.join(os.tmpdir(), `realbrowser-device-screenshots-${process.pid}-${Date.now()}.json`),
+    stateFile: path.join(os.tmpdir(), `realbrowser-${capability}-${process.pid}-${Date.now()}.json`),
   };
   if (!tempFlags.targetId) {
     const targetId = await selectedCdpTargetIdFromDaemon(state, flags);
@@ -2431,6 +2457,14 @@ function requiredCapabilitiesForCommand(command, args = []) {
     case "exact-screenshots":
     case "responsive-exact":
       return new Set(["device-screenshots"]);
+    case "full-screenshot":
+    case "full-size-screenshot":
+    case "fullpage-screenshot":
+      return new Set(["full-screenshot"]);
+    case "area-screenshot":
+    case "element-screenshot":
+    case "part-screenshot":
+      return new Set(["area-screenshot"]);
     default:
       return new Set();
   }
@@ -2949,7 +2983,8 @@ async function runCli() {
   try {
     response = await daemonRpc(state, payload);
   } catch (error) {
-    response = await maybeRunDeviceScreenshotsWithTemporaryDaemon(state, payload, flags, error);
+    response = await maybeRunDeviceScreenshotsWithTemporaryDaemon(state, payload, flags, error) ??
+      await maybeRunScreenshotUtilityWithTemporaryDaemon(state, payload, flags, error);
     if (!response) {
       throw error;
     }
@@ -3288,6 +3323,20 @@ function defaultMobileScreenshotPath() {
   return path.join(
     DEFAULT_SCREENSHOT_DIR,
     `mobile-screenshot-${new Date().toISOString().replaceAll(/[:.]/g, "-")}.png`,
+  );
+}
+
+function defaultFullScreenshotPath() {
+  return path.join(
+    DEFAULT_SCREENSHOT_DIR,
+    `full-screenshot-${new Date().toISOString().replaceAll(/[:.]/g, "-")}.png`,
+  );
+}
+
+function defaultAreaScreenshotPath() {
+  return path.join(
+    DEFAULT_SCREENSHOT_DIR,
+    `area-screenshot-${new Date().toISOString().replaceAll(/[:.]/g, "-")}.png`,
   );
 }
 
@@ -7198,6 +7247,14 @@ class BrowserDaemon {
         return await this.handleCaptureConsole(args, flags);
       case "screenshot":
         return await this.handleScreenshot(args, flags);
+      case "full-screenshot":
+      case "full-size-screenshot":
+      case "fullpage-screenshot":
+        return await this.handleFullScreenshot(args, flags);
+      case "area-screenshot":
+      case "element-screenshot":
+      case "part-screenshot":
+        return await this.handleAreaScreenshot(args, flags);
       case "device-screenshots":
       case "exact-screenshots":
       case "responsive-exact":
@@ -8845,6 +8902,426 @@ class BrowserDaemon {
     };
   }
 
+  async handleFullScreenshot(args, flags = {}) {
+    const explicitPath = args.find((arg) => !arg.startsWith("--"));
+    const filePath = path.resolve(explicitPath ?? defaultFullScreenshotPath());
+    const settleMs = parsePositiveInteger(flags.settleMs ?? "200", "settle-ms");
+    if (flags.viewport) {
+      const viewport = parseViewportSize(flags.viewport);
+      await this.handleViewport(viewport.requested, {
+        ...flags,
+        mobile: Boolean(flags.mobile || flags.mobileEmulation),
+      });
+      if (settleMs > 0) await sleep(settleMs);
+    }
+
+    const prepared = await this.prepareFullScreenshotTarget(flags);
+    try {
+      const target = prepared.target;
+      const documentScrollExtra = Math.max(0, prepared.document.scrollHeight - prepared.viewport.innerHeight);
+      const targetScrollExtra = target ? Math.max(0, target.scrollHeight - target.clientHeight) : 0;
+
+      if (flags.selector && targetScrollExtra <= 20) {
+        return await this.handleAreaScreenshot([filePath], flags);
+      }
+
+      if (!flags.selector && (documentScrollExtra > 20 || !target || targetScrollExtra <= 20)) {
+        const result = await this.handleScreenshot([filePath], {
+          ...flags,
+          full: true,
+          rawSize: flags.rawSize !== false,
+        });
+        const format = inferScreenshotFormat(filePath, flags);
+        const png = format === "png" ? readPngDimensions(filePath) : null;
+        return {
+          ...result,
+          text: [
+            `Saved full screenshot to ${path.resolve(filePath)}.`,
+            "Method: page-full",
+            `Document: ${prepared.document.scrollWidth}x${prepared.document.scrollHeight}`,
+            `Viewport: ${prepared.viewport.innerWidth}x${prepared.viewport.innerHeight} @ ${prepared.viewport.devicePixelRatio}`,
+            png ? `PNG: ${png.pixelWidth}x${png.pixelHeight}` : "",
+          ].filter(Boolean).join("\n"),
+          filePath: path.resolve(filePath),
+          path: path.resolve(filePath),
+          method: "page-full",
+          png,
+          prepared,
+        };
+      }
+
+      return await this.captureStitchedScrollContainer(filePath, flags, prepared);
+    } finally {
+      await this.cleanupFullScreenshotTarget(prepared, flags).catch(() => {});
+    }
+  }
+
+  async handleAreaScreenshot(args, flags = {}) {
+    const explicitPath = args.find((arg) => !arg.startsWith("--"));
+    const filePath = path.resolve(explicitPath ?? defaultAreaScreenshotPath());
+    if (flags.uid) {
+      return await this.handleScreenshot([filePath], {
+        ...flags,
+        rawSize: flags.rawSize !== false,
+      });
+    }
+    if (!flags.selector) {
+      throw new Error("area-screenshot requires --uid <uid> or --selector <css>.");
+    }
+    return await this.captureSelectorAreaScreenshot(filePath, flags);
+  }
+
+  async prepareFullScreenshotTarget(flags = {}) {
+    const markerAttr = "data-realbrowser-full-screenshot-target";
+    const marker = `rb-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const selector = flags.selector ? String(flags.selector) : "";
+    const result = await this.evaluateFunction(
+      `() => {
+        const markerAttr = ${JSON.stringify(markerAttr)};
+        const marker = ${JSON.stringify(marker)};
+        const selector = ${JSON.stringify(selector)};
+        const doc = document.documentElement;
+        const body = document.body;
+        const viewport = {
+          innerWidth: Math.max(1, Math.round(window.innerWidth || doc?.clientWidth || 0)),
+          innerHeight: Math.max(1, Math.round(window.innerHeight || doc?.clientHeight || 0)),
+          devicePixelRatio: Number(window.devicePixelRatio || 1),
+        };
+        const documentSize = {
+          scrollWidth: Math.max(viewport.innerWidth, Math.round(doc?.scrollWidth || 0), Math.round(body?.scrollWidth || 0)),
+          scrollHeight: Math.max(viewport.innerHeight, Math.round(doc?.scrollHeight || 0), Math.round(body?.scrollHeight || 0)),
+          clientWidth: Math.max(1, Math.round(doc?.clientWidth || viewport.innerWidth)),
+          clientHeight: Math.max(1, Math.round(doc?.clientHeight || viewport.innerHeight)),
+        };
+        const describe = (el, index = -1) => {
+          const style = getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          const visibleWidth = Math.max(0, Math.min(rect.right, viewport.innerWidth) - Math.max(rect.left, 0));
+          const visibleHeight = Math.max(0, Math.min(rect.bottom, viewport.innerHeight) - Math.max(rect.top, 0));
+          const scrollExtra = Math.max(0, el.scrollHeight - el.clientHeight);
+          const score = (scrollExtra * Math.max(1, visibleWidth)) + (visibleWidth * visibleHeight);
+          return {
+            index,
+            tag: el.tagName.toLowerCase(),
+            id: el.id || "",
+            className: String(el.className || "").slice(0, 160),
+            overflowY: style.overflowY,
+            scrollTop: Math.round(el.scrollTop || 0),
+            scrollHeight: Math.round(el.scrollHeight || 0),
+            clientHeight: Math.round(el.clientHeight || 0),
+            clientWidth: Math.round(el.clientWidth || 0),
+            scrollExtra,
+            visibleWidth: Math.round(visibleWidth),
+            visibleHeight: Math.round(visibleHeight),
+            score,
+            rect: {
+              left: rect.left,
+              top: rect.top,
+              right: rect.right,
+              bottom: rect.bottom,
+              width: rect.width,
+              height: rect.height,
+            },
+            text: String(el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 120),
+          };
+        };
+        let selected = null;
+        let selectedBy = "";
+        let candidates = [];
+        if (selector) {
+          selected = document.querySelector(selector);
+          if (!selected) throw new Error("Selector not found: " + selector);
+          selectedBy = "selector";
+        } else {
+          candidates = Array.from(document.querySelectorAll("*"))
+            .map((el, index) => ({ el, info: describe(el, index) }))
+            .filter(({ info }) =>
+              info.scrollExtra > 20 &&
+              info.visibleWidth > 40 &&
+              info.visibleHeight > 40 &&
+              (info.overflowY === "auto" || info.overflowY === "scroll")
+            )
+            .sort((left, right) => right.info.score - left.info.score);
+          selected = candidates[0]?.el ?? null;
+          selectedBy = selected ? "dominant-scroll-container" : "";
+        }
+        const target = selected ? describe(selected, candidates.find((entry) => entry.el === selected)?.info?.index ?? -1) : null;
+        if (selected) selected.setAttribute(markerAttr, marker);
+        return {
+          markerAttr,
+          marker,
+          selectedBy,
+          selector: selector || undefined,
+          viewport,
+          document: documentSize,
+          target,
+          candidates: candidates.slice(0, 5).map((entry) => entry.info),
+        };
+      }`,
+      flags,
+    );
+    const prepared = extractJsonFromToolText(result.text);
+    if (!prepared) {
+      throw new Error("Could not inspect page for full-screenshot.");
+    }
+    return prepared;
+  }
+
+  async cleanupFullScreenshotTarget(prepared, flags = {}) {
+    if (!prepared?.markerAttr || !prepared?.marker) return;
+    const markerSelector = `[${prepared.markerAttr}="${prepared.marker}"]`;
+    await this.evaluateFunction(
+      `() => {
+        document.querySelectorAll(${JSON.stringify(markerSelector)}).forEach((el) => {
+          if (el.getAttribute(${JSON.stringify(prepared.markerAttr)}) === ${JSON.stringify(prepared.marker)}) {
+            el.removeAttribute(${JSON.stringify(prepared.markerAttr)});
+          }
+        });
+        return true;
+      }`,
+      flags,
+    );
+  }
+
+  async captureStitchedScrollContainer(filePath, flags = {}, prepared) {
+    const target = prepared?.target;
+    if (!target) {
+      throw new Error("No internal scroll container found to stitch.");
+    }
+    const scrollHeight = Math.max(1, Math.round(target.scrollHeight));
+    const clientHeight = Math.max(1, Math.round(target.clientHeight));
+    const maxScroll = Math.max(0, scrollHeight - clientHeight);
+    const offsets = [];
+    for (let offset = 0; offset < maxScroll; offset += clientHeight) {
+      offsets.push(Math.round(offset));
+    }
+    if (!offsets.includes(Math.round(maxScroll))) {
+      offsets.push(Math.round(maxScroll));
+    }
+    if (offsets.length > 80) {
+      throw new Error(`full-screenshot would need ${offsets.length} stitched captures; pass --selector for a smaller region or use a larger viewport.`);
+    }
+
+    const outputPath = path.resolve(filePath);
+    await fsp.mkdir(path.dirname(outputPath), { recursive: true });
+    const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "realbrowser-full-screenshot-"));
+    const settleMs = parsePositiveInteger(flags.settleMs ?? "200", "settle-ms");
+    const markerSelector = `[${prepared.markerAttr}="${prepared.marker}"]`;
+    const originalScrollTop = Math.max(0, Math.round(target.scrollTop || 0));
+    const shots = [];
+    try {
+      for (let index = 0; index < offsets.length; index += 1) {
+        const offset = offsets[index];
+        await this.evaluateFunction(
+          `() => {
+            const el = document.querySelector(${JSON.stringify(markerSelector)});
+            if (!el) throw new Error("Marked scroll container disappeared.");
+            el.scrollTop = ${JSON.stringify(offset)};
+            return { scrollTop: Math.round(el.scrollTop || 0) };
+          }`,
+          flags,
+        );
+        if (settleMs > 0) await sleep(settleMs);
+        const shotPath = path.join(tempDir, `shot-${String(index).padStart(3, "0")}.png`);
+        await this.handleScreenshot([shotPath], {
+          ...flags,
+          uid: undefined,
+          selector: undefined,
+          full: false,
+          rawSize: true,
+          format: "png",
+        });
+        shots.push({
+          offset,
+          path: shotPath,
+          png: readPngDimensions(shotPath),
+          data: fs.readFileSync(shotPath).toString("base64"),
+        });
+      }
+      await this.composeStitchedScrollScreenshot(outputPath, prepared, shots, flags);
+    } finally {
+      await this.evaluateFunction(
+        `() => {
+          const el = document.querySelector(${JSON.stringify(markerSelector)});
+          if (el) el.scrollTop = ${JSON.stringify(originalScrollTop)};
+          return true;
+        }`,
+        flags,
+      ).catch(() => {});
+      await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    const png = readPngDimensions(outputPath);
+    const classLabel = target.className ? `.${target.className.split(/\s+/).filter(Boolean).slice(0, 3).join(".")}` : "";
+    const containerLabel = `${target.tag}${target.id ? `#${target.id}` : ""}${classLabel}`;
+    return {
+      text: [
+        `Saved full screenshot to ${outputPath}.`,
+        "Method: stitched-scroll-container",
+        `Container: ${containerLabel || target.tag} (${prepared.selectedBy})`,
+        `Viewport: ${prepared.viewport.innerWidth}x${prepared.viewport.innerHeight} @ ${prepared.viewport.devicePixelRatio}`,
+        `Scroll: ${target.scrollHeight}x${target.clientHeight} offsets=${offsets.length}`,
+        `PNG: ${png.pixelWidth}x${png.pixelHeight}`,
+      ].join("\n"),
+      filePath: outputPath,
+      path: outputPath,
+      method: "stitched-scroll-container",
+      png,
+      offsets,
+      prepared,
+    };
+  }
+
+  async composeStitchedScrollScreenshot(outputPath, prepared, shots, flags = {}) {
+    if (!shots.length) {
+      throw new Error("No stitched screenshots captured.");
+    }
+    const first = shots[0];
+    const viewport = prepared.viewport;
+    const target = prepared.target;
+    const scaleX = first.png.pixelWidth / Math.max(1, viewport.innerWidth);
+    const scaleY = first.png.pixelHeight / Math.max(1, viewport.innerHeight);
+    const selectorMode = Boolean(prepared.selector);
+    const cropLeft = selectorMode ? Math.max(0, Math.round(target.rect.left * scaleX)) : 0;
+    const cropTop = Math.max(0, Math.round(target.rect.top * scaleY));
+    const cropRight = selectorMode
+      ? Math.min(first.png.pixelWidth, Math.round((target.rect.left + target.rect.width) * scaleX))
+      : first.png.pixelWidth;
+    const cropBottom = Math.min(first.png.pixelHeight, Math.round((target.rect.top + target.clientHeight) * scaleY));
+    const cropWidth = Math.max(1, cropRight - cropLeft);
+    const cropHeight = Math.max(1, cropBottom - cropTop);
+    const headerHeight = selectorMode ? 0 : cropTop;
+    const finalWidth = selectorMode ? cropWidth : first.png.pixelWidth;
+    const finalHeight = headerHeight + Math.max(1, Math.ceil(target.scrollHeight * scaleY));
+    const payload = {
+      shots: shots.map((shot) => ({ offset: shot.offset, data: shot.data })),
+      cropLeft,
+      cropTop,
+      cropWidth,
+      cropHeight,
+      headerHeight,
+      finalWidth,
+      finalHeight,
+      scaleY,
+    };
+    const result = await this.evaluateFunction(
+      `() => new Promise((resolve, reject) => {
+        const payload = ${JSON.stringify(payload)};
+        const loadImage = (base64) => new Promise((imageResolve, imageReject) => {
+          const img = new Image();
+          img.onload = () => imageResolve(img);
+          img.onerror = () => imageReject(new Error("Could not load screenshot segment."));
+          img.src = "data:image/png;base64," + base64;
+        });
+        Promise.all(payload.shots.map((shot) => loadImage(shot.data))).then((images) => {
+          const canvas = document.createElement("canvas");
+          canvas.width = payload.finalWidth;
+          canvas.height = payload.finalHeight;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) throw new Error("Could not create 2d canvas context.");
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          if (payload.headerHeight > 0) {
+            ctx.drawImage(images[0], 0, 0, payload.finalWidth, payload.headerHeight, 0, 0, payload.finalWidth, payload.headerHeight);
+          }
+          images.forEach((img, index) => {
+            const shot = payload.shots[index];
+            const destY = payload.headerHeight + Math.round(shot.offset * payload.scaleY);
+            const remaining = payload.finalHeight - destY;
+            if (remaining <= 0) return;
+            const height = Math.max(1, Math.min(payload.cropHeight, remaining));
+            ctx.drawImage(
+              img,
+              payload.cropLeft,
+              payload.cropTop,
+              payload.cropWidth,
+              height,
+              0,
+              destY,
+              payload.finalWidth,
+              height,
+            );
+          });
+          resolve(canvas.toDataURL("image/png").replace(/^data:image\\/png;base64,/, ""));
+        }).catch(reject);
+      })`,
+      flags,
+    );
+    const base64 = String(result.text ?? "").trim();
+    if (!base64) {
+      throw new Error("Browser compositor did not return stitched PNG data.");
+    }
+    await fsp.writeFile(outputPath, Buffer.from(base64, "base64"));
+  }
+
+  async captureSelectorAreaScreenshot(filePath, flags = {}) {
+    if (!this.shouldUseFastCdp(flags)) {
+      throw new Error("area-screenshot --selector requires a CDP-backed browser session; use --uid when only MCP element screenshots are available.");
+    }
+    const selector = String(flags.selector || "");
+    const infoResult = await this.evaluateFunction(
+      `() => {
+        const selector = ${JSON.stringify(selector)};
+        const el = document.querySelector(selector);
+        if (!el) throw new Error("Selector not found: " + selector);
+        el.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
+          throw new Error("Selector has an empty bounding box: " + selector);
+        }
+        return {
+          selector,
+          rect: {
+            x: rect.left + (window.scrollX || document.documentElement.scrollLeft || 0),
+            y: rect.top + (window.scrollY || document.documentElement.scrollTop || 0),
+            width: rect.width,
+            height: rect.height,
+          },
+          viewport: {
+            innerWidth: window.innerWidth,
+            innerHeight: window.innerHeight,
+            devicePixelRatio: window.devicePixelRatio || 1,
+          },
+        };
+      }`,
+      flags,
+    );
+    const info = extractJsonFromToolText(infoResult.text);
+    if (!info?.rect) {
+      throw new Error("Could not resolve selector bounds for area-screenshot.");
+    }
+    const outputPath = path.resolve(filePath);
+    const format = inferScreenshotFormat(outputPath, flags);
+    await fsp.mkdir(path.dirname(outputPath), { recursive: true });
+    const targetId = await this.resolveCdpTargetId(flags);
+    const result = await this.withCdpPageSession(targetId, async (client, sessionId) =>
+      await this.captureScreenshotCdpInSession(client, sessionId, targetId, outputPath, format, {
+        ...flags,
+        clipX: info.rect.x,
+        clipY: info.rect.y,
+        clipWidth: info.rect.width,
+        clipHeight: info.rect.height,
+      })
+    );
+    const png = format === "png" ? readPngDimensions(outputPath) : null;
+    return {
+      ...result,
+      text: [
+        `Saved area screenshot to ${outputPath}.`,
+        `Selector: ${selector}`,
+        `Bounds: ${Math.round(info.rect.width)}x${Math.round(info.rect.height)} at ${Math.round(info.rect.x)},${Math.round(info.rect.y)}`,
+        png ? `PNG: ${png.pixelWidth}x${png.pixelHeight}` : "",
+      ].filter(Boolean).join("\n"),
+      filePath: outputPath,
+      path: outputPath,
+      method: "selector-area",
+      png,
+      selector,
+      bounds: info.rect,
+    };
+  }
+
+
   async handleScreenshot(args, flags) {
     const explicitPath = args.find((arg) => !arg.startsWith("--"));
     if (flags.labels || flags.annotate) {
@@ -8903,7 +9380,21 @@ class BrowserDaemon {
     if (quality !== undefined && canUseScreenshotQuality(normalizedFormat)) {
       params.quality = quality;
     }
-    if (flags.full) {
+    const clipX = Number(flags.clipX);
+    const clipY = Number(flags.clipY);
+    const clipWidth = Number(flags.clipWidth);
+    const clipHeight = Number(flags.clipHeight);
+    const hasExplicitClip = [clipX, clipY, clipWidth, clipHeight].every(Number.isFinite) && clipWidth > 0 && clipHeight > 0;
+    if (hasExplicitClip) {
+      params.captureBeyondViewport = true;
+      params.clip = {
+        x: Math.max(0, clipX),
+        y: Math.max(0, clipY),
+        width: Math.ceil(clipWidth),
+        height: Math.ceil(clipHeight),
+        scale: 1,
+      };
+    } else if (flags.full) {
       const metrics = await client.request("Page.getLayoutMetrics", {}, { sessionId }).catch(() => null);
       const contentSize = metrics?.cssContentSize ?? metrics?.contentSize;
       const width = Number(contentSize?.width);
@@ -12256,6 +12747,15 @@ async function runSelfTest() {
   assertSelfTest(parsedHandle.flags.handle === "app", "parser handles handle flag");
   assertSelfTest(parsedHandle.flags.handleOut === "tmp/next.json", "parser handles handle output flag");
   assertSelfTest(parsedHandle.flags.viewport === "390x844", "parser handles viewport flag");
+  const parsedFullScreenshot = parseArgv(["full-screenshot", "out.png", "--viewport", "390x844", "--selector", ".scroll-panel"]);
+  assertSelfTest(parsedFullScreenshot.command === "full-screenshot", "parser handles full-screenshot command");
+  assertSelfTest(parsedFullScreenshot.flags.viewport === "390x844", "parser handles full-screenshot viewport flag");
+  assertSelfTest(parsedFullScreenshot.flags.selector === ".scroll-panel", "parser handles full-screenshot selector flag");
+  const parsedAreaScreenshot = parseArgv(["area-screenshot", "out.png", "--selector", "main"]);
+  assertSelfTest(parsedAreaScreenshot.command === "area-screenshot", "parser handles area-screenshot command");
+  assertSelfTest(parsedAreaScreenshot.flags.selector === "main", "parser handles area-screenshot selector flag");
+  assertSelfTest(handleAwareCommands().has("full-screenshot"), "full-screenshot can consume handles");
+  assertSelfTest(handleAwareCommands().has("area-screenshot"), "area-screenshot can consume handles");
   assertSelfTest(handlePathFromValue("app").endsWith(path.join(".realbrowser", "handles", "app.json")), "handle names map to handle directory");
   const customHandleStateFile = path.resolve(os.tmpdir(), "realbrowser-custom-state.json");
   assertSelfTest(
@@ -12615,6 +13115,14 @@ async function runSelfTest() {
   assertSelfTest(
     requiredCapabilitiesForPayload({ command: "device-screenshots", args: [] }).has("device-screenshots"),
     "daemon capability check covers device screenshots",
+  );
+  assertSelfTest(
+    requiredCapabilitiesForPayload({ command: "full-screenshot", args: [] }).has("full-screenshot"),
+    "daemon capability check covers full screenshots",
+  );
+  assertSelfTest(
+    requiredCapabilitiesForPayload({ command: "area-screenshot", args: [] }).has("area-screenshot"),
+    "daemon capability check covers area screenshots",
   );
   assertSelfTest(isDeviceScreenshotsCommand("responsive-exact") === true, "device screenshot aliases share the compatibility path");
   assertSelfTest(

@@ -42,10 +42,16 @@ desktop/tablet/mobile screenshots":
    ```bash
    "$REALBROWSER_CLI" --session site-check device-screenshots /tmp/site-inbox
    ```
+   For a user-facing full-size screenshot, prefer:
+   ```bash
+   "$REALBROWSER_CLI" --session site-check full-screenshot /tmp/site-full.png
+   ```
+   Add `--viewport 390x844` for mobile or `--selector <css>` for a full
+   internal scroll region.
 6. If the layout hydrates slowly, add a readiness guard such as
    `--selector main --visual-stable --settle-ms 500`.
-7. For custom device sizes or one-off mobile captures, read
-   `references/screenshots.md`.
+7. For custom device sizes, full-size internal-scroll screenshots, or specific
+   region captures, read `references/screenshots.md`.
 8. Inspect saved images with `view_image` when available, then
    `detach --session site-check`.
 
@@ -58,6 +64,8 @@ desktop/tablet/mobile screenshots":
   use explicit `--foreground-until-ready` plus `wait-ready` criteria.
 - Exact viewport, mobile screenshot, raw PNG dimensions, or responsive capture:
   read `references/screenshots.md`.
+- Full-size screenshots of fixed-body apps with internal scroll panes, or
+  screenshots of a specific page region: read `references/screenshots.md`.
 - Console errors, failed network requests, HAR/performance, cache/header proof,
   or large HTML/text extraction: read `references/debugging.md`.
 - Full command syntax, global flags, or less common commands: read
@@ -119,6 +127,7 @@ Use this for verified desktop/tablet/mobile PNG evidence.
 "$REALBROWSER_CLI" --session app-check device-screenshots /tmp/app-inbox
 "$REALBROWSER_CLI" --session app-check device-screenshots /tmp/app-inbox --devices desktop:1440x900,tablet:768x1024,mobile:390x844
 "$REALBROWSER_CLI" --session app-check device-screenshots /tmp/app-inbox --selector main --visual-stable --settle-ms 500
+"$REALBROWSER_CLI" --session app-check full-screenshot /tmp/app-full.png --viewport 390x844
 ```
 
 ### 4. Existing Tab Or Profile

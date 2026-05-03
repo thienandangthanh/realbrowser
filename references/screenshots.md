@@ -63,6 +63,42 @@ sizes are not required:
 This saves mobile, tablet, and desktop screenshots in one daemon call. Inspect
 the saved images before finishing.
 
+## Full-Size Screenshots
+
+Use this when the user asks for a "full size", "full page", or complete
+screenshot, whether the viewport is desktop, tablet, or mobile:
+
+```bash
+"$REALBROWSER_CLI" full-screenshot /tmp/site-full.png
+"$REALBROWSER_CLI" full-screenshot /tmp/site-mobile-full.png --viewport 390x844
+"$REALBROWSER_CLI" full-screenshot /tmp/chat-list-full.png --selector '[data-testid="chat-list"]'
+```
+
+`full-screenshot` first checks whether the document itself scrolls. If it does,
+it uses browser-native full-page capture. If the document is fixed-height but a
+dominant visible scroll container exists, it scrolls and stitches that internal
+container, preserving the fixed header for whole-page captures. This avoids the
+common false success where `screenshot --full` returns only one viewport for
+apps built with nested scroll panes.
+
+For a selected scroll container, pass `--selector`; the output is the full
+selected region rather than the full viewport. Use `--settle-ms` when content
+virtualizes or lazy-renders while scrolling.
+
+## Area Screenshots
+
+Use this when the user needs a specific part of the page:
+
+```bash
+"$REALBROWSER_CLI" snapshot --annotate
+"$REALBROWSER_CLI" area-screenshot /tmp/button.png --uid 1_23
+"$REALBROWSER_CLI" area-screenshot /tmp/search.png --selector 'input[type="search"]'
+```
+
+Prefer `--uid` when a recent snapshot exposes a stable target. Use `--selector`
+when the region has a reliable CSS selector or when the current real-profile
+session cannot use MCP element screenshots without an approval prompt.
+
 ## Exact Viewport Rules
 
 Viewport and screenshots are page-scoped in Chrome DevTools. When exact sizes
@@ -150,6 +186,11 @@ node $RealbrowserHelper png-size $Out
 - `screenshot <path>` captures a normalized screenshot for agent use.
 - `screenshot <path> --raw-size` preserves exact physical browser pixels.
 - `screenshot <path> --full` / `--full-page` captures full page when supported.
+- `full-screenshot <path>` is preferred for user-facing full-size screenshots
+  because it verifies fixed-body/internal-scroll layouts and stitches when
+  needed.
+- `area-screenshot <path> --uid <uid>|--selector <css>` captures a specific
+  element or page region.
 - `screenshot --uid <uid>` captures an element.
 - `screenshot --labels` / `--annotate` overlays snapshot uid labels before
   capture and removes them afterward.
