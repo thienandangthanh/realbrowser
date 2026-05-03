@@ -1,0 +1,7 @@
+interface:
+  display_name: "Realbrowser"
+  short_description: "Fast local Chrome automation CLI"
+  default_prompt: "Use $realbrowser to open the local app, inspect the page snapshot, and verify the UI in a real browser."
+
+policy:
+  allow_implicit_invocation: true
