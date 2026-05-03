@@ -30,6 +30,8 @@ Default behavior:
 1. Prefer Chrome DevTools MCP `--autoConnect` so Codex can control the user's real running Chrome profile after Chrome remote debugging permission is enabled in `chrome://inspect/#remote-debugging`.
 2. If auto-connect cannot attach, fall back to a dedicated profile at `~/.realbrowser/profile`.
 
+Chrome's "Allow remote debugging?" dialog is expected when a new Chrome DevTools MCP auto-connect session attaches to the real signed-in profile. `Allow` should be treated as permission for the current debugging connection, not a permanent approval for every future daemon process. Reuse the persistent daemon and avoid `stop`/`restart` unless needed.
+
 Useful overrides:
 
 ```bash
@@ -79,7 +81,7 @@ REALBROWSER_STATE_FILE=/tmp/realbrowser.json "$REALBROWSER_CLI" doctor
 - `console [get <msgid>] [--errors] [--filter <text>] [--limit <n>] [--clear] [--preserve]`: list capped console messages, or fetch one message by id. `--clear` hides already-seen lines for the current daemon.
 - `network [get <reqid>] [--failed] [--filter <text>] [--limit <n>] [--clear] [--preserve] [--request-file path] [--response-file path]`: list capped network requests, or fetch one request by id. Use files for large request/response bodies.
 - `errors` / `requests`: OpenClaw-style aliases for `console --errors` and `network`.
-- `screenshot [path] [--full|--full-page] [--uid <uid>] [--labels|--annotate] [--format png|jpeg|webp]`: save a screenshot. `--labels` overlays snapshot uid labels before capture and removes them afterward. If `path` is omitted, a timestamped PNG is written under `~/.realbrowser/screenshots`.
+- `screenshot [path] [--full|--full-page] [--uid <uid>] [--labels|--annotate] [--format png|jpeg|webp] [--max-side <px>] [--max-bytes <bytes|5mb>] [--raw-size|--no-normalize]`: save a screenshot. `--labels` overlays snapshot uid labels before capture and removes them afterward. Screenshots use OpenClaw-style size targets by default: max side 2000px and max target size 5mb. To stay portable, realbrowser reduces capture size through Chrome/MCP screenshot viewport emulation and JPEG quality instead of native image post-processing. Use `--raw-size` for exact physical browser pixels. If `path` is omitted, a timestamped image is written under `~/.realbrowser/screenshots`.
 - `responsive <path-prefix>`: save mobile, tablet, and desktop screenshots in one daemon call.
 - `diff <url1> <url2>`: navigate and produce a simple text diff.
 - `download <uid> [path] [--cdp-url <url>] [--download-dir <dir>] [--timeout <ms>]`: click a snapshot uid and save the resulting download. With `--browser-url`, `--cdp-url`, or `REALBROWSER_CDP_URL`, this uses Chrome's native CDP download events. Without CDP, it falls back to watching Chrome's download directory, defaulting to `~/Downloads`, and copying the completed file into `~/.realbrowser/downloads` or the requested path.
@@ -116,8 +118,9 @@ Global flags:
 5. After navigation, modal changes, or form submission, run `observe` or `snapshot --efficient` again before the next action.
 6. If a `uid` is stale, snapshot once and retry with the new ref.
 7. For workflows with several actions, prefer `chain --return summary --trace ~/.realbrowser/trace.json`.
-8. Ask for explicit user approval before submitting sensitive data, making purchases, deleting data, changing account/security settings, granting permissions, or taking any action that is hard to undo.
-9. Stop and report manual blockers such as login, 2FA, captcha, camera/microphone permission, or Chrome remote debugging approval.
+8. Do not restart the daemon during normal browser work; restarting can trigger Chrome's remote-debugging approval dialog again.
+9. Ask for explicit user approval before submitting sensitive data, making purchases, deleting data, changing account/security settings, granting permissions, or taking any action that is hard to undo.
+10. Stop and report manual blockers such as login, 2FA, captcha, camera/microphone permission, or Chrome remote debugging approval.
 
 ## Token And Speed Rules
 
@@ -127,12 +130,14 @@ Global flags:
 - For large HTML/text/network bodies, use `--out <path>` or `network get --response-file <path>`.
 - Use `--page <id>` after `tabs` or `select` to avoid extra target discovery.
 - Screenshot commands return file paths; inspect the image only when visual evidence is needed.
+- Default screenshots are normalized for agent use. Use `--raw-size` only when exact browser pixels matter.
 
 ## Platform Notes
 
 - Supported runtimes: macOS, Linux, and Windows with Node.js 22+ and `npm`/`npx`.
 - Use `scripts/realbrowser` on macOS/Linux; use `scripts\realbrowser.ps1` on Windows PowerShell; use `scripts\realbrowser.cmd` on `cmd.exe`; `node scripts\realbrowser.mjs` and the npm bin are portable fallbacks.
 - Real-browser attach is delegated to Chrome DevTools MCP. If auto-connect cannot attach to a real profile on any OS, retry with `--backend dev`.
+- Screenshot normalization is dependency-free and uses Chrome DevTools MCP capture/emulation calls on macOS, Linux, and Windows.
 - Protocol actions, screenshots, snapshots, console, network, and downloads should not require focusing the browser window.
 
 ## Security Notes

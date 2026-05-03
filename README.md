@@ -11,7 +11,7 @@ The default Codex browser automation path is useful, but it is not enough for we
 - A persistent loopback daemon for fast follow-up commands.
 - Chrome DevTools MCP integration for real Chrome attach.
 - A dedicated profile fallback at `~/.realbrowser/profile`.
-- Tab listing/selection, navigation, compact observations, efficient snapshots, clicks, typing, forms, JavaScript evaluation, capped console and network inspection, screenshots, annotated labels, pre-armed dialog handling, user-agent emulation, and download interception.
+- Tab listing/selection, navigation, compact observations, efficient snapshots, clicks, typing, forms, JavaScript evaluation, capped console and network inspection, OpenClaw-style normalized screenshots, annotated labels, pre-armed dialog handling, user-agent emulation, and download interception.
 
 ## Why Not Just Playwright?
 
@@ -73,6 +73,19 @@ Use `--browser-url` or `REALBROWSER_BROWSER_URL` when you have an explicit Chrom
 REALBROWSER_BROWSER_URL=http://127.0.0.1:9222 ./scripts/realbrowser tabs
 ```
 
+## Chrome Remote Debugging Approval
+
+When using the default real-browser mode, realbrowser starts Chrome DevTools MCP with `--autoConnect`. Current Chrome DevTools MCP documents that auto-connect works with Chrome 144+ and requires remote debugging to be enabled from `chrome://inspect/#remote-debugging`.
+
+Chrome may show an "Allow remote debugging?" dialog because this grants an external app full control of the real signed-in profile. Treat `Allow` as permission for the current debugging connection, not as a permanent trust grant for every future daemon/MCP process. Normal follow-up commands should reuse the persistent realbrowser daemon and should not ask again. It can reappear after:
+
+- `realbrowser stop` or `realbrowser restart`.
+- Code changes while developing realbrowser.
+- Switching backend/mode/state files.
+- Chrome or Chrome DevTools MCP closing and reconnecting.
+
+To reduce prompts, keep the daemon warm and avoid restarting it during normal browser work. If you need a pre-opened debug endpoint, launch Chrome with a localhost-only DevTools port and use `REALBROWSER_BROWSER_URL=http://127.0.0.1:9222`, but do that only on a trusted machine because a DevTools port can control the browser.
+
 ## Fast Agent Defaults
 
 Realbrowser is designed to keep Codex token use low:
@@ -86,6 +99,28 @@ Realbrowser is designed to keep Codex token use low:
 - Use `--raw`, `--verbose`, `--max-chars`, or `--out <path>` only when the compact result is not enough.
 
 The implementation intentionally copies the proven shape of OpenClaw's efficient browser snapshots and gstack's compact localhost command loop while keeping the backend attached to the user's real Chrome session when possible.
+
+## Screenshots
+
+Real Chrome often captures at physical pixels. On a Retina/HiDPI display, a normal viewport screenshot can be 1.5x or 2x larger than the CSS viewport. Realbrowser follows OpenClaw's screenshot-size target, but keeps the skill portable by using Chrome/MCP capture settings instead of a native image-processing dependency.
+
+Default screenshot normalization:
+
+- Max side: `2000` px.
+- Max file size target: `5mb`.
+- When no output path or format is provided, normalized screenshots default to JPEG at quality `85`.
+- If the physical capture would be too large, realbrowser temporarily captures with a smaller emulated screenshot viewport and then resets emulation.
+- Exact raw browser pixels are still available with `--raw-size` or `--no-normalize`.
+
+Examples:
+
+```bash
+./scripts/realbrowser screenshot
+./scripts/realbrowser screenshot /tmp/page.jpeg --max-side 1600 --max-bytes 2mb
+./scripts/realbrowser screenshot /tmp/page.png --raw-size
+REALBROWSER_SCREENSHOT_MAX_SIDE=1280 ./scripts/realbrowser screenshot
+REALBROWSER_SCREENSHOT_NORMALIZE=0 ./scripts/realbrowser screenshot
+```
 
 ## Verbose And Full Output
 
@@ -124,6 +159,7 @@ Realbrowser is implemented in Node.js and is intended to run on macOS, Linux, an
 
 - macOS and Linux can run `scripts/realbrowser` directly.
 - Windows PowerShell should prefer `scripts\realbrowser.ps1`, which passes arguments as an array. `scripts\realbrowser.cmd` is available for `cmd.exe`; `node scripts\realbrowser.mjs` and the npm `realbrowser` bin also work.
+- Screenshot normalization is dependency-free and uses Chrome DevTools MCP capture/emulation calls, so no native image library is required.
 - Real-browser attach depends on Chrome DevTools MCP and the local browser's remote debugging support. If attach is unavailable, use `--backend dev` for the dedicated profile.
 - CDP download interception requires Node's built-in `WebSocket` support, available in current Node 22+ builds.
 - Screenshots, snapshots, console, network, JavaScript evaluation, clicks, typing, dialogs, and downloads are protocol-driven and do not require the browser window to be focused.

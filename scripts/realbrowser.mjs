@@ -15,6 +15,8 @@ const DEFAULT_PROFILE_DIR = path.join(os.homedir(), ".realbrowser", "profile");
 const DEFAULT_SCREENSHOT_DIR = path.join(os.homedir(), ".realbrowser", "screenshots");
 const DEFAULT_DOWNLOAD_DIR = path.join(os.homedir(), ".realbrowser", "downloads");
 const DEFAULT_DOWNLOAD_SOURCE_DIR = path.join(os.homedir(), "Downloads");
+const DEFAULT_SCREENSHOT_MAX_SIDE = parseOptionalIntegerEnv("REALBROWSER_SCREENSHOT_MAX_SIDE", 2000);
+const DEFAULT_SCREENSHOT_MAX_BYTES = parseOptionalBytesEnv("REALBROWSER_SCREENSHOT_MAX_BYTES", 5 * 1024 * 1024);
 const START_TIMEOUT_MS = Number.parseInt(process.env.REALBROWSER_START_TIMEOUT_MS ?? "20000", 10);
 const MCP_START_TIMEOUT_MS = Number.parseInt(process.env.REALBROWSER_MCP_TIMEOUT_MS ?? "30000", 10);
 const PACKAGE_SPEC = process.env.REALBROWSER_MCP_PACKAGE ?? "chrome-devtools-mcp@latest";
@@ -27,6 +29,9 @@ const DEFAULT_CHAIN_STEP_MAX_CHARS = 4_000;
 const DEFAULT_LINE_LIMIT = 50;
 const DEFAULT_OBSERVE_LIMIT = 30;
 const DEFAULT_OBSERVE_TEXT_CHARS = 900;
+const DEFAULT_SCREENSHOT_JPEG_QUALITY = 85;
+const SCREENSHOT_QUALITY_STEPS = [85, 75, 65, 55, 45, 35];
+const SCREENSHOT_SCALE_STEPS = [1, 0.82, 0.67, 0.55];
 const NPX_COMMAND = process.platform === "win32" ? "npx.cmd" : "npx";
 
 const INTERACTIVE_ROLES = new Set([
@@ -127,7 +132,7 @@ Usage:
   realbrowser network [get <reqid>] [--failed] [--filter <text>] [--limit <n>] [--clear] [--preserve] [--request-file path] [--response-file path] [--json]
   realbrowser errors [--clear] [--limit <n>] [--page <id>]
   realbrowser requests [--failed] [--filter <text>] [--clear] [--limit <n>] [--page <id>]
-  realbrowser screenshot [path] [--full|--full-page] [--uid <uid>] [--labels|--annotate] [--format png|jpeg|webp] [--quality <0-100>] [--page <id>]
+  realbrowser screenshot [path] [--full|--full-page] [--uid <uid>] [--labels|--annotate] [--format png|jpeg|webp] [--quality <0-100>] [--max-side <px>] [--max-bytes <bytes|5mb>] [--raw-size|--no-normalize] [--page <id>]
   realbrowser responsive <path-prefix> [--page <id>]
   realbrowser diff <url1> <url2> [--page <id>]
   realbrowser download <uid> [path] [--cdp-url <url>] [--download-dir <dir>] [--timeout <ms>] [--page <id>]
@@ -305,6 +310,20 @@ function parseArgv(argv) {
       flags.quality = argv[++index];
     } else if (arg?.startsWith("--quality=")) {
       flags.quality = arg.slice("--quality=".length);
+    } else if (arg === "--max-side") {
+      flags.maxSide = argv[++index];
+    } else if (arg?.startsWith("--max-side=")) {
+      flags.maxSide = arg.slice("--max-side=".length);
+    } else if (arg === "--max-bytes") {
+      flags.maxBytes = argv[++index];
+    } else if (arg?.startsWith("--max-bytes=")) {
+      flags.maxBytes = arg.slice("--max-bytes=".length);
+    } else if (arg === "--raw-size") {
+      flags.rawSize = true;
+    } else if (arg === "--no-normalize") {
+      flags.noNormalize = true;
+    } else if (arg === "--normalize") {
+      flags.normalize = true;
     } else if (arg === "--timeout") {
       flags.timeout = argv[++index];
     } else if (arg?.startsWith("--timeout=")) {
@@ -2049,24 +2068,124 @@ class BrowserDaemon {
       });
       return await this.annotatedScreenshotFromSnapshot(snapshot, explicitPath, flags);
     }
-    const format =
-      flags.format ??
-      (explicitPath?.toLowerCase().endsWith(".webp")
-        ? "webp"
-        : explicitPath?.toLowerCase().endsWith(".jpg") || explicitPath?.toLowerCase().endsWith(".jpeg")
-          ? "jpeg"
-          : "png");
+    const format = inferScreenshotFormat(explicitPath, flags);
     const filePath =
       explicitPath ??
-      path.join(DEFAULT_SCREENSHOT_DIR, `screenshot-${new Date().toISOString().replaceAll(/[:.]/g, "-")}.${format}`);
+      path.join(
+        DEFAULT_SCREENSHOT_DIR,
+        `screenshot-${new Date().toISOString().replaceAll(/[:.]/g, "-")}.${extensionForFormat(format)}`,
+      );
     await fsp.mkdir(path.dirname(path.resolve(filePath)), { recursive: true });
+    return await this.captureScreenshot(filePath, format, flags);
+  }
+
+  async captureScreenshotOnce(filePath, format, flags = {}, quality = undefined) {
     return await this.callTool("take_screenshot", {
       ...this.pageArgs(flags),
       filePath,
       format,
-      ...(flags.quality ? { quality: parsePositiveInteger(flags.quality, "quality") } : {}),
+      ...(quality !== undefined && canUseScreenshotQuality(format) ? { quality } : {}),
       ...(flags.full ? { fullPage: true } : {}),
       ...(flags.uid ? { uid: flags.uid } : {}),
+    });
+  }
+
+  async captureScreenshot(filePath, format, flags = {}) {
+    const options = screenshotNormalizationOptions(flags);
+    const rawQuality = flags.quality ? parseScreenshotQuality(flags.quality) : undefined;
+    if (!options.enabled) {
+      return await this.captureScreenshotOnce(filePath, format, flags, rawQuality);
+    }
+
+    const metrics = await this.readScreenshotMetrics(flags).catch(() => null);
+    const largestPhysicalSide = metrics
+      ? Math.max(metrics.width * metrics.dpr, (flags.full ? metrics.contentHeight : metrics.height) * metrics.dpr)
+      : 0;
+    const baseScale = metrics && options.maxSide > 0 && largestPhysicalSide > options.maxSide
+      ? options.maxSide / largestPhysicalSide
+      : 1;
+    const scales = metrics ? screenshotScaleSteps(baseScale) : [1];
+    const qualities = canUseScreenshotQuality(format) ? screenshotQualitySteps(rawQuality ?? options.quality) : [undefined];
+    let usedEmulation = false;
+    let finalResult;
+    let finalInfo;
+
+    try {
+      for (const scale of scales) {
+        if (metrics && scale < 0.999) {
+          await this.emulateScreenshotScale(metrics, scale, flags);
+          usedEmulation = true;
+        } else if (usedEmulation) {
+          await this.callTool("emulate", this.pageArgs(flags));
+          usedEmulation = false;
+        }
+        for (const quality of qualities) {
+          finalResult = await this.captureScreenshotOnce(filePath, format, flags, quality);
+          const actualPath = await resolveScreenshotFilePath(filePath, finalResult, format);
+          const stat = await fsp.stat(actualPath).catch(() => null);
+          finalInfo = buildScreenshotCaptureInfo({
+            filePath: actualPath,
+            format,
+            quality,
+            scale,
+            metrics,
+            bytes: stat?.size,
+            maxBytes: options.maxBytes,
+          });
+          if (!options.maxBytes || (stat?.size ?? Number.POSITIVE_INFINITY) <= options.maxBytes) {
+            return withScreenshotCaptureInfo(finalResult, finalInfo);
+          }
+        }
+      }
+      if (finalInfo && options.maxBytes > 0 && finalInfo.bytes > options.maxBytes) {
+        finalInfo.warning = `screenshot is still larger than ${formatBytes(options.maxBytes)} after portable capture reduction`;
+      }
+      return withScreenshotCaptureInfo(finalResult, finalInfo);
+    } finally {
+      if (usedEmulation) {
+        await this.callTool("emulate", this.pageArgs(flags)).catch(() => {});
+      }
+    }
+  }
+
+  async readScreenshotMetrics(flags = {}) {
+    const result = await this.evaluateFunction(
+      `() => {
+        const doc = document.documentElement;
+        const body = document.body;
+        const width = Math.max(1, Math.round(window.innerWidth || doc?.clientWidth || 0));
+        const height = Math.max(1, Math.round(window.innerHeight || doc?.clientHeight || 0));
+        const contentWidth = Math.max(width, Math.round(doc?.scrollWidth || 0), Math.round(body?.scrollWidth || 0));
+        const contentHeight = Math.max(height, Math.round(doc?.scrollHeight || 0), Math.round(body?.scrollHeight || 0));
+        return {
+          width,
+          height,
+          contentWidth,
+          contentHeight,
+          dpr: Number(window.devicePixelRatio || 1),
+        };
+      }`,
+      flags,
+    );
+    const metrics = extractJsonFromToolText(result.text);
+    if (!metrics || !Number.isFinite(metrics.width) || !Number.isFinite(metrics.height)) {
+      throw new Error("Could not read screenshot metrics");
+    }
+    return {
+      width: Math.max(1, Math.round(metrics.width)),
+      height: Math.max(1, Math.round(metrics.height)),
+      contentWidth: Math.max(1, Math.round(metrics.contentWidth ?? metrics.width)),
+      contentHeight: Math.max(1, Math.round(metrics.contentHeight ?? metrics.height)),
+      dpr: Math.max(0.1, Number(metrics.dpr) || 1),
+    };
+  }
+
+  async emulateScreenshotScale(metrics, scale, flags = {}) {
+    const width = Math.max(320, Math.round(metrics.width * metrics.dpr * scale));
+    const height = Math.max(240, Math.round(metrics.height * metrics.dpr * scale));
+    await this.callTool("emulate", {
+      ...this.pageArgs(flags),
+      viewport: `${width}x${height}x1`,
     });
   }
 
@@ -2617,12 +2736,196 @@ function parseJsonArg(raw, label) {
   }
 }
 
+function parseOptionalIntegerEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") {
+    return fallback;
+  }
+  return parsePositiveInteger(raw, name);
+}
+
+function parseOptionalBytesEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") {
+    return fallback;
+  }
+  return parseByteSize(raw, name);
+}
+
 function parsePositiveInteger(value, label) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed < 0) {
-    throw new Error(`${label} must be a positive integer`);
+    throw new Error(`${label} must be a non-negative integer`);
   }
   return parsed;
+}
+
+function parseByteSize(value, label) {
+  const raw = String(value ?? "").trim().toLowerCase();
+  const match = raw.match(/^(\d+)(?:\s*(b|kb|kib|k|mb|mib|m))?$/);
+  if (!match) {
+    throw new Error(`${label} must be a byte size such as 5242880 or 5mb`);
+  }
+  const amount = Number.parseInt(match[1], 10);
+  const unit = match[2] ?? "b";
+  const multiplier = unit === "mb" || unit === "mib" || unit === "m" ? 1024 * 1024 : unit === "kb" || unit === "kib" || unit === "k" ? 1024 : 1;
+  return amount * multiplier;
+}
+
+function parseScreenshotQuality(value) {
+  const quality = parsePositiveInteger(value, "quality");
+  if (quality < 1 || quality > 100) {
+    throw new Error("quality must be between 1 and 100");
+  }
+  return quality;
+}
+
+function normalizeFormat(format) {
+  const normalized = String(format ?? "png").toLowerCase();
+  return normalized === "jpg" ? "jpeg" : normalized;
+}
+
+function inferScreenshotFormat(explicitPath, flags = {}) {
+  if (flags.format) {
+    return normalizeFormat(flags.format);
+  }
+  const lowerPath = explicitPath?.toLowerCase();
+  if (lowerPath?.endsWith(".webp")) {
+    return "webp";
+  }
+  if (lowerPath?.endsWith(".jpg") || lowerPath?.endsWith(".jpeg")) {
+    return "jpeg";
+  }
+  if (lowerPath?.endsWith(".png")) {
+    return "png";
+  }
+  return screenshotNormalizationEnabled(flags) ? "jpeg" : "png";
+}
+
+function screenshotNormalizationEnabled(flags = {}) {
+  if (flags.rawSize || flags.noNormalize) {
+    return false;
+  }
+  if (flags.normalize) {
+    return true;
+  }
+  const raw = String(process.env.REALBROWSER_SCREENSHOT_NORMALIZE ?? "1").toLowerCase();
+  return !["0", "false", "no", "off"].includes(raw);
+}
+
+function screenshotNormalizationOptions(flags = {}) {
+  return {
+    enabled: screenshotNormalizationEnabled(flags),
+    maxSide: flags.maxSide === undefined ? DEFAULT_SCREENSHOT_MAX_SIDE : parsePositiveInteger(flags.maxSide, "max-side"),
+    maxBytes: flags.maxBytes === undefined ? DEFAULT_SCREENSHOT_MAX_BYTES : parseByteSize(flags.maxBytes, "max-bytes"),
+    quality: parseScreenshotQuality(flags.quality ?? String(DEFAULT_SCREENSHOT_JPEG_QUALITY)),
+  };
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) {
+    return "unknown";
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${Math.round(bytes / 1024)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function screenshotQualitySteps(preferred) {
+  return [...new Set([preferred, ...SCREENSHOT_QUALITY_STEPS.filter((quality) => quality < preferred)])];
+}
+
+function screenshotScaleSteps(baseScale) {
+  return [...new Set(SCREENSHOT_SCALE_STEPS.map((step) => Math.max(0.1, Math.min(1, baseScale * step))))];
+}
+
+function canUseScreenshotQuality(format) {
+  return ["jpeg", "webp"].includes(normalizeFormat(format));
+}
+
+function extensionForFormat(format) {
+  return normalizeFormat(format);
+}
+
+function replaceFileExtension(filePath, extension) {
+  const parsed = path.parse(filePath);
+  return path.join(parsed.dir, `${parsed.name}.${extension}`);
+}
+
+async function resolveScreenshotFilePath(requestedPath, result, format) {
+  if (await fsp.stat(requestedPath).then((stat) => stat.isFile()).catch(() => false)) {
+    return requestedPath;
+  }
+  const savedPath = String(result?.text ?? "").match(/Saved screenshot to (.+?)(?:\.\s*(?:\n|$)|\n|$)/)?.[1];
+  if (savedPath && await fsp.stat(savedPath).then((stat) => stat.isFile()).catch(() => false)) {
+    return savedPath;
+  }
+  const alternate = replaceFileExtension(requestedPath, extensionForFormat(format));
+  if (alternate !== requestedPath && await fsp.stat(alternate).then((stat) => stat.isFile()).catch(() => false)) {
+    return alternate;
+  }
+  return requestedPath;
+}
+
+function buildScreenshotCaptureInfo({ filePath, format, quality, scale, metrics, bytes, maxBytes }) {
+  const viewportWidth = metrics?.width ?? 0;
+  const viewportHeight = metrics?.height ?? 0;
+  const originalDpr = metrics?.dpr ?? 1;
+  const estimatedOriginal = {
+    width: Math.max(1, Math.round(viewportWidth * originalDpr)),
+    height: Math.max(1, Math.round(viewportHeight * originalDpr)),
+  };
+  const estimatedFinal = {
+    width: Math.max(1, Math.round(estimatedOriginal.width * scale)),
+    height: Math.max(1, Math.round(estimatedOriginal.height * scale)),
+  };
+  return {
+    path: filePath,
+    filePath,
+    format: normalizeFormat(format),
+    quality,
+    scale,
+    bytes,
+    maxBytes,
+    normalized: scale < 0.999,
+    estimatedOriginal,
+    estimatedFinal,
+  };
+}
+
+function withScreenshotCaptureInfo(result, info) {
+  if (!info) {
+    return result;
+  }
+  let text = result?.text ? String(result.text) : "";
+  if (info.normalized) {
+    text = text.replace(/\n?Emulating viewport: \{[^\n]*\}/g, "");
+  }
+
+  const notes = [];
+  if (info.warning) {
+    notes.push(`warning: ${info.warning}`);
+  }
+  if (info.normalized) {
+    notes.push(
+      `normalized screenshot: estimated ${info.estimatedOriginal.width}x${info.estimatedOriginal.height} -> ${info.estimatedFinal.width}x${info.estimatedFinal.height}, ${formatBytes(info.bytes)} (${info.format}${info.quality ? `, quality ${info.quality}` : ""})`,
+    );
+  }
+  if (info.path && !text.includes(info.path)) {
+    notes.push(`file: ${info.path}`);
+  }
+
+  return {
+    ...result,
+    path: info.path,
+    filePath: info.path,
+    screenshot: info,
+    text: [text || `screenshot: ${info.path}`, ...notes].filter(Boolean).join("\n"),
+  };
 }
 
 function extractJsonFromToolText(text) {
@@ -3194,6 +3497,12 @@ function runSelfTest() {
   assertSelfTest(parsedWindowsPath.command === "screenshot", "parser keeps command before Windows path");
   assertSelfTest(parsedWindowsPath.args[0] === windowsPath, "parser preserves Windows path with spaces");
   assertSelfTest(parsedWindowsPath.flags.format === "png", "parser handles flags after Windows path");
+
+  const parsedScreenshotLimits = parseArgv(["screenshot", "--max-side", "2000", "--max-bytes=5mb", "--raw-size"]);
+  assertSelfTest(parsedScreenshotLimits.flags.maxSide === "2000", "parser handles screenshot max-side");
+  assertSelfTest(parsedScreenshotLimits.flags.maxBytes === "5mb", "parser handles screenshot max-bytes");
+  assertSelfTest(parsedScreenshotLimits.flags.rawSize === true, "parser handles screenshot raw-size");
+  assertSelfTest(parseByteSize("5mb", "max-bytes") === 5 * 1024 * 1024, "parseByteSize handles mb suffix");
 
   const parsedLiteralFlag = parseArgv(["type", "--", "--raw", "literal text"]);
   assertSelfTest(parsedLiteralFlag.command === "type", "parser handles command before -- sentinel");
