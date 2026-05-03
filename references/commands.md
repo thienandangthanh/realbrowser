@@ -6,7 +6,8 @@ Read this when you need command syntax beyond the common recipes in `SKILL.md`.
 
 - `doctor [--deep]`: check Node, npm/npx, daemon, MCP tools, and optionally live
   tabs.
-- `status [--deep]`: show daemon/control state. `--deep` attaches and includes
+- `status [--deep]`: show daemon/control state, including whether the running
+  daemon script matches the current skill script. `--deep` attaches and includes
   tab count plus selected tab.
 - `sessions`: list running realbrowser sessions and modes. The `*` row is the
   active session.
@@ -38,6 +39,11 @@ Read this when you need command syntax beyond the common recipes in `SKILL.md`.
   [--timeout <ms>]`: open a URL in a selected browser UI profile.
 - `open <url> --profile <profile-query> [--select]`: launch/select a profile,
   then attach to the matching page.
+- On real signed-in profiles, omit `--select` unless follow-up commands must
+  immediately target the new tab. `--select` should not imply foregrounding, but
+  it can require a controller attach; Chrome may surface an approval/banner over
+  the user's terminal. Use `--front`, `focus`, or `--foreground-until-ready`
+  only for explicit visual handoff.
 - `open <url> --profile <profile-query> --anonymous --session <name> --select`:
   open profile-bound Incognito and keep later commands on the named session.
 - `navigate <url>` / `goto <url>`: navigate the selected page.
@@ -65,6 +71,11 @@ Read this when you need command syntax beyond the common recipes in `SKILL.md`.
 - `query-selector <selector> [--limit <n>] [--max-text-chars <n>]
   [--max-html-chars <n>] [--out <path>]`: OpenClaw-style selector matches
   over CDP.
+- If `snapshot-dom`, `snapshot-aria`, or `query-selector` reports that the
+  daemon does not support the command, run `status` and `sessions`. The command
+  may exist in the current skill script while an older daemon is still running.
+  Do not detour into the OpenClaw source tree or full-page HTML parsing before
+  checking that daemon/script mismatch.
 
 ## Interaction
 

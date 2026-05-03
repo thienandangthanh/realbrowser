@@ -77,6 +77,37 @@ There is no generic `posts`, `blocks`, or `content-blocks` command. Use the
 generic snapshot/selector substrate above, then reason from the page's actual
 role and DOM records.
 
+If `snapshot-dom`, `snapshot-aria`, or `query-selector` fails with a daemon
+capability error, check `status` before falling back to raw HTML or unrelated
+source-code searches. A stale daemon can be running an older copy of this skill
+script even when the current `scripts/realbrowser` supports the command. On real
+signed-in profiles, reload/restart only when the reader is needed because Chrome
+may surface the remote-debugging approval/banner.
+
+### Nested Item Trap
+
+On nested feeds, chats, search results, issue trackers, dashboards, and other
+repeated-item pages, selector names are not proof of item boundaries. A selector
+such as `[role="article"]` may match nested comments, replies, cards, or
+subpanels instead of the top-level item the user asked about. Do not count
+selector matches as feed items without checking surrounding DOM/AX context.
+
+A more reliable sequence is:
+
+```bash
+ARTIFACT_DIR="${TMPDIR:-/tmp}/realbrowser-feed"
+mkdir -p "$ARTIFACT_DIR"
+"$REALBROWSER_CLI" query-selector 'main h1, main h2, main h3, [role="heading"]' --out "$ARTIFACT_DIR/headings.json" --limit 80 --max-text-chars 200 --max-html-chars 500
+"$REALBROWSER_CLI" snapshot-dom --out "$ARTIFACT_DIR/feed-dom.json" --limit 2200 --max-text-chars 180
+"$REALBROWSER_CLI" snapshot-aria --out "$ARTIFACT_DIR/feed-aria.json" --limit 2200
+```
+
+Use the heading/candidate list to identify likely top-level items in visible
+order, then use DOM/AX records around those candidates to separate primary item
+text from nested content. If the boundary is still unclear, use a targeted
+screenshot for visual confirmation rather than broad screenshot OCR or full-page
+HTML stdout.
+
 For large HTML:
 
 ```bash

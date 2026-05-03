@@ -1,6 +1,6 @@
 ---
 name: realbrowser
-description: Use when you need fast local real-browser automation from Codex, including listing/selecting Chrome profiles, named browser sessions, anonymous clean-state sessions, network/performance capture, opening tabs, taking snapshots or screenshots, clicking, typing, filling forms, reading console/network data, or debugging localhost/browser UI with Chrome DevTools MCP.
+description: Use when you need fast local real-browser automation from Codex, including listing/selecting Chrome profiles, named browser sessions, anonymous clean-state sessions, OpenClaw-style role/DOM extraction for large dynamic pages, network/performance capture, opening tabs, taking snapshots or screenshots, clicking, typing, filling forms, reading console/network data, or debugging localhost/browser UI with Chrome DevTools MCP.
 ---
 
 # Realbrowser
@@ -20,6 +20,52 @@ REALBROWSER_HELPER="$HOME/.codex/skills/realbrowser/scripts/realbrowser-helper.m
 
 Do not run `doctor` by default. Use it when setup is uncertain or a browser
 command fails.
+
+## OpenClaw-Style Extraction
+
+Realbrowser has generic OpenClaw-style extraction built in. Use this before
+screenshots or raw HTML when reading large dynamic pages such as feeds, chats,
+search results, dashboards, or virtualized lists:
+
+```bash
+"$REALBROWSER_CLI" snapshot --compact --max-chars 2500
+"$REALBROWSER_CLI" snapshot-dom --out "$ARTIFACT_DIR/page-dom.json" --limit 1800 --max-text-chars 180
+"$REALBROWSER_CLI" snapshot-aria --out "$ARTIFACT_DIR/page-aria.json" --limit 1800
+"$REALBROWSER_CLI" query-selector 'main, [role="feed"], [role="article"], article' --out "$ARTIFACT_DIR/page-elements.json" --limit 60 --max-text-chars 300 --max-html-chars 800
+```
+
+This is the parser path agents should know about: `snapshot --compact` reads a
+bounded role view, `snapshot-aria` records accessibility nodes, `snapshot-dom`
+records DOM elements, and `query-selector` records focused selector matches.
+When a user asks for an OpenClaw-style element snapshot or "snapshot element",
+map that to these realbrowser CLI readers first.
+Write deep reads to `--out` artifacts and inspect them with OS-available local
+tools. Do not use full-page HTML stdout as the default parser, and do not rely
+on removed semantic shortcuts such as `posts`, `blocks`, or `content-blocks`.
+
+These readers live in this skill's `scripts/realbrowser` implementation. Use
+the realbrowser CLI, not the OpenClaw repository, for live browsing tasks. If
+one of these commands fails with a daemon capability error, run `status` and
+`sessions` before changing approach. `status` reports `Daemon script: <old>
+(current <new>; reload needed for new skill code)` when an old daemon is
+blocking current skill commands. Reload only when the new reader is needed; on
+real signed-in Chrome profiles, restarting the controller can surface the Chrome
+remote-debugging approval/banner.
+
+For nested feeds or repeated-item pages, treat selectors as hypotheses rather
+than semantics. A selector such as `[role="article"]` can match nested items
+like comments, replies, cards, or subpanels. A better first pass is to read
+headings/landmarks/repeated candidates, then inspect nearby DOM/role records
+around the matching node:
+
+```bash
+"$REALBROWSER_CLI" query-selector 'main h1, main h2, main h3, [role="heading"]' --out "$ARTIFACT_DIR/headings.json" --limit 80 --max-text-chars 200 --max-html-chars 500
+"$REALBROWSER_CLI" snapshot-dom --out "$ARTIFACT_DIR/page-dom.json" --limit 2200 --max-text-chars 180
+```
+
+Use the current page artifacts to determine item boundaries and order. Do not
+bake observed content or one run's ordering into the skill; dynamic pages
+change.
 
 ## Screenshot Task Fast Path
 
@@ -81,6 +127,10 @@ desktop/tablet/mobile screenshots":
    `find-tab <url-or-title> --all-sessions` when prior attempts may exist.
 2. Open or claim one stable target. Use `--session <name>` for isolated flows
    and `claim ... --handle-name <task>` for longer workflows.
+   For real signed-in profiles, omit `--select` on the initial `open --profile`
+   unless immediate automation selection is required; select or claim after the
+   tab exists. Use `--front`, `focus`, or `--foreground-until-ready` only for an
+   explicit visual handoff.
 3. Read before acting. Use `observe --max-chars 1500-2500` for page state and
    `snapshot --efficient` when current `uid` or CDP `[ref=eN]` refs are needed.
 4. Act only on current refs. After navigation, modal changes, form submission,
@@ -184,11 +234,12 @@ body conclusions.
   selector/debug work, not as the default page parser.
 - Do not use `--full-stdout` for large or unknown output. Prefer artifacts and
   targeted local inspection.
-- For Facebook/X/Zalo-style feeds, do not treat full-page HTML as the parser and
-  do not rely on removed semantic shortcuts such as `posts`, `blocks`, or
-  `content-blocks`. Use `snapshot --compact`, `snapshot-aria`,
-  `snapshot-dom --out`, and `query-selector --out`; use screenshots only to
-  verify visual boundaries or media-heavy content.
+- For social/app feeds, chats, search results, or nested dynamic lists, do not
+  treat full-page HTML as the parser and do not rely on removed semantic
+  shortcuts such as `posts`, `blocks`, or `content-blocks`. Use
+  `snapshot --compact`, `snapshot-aria`, `snapshot-dom --out`, and
+  `query-selector --out`; use screenshots only to verify visual boundaries or
+  media-heavy content.
 - Use `--raw-size` only when exact browser pixels matter. Default screenshots
   are normalized for agent use.
 
