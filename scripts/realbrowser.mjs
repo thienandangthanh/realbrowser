@@ -94,6 +94,7 @@ Usage:
   realbrowser doctor [--deep] [--json]
   realbrowser status [--deep] [--json]
   realbrowser restart [--json]
+  realbrowser cleanup-remote-debugging [--allow-attach] [--json]
   realbrowser tabs [--json]
   realbrowser open|newtab <url> [--front] [--json]
   realbrowser navigate|goto <url>
@@ -146,7 +147,7 @@ Usage:
   realbrowser tool <mcpToolName> [jsonArgs]
   realbrowser tools [--json]
   realbrowser chain '[["snapshot","--page","1"],["console","--errors","--page","1"]]' [--return summary|final|all] [--trace <path>] [--json]
-  realbrowser stop|detach
+  realbrowser stop|detach [--cleanup-remote-debugging]
 
 Global flags:
   --json
@@ -159,6 +160,8 @@ Global flags:
   --browser-url <url>
   --cdp-url <url>
   --dedicated
+  --cleanup-remote-debugging
+  --allow-attach
 `;
 }
 
@@ -266,6 +269,14 @@ function parseArgv(argv) {
       flags.maxLabels = arg.slice("--max-labels=".length);
     } else if (arg === "--front" || arg === "--bring-to-front") {
       flags.front = true;
+    } else if (
+      arg === "--cleanup-remote-debugging" ||
+      arg === "--turn-off-remote-debugging" ||
+      arg === "--disable-remote-debugging"
+    ) {
+      flags.cleanupRemoteDebugging = true;
+    } else if (arg === "--allow-attach" || arg === "--attach") {
+      flags.allowAttach = true;
     } else if (arg === "--dedicated") {
       flags.dedicated = true;
     } else if (arg === "--backend") {
@@ -638,22 +649,78 @@ async function runCli() {
   if (command === "stop" || command === "detach") {
     const state = await readJson(stateFileFromFlags(flags));
     if (!state || !isProcessAlive(state.pid)) {
-      console.log([
+      const lines = [
         "realbrowser daemon is not running",
         `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", turn off Chrome remote debugging from the banner or ${REMOTE_DEBUGGING_SETTINGS_URL}.`,
-      ].join("\n"));
+      ];
+      if (flags.cleanupRemoteDebugging) {
+        lines.push("No daemon is available for automatic cleanup; use Chrome's settings UI, or run `realbrowser cleanup-remote-debugging --allow-attach` if starting a fresh permission-gated attach is acceptable.");
+      }
+      console.log(lines.join("\n"));
       return;
     }
+    let cleanup = null;
+    if (flags.cleanupRemoteDebugging) {
+      cleanup = await cleanupRemoteDebuggingViaDaemon(state);
+    }
     await daemonRpc(state, { command: "stop" }).catch(() => null);
-    console.log([
+    const lines = [
       `stopped daemon pid ${state.pid}`,
+      cleanup?.text,
       `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", turn off Chrome remote debugging from the banner or ${REMOTE_DEBUGGING_SETTINGS_URL}.`,
-    ].join("\n"));
+    ].filter(Boolean);
+    console.log(lines.join("\n"));
     return;
   }
 
   if (command === "status" && !flags.deep) {
     printResult(await localStatus(flags), flags);
+    return;
+  }
+
+  if (command === "cleanup-remote-debugging" || command === "cleanup") {
+    const stateFile = stateFileFromFlags(flags);
+    const existing = await readJson(stateFile);
+    const before = await localChromeRemoteDebuggingStatus();
+    let state = existing && isProcessAlive(existing.pid) ? existing : null;
+    if (!state && before.known && !before.userEnabled) {
+      printResult({
+        text: "Default local Chrome remote-debugging setting is already disabled, and no realbrowser daemon is running.",
+        before,
+        after: before,
+      }, flags);
+      return;
+    }
+    if (!state && flags.allowAttach) {
+      state = await ensureDaemon(flags);
+    }
+    if (!state) {
+      printResult({
+        text: [
+          "Chrome remote debugging cleanup was not attempted because no realbrowser daemon is running.",
+          "Run `realbrowser detach --cleanup-remote-debugging` before the daemon is stopped, or use `realbrowser cleanup-remote-debugging --allow-attach` to start a fresh permission-gated attach.",
+          `Manual cleanup: open ${REMOTE_DEBUGGING_SETTINGS_URL} and turn off remote debugging.`,
+        ].join("\n"),
+        before,
+        after: before,
+      }, flags);
+      return;
+    }
+    const cleanup = await cleanupRemoteDebuggingViaDaemon(state);
+    await stopState(state).catch(() => {});
+    const mode = modeFromState(state) ?? desiredMode(flags);
+    const after = mode === AUTO_MODE
+      ? await waitForRemoteDebuggingSetting(false, 2000)
+      : await localChromeRemoteDebuggingStatus();
+    printResult({
+      text: formatRemoteDebuggingCleanupText(cleanup, before, after, {
+        mode,
+        stoppedPid: state.pid,
+      }),
+      before,
+      cleanup,
+      after,
+    }, flags);
     return;
   }
 
@@ -681,6 +748,24 @@ function daemonPayloadForCommand(command, args, flags = {}) {
   return { command, args, flags };
 }
 
+async function cleanupRemoteDebuggingViaDaemon(state) {
+  const mode = modeFromState(state) ?? AUTO_MODE;
+  if (mode === DEDICATED_MODE) {
+    return {
+      text: "Remote-debugging settings cleanup skipped for the dedicated realbrowser profile; stopping the daemon closes the managed browser session.",
+      cleanupRemoteDebugging: {
+        attempted: false,
+        confirmed: true,
+        reason: "dedicated-managed-profile",
+      },
+    };
+  }
+  return await daemonRpc(state, { command: "cleanup-remote-debugging" }).catch((error) => ({
+    text: `remote debugging cleanup attempted, but the browser connection ended before confirmation: ${error instanceof Error ? error.message : String(error)}`,
+    cleanupRemoteDebugging: { attempted: true, confirmed: false },
+  }));
+}
+
 async function localStatus(flags = {}) {
   const stateFile = stateFileFromFlags(flags);
   const state = await readJson(stateFile);
@@ -701,12 +786,123 @@ async function localStatus(flags = {}) {
       ? Boolean(healthBody.mcpConnected)
       : null,
   };
-  const browserControl = browserControlStatus(daemon);
+  const chromeRemoteDebugging = await localChromeRemoteDebuggingStatus();
+  const browserControl = browserControlStatus(daemon, chromeRemoteDebugging);
   return {
-    text: formatLocalStatusText(daemon, browserControl),
+    text: formatLocalStatusText(daemon, browserControl, chromeRemoteDebugging),
     daemon,
     browserControl,
+    chromeRemoteDebugging,
   };
+}
+
+async function localChromeRemoteDebuggingStatus() {
+  const states = [];
+  for (const userDataDir of chromeUserDataDirCandidates()) {
+    const localState = await readJson(path.join(userDataDir, "Local State"));
+    if (!localState) {
+      continue;
+    }
+    const userEnabled = localState?.devtools?.remote_debugging?.["user-enabled"];
+    states.push({
+      userDataDir,
+      userEnabled: typeof userEnabled === "boolean" ? userEnabled : null,
+    });
+  }
+  return {
+    known: states.length > 0,
+    userEnabled: states.some((state) => state.userEnabled === true),
+    states,
+  };
+}
+
+async function waitForRemoteDebuggingSetting(userEnabled, timeoutMs) {
+  const startedAt = Date.now();
+  let latest = await localChromeRemoteDebuggingStatus();
+  while (Date.now() - startedAt < timeoutMs) {
+    latest = await localChromeRemoteDebuggingStatus();
+    if (latest.known && latest.userEnabled === userEnabled) {
+      return latest;
+    }
+    await sleep(100);
+  }
+  return latest;
+}
+
+function formatRemoteDebuggingCleanupText(cleanup, before, after, options = {}) {
+  const lines = [];
+  if (options.stoppedPid) {
+    lines.push(`stopped daemon pid ${options.stoppedPid}`);
+  }
+  if (cleanup?.cleanupRemoteDebugging?.reason === "dedicated-managed-profile") {
+    lines.push(cleanup.text);
+  } else if (before?.known && before.userEnabled === false && !cleanup?.cleanupRemoteDebugging?.attempted) {
+    lines.push("Chrome remote debugging was already disabled.");
+  } else {
+    lines.push(cleanup?.text ?? "Chrome remote debugging cleanup attempted.");
+  }
+  const metadataLabel = remoteDebuggingMetadataLabel(options.mode);
+  if (after?.known) {
+    lines.push(`${metadataLabel}: ${formatMaybeBoolean(after.userEnabled)}`);
+  } else {
+    lines.push(`${metadataLabel}: unknown`);
+  }
+  if (options.mode && options.mode !== AUTO_MODE) {
+    lines.push(remoteDebuggingMetadataCaveat(options.mode));
+  }
+  if (cleanup?.cleanupRemoteDebugging?.reason !== "dedicated-managed-profile" && (!after?.known || after.userEnabled)) {
+    lines.push(`If the banner remains, turn off Chrome remote debugging from ${REMOTE_DEBUGGING_SETTINGS_URL}.`);
+  }
+  return lines.join("\n");
+}
+
+function remoteDebuggingMetadataLabel(mode) {
+  return mode === AUTO_MODE
+    ? "Default local Chrome remote-debugging setting"
+    : "Default local Chrome remote-debugging metadata";
+}
+
+function remoteDebuggingMetadataCaveat(mode) {
+  if (mode === DEDICATED_MODE) {
+    return "That metadata is not used by the dedicated realbrowser profile.";
+  }
+  if (mode === "browserUrl") {
+    return "That metadata may not describe the configured browser URL backend.";
+  }
+  return "That metadata may not describe the active browser backend.";
+}
+
+function chromeUserDataDirCandidates() {
+  const candidates = [];
+  if (process.env.REALBROWSER_CHROME_USER_DATA_DIR) {
+    candidates.push(process.env.REALBROWSER_CHROME_USER_DATA_DIR);
+  }
+  const home = os.homedir();
+  if (process.platform === "darwin") {
+    candidates.push(
+      path.join(home, "Library", "Application Support", "Google", "Chrome"),
+      path.join(home, "Library", "Application Support", "Google", "Chrome Beta"),
+      path.join(home, "Library", "Application Support", "Chromium"),
+    );
+  } else if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA;
+    if (localAppData) {
+      candidates.push(
+        path.join(localAppData, "Google", "Chrome", "User Data"),
+        path.join(localAppData, "Google", "Chrome Beta", "User Data"),
+        path.join(localAppData, "Chromium", "User Data"),
+      );
+    }
+  } else {
+    const configHome = process.env.XDG_CONFIG_HOME || path.join(home, ".config");
+    candidates.push(
+      path.join(configHome, "google-chrome"),
+      path.join(configHome, "google-chrome-beta"),
+      path.join(configHome, "chromium"),
+      path.join(configHome, "chromium-browser"),
+    );
+  }
+  return [...new Set(candidates.map((candidate) => path.resolve(candidate)))];
 }
 
 function modeFromState(state) {
@@ -724,7 +920,7 @@ function modeFromState(state) {
   }
 }
 
-function browserControlStatus(daemon) {
+function browserControlStatus(daemon, chromeRemoteDebugging = null) {
   const mode = daemon?.mode ?? AUTO_MODE;
   const realProfile = mode === AUTO_MODE || mode === "browserUrl";
   const mcpKnown = typeof daemon?.mcpConnected === "boolean";
@@ -736,6 +932,9 @@ function browserControlStatus(daemon) {
     mayAppearOnNextBrowserCommand: running && (!mcpKnown || !mcpConnected),
     realSignedInProfileMayBeControlled: realProfile && (running || mcpConnected),
     realbrowserMcpConnected: mcpKnown ? mcpConnected : null,
+    defaultLocalChromeRemoteDebuggingUserEnabled: chromeRemoteDebugging?.known ? chromeRemoteDebugging.userEnabled : null,
+    chromeRemoteDebuggingUserEnabled: chromeRemoteDebugging?.known ? chromeRemoteDebugging.userEnabled : null,
+    chromeRemoteDebuggingMetadataAppliesToActiveBrowser: mode === AUTO_MODE ? true : null,
     canSafelySuppressBanner: false,
     reason: !running
       ? "No running realbrowser daemon was detected."
@@ -750,21 +949,35 @@ function browserControlStatus(daemon) {
   };
 }
 
-function formatLocalStatusText(daemon, browserControl) {
+function formatLocalStatusText(daemon, browserControl, chromeRemoteDebugging = null) {
+  const metadataLine = chromeRemoteDebugging?.known
+    ? `${remoteDebuggingMetadataLabel(daemon.mode)}: ${formatMaybeBoolean(chromeRemoteDebugging.userEnabled)}`
+    : `${remoteDebuggingMetadataLabel(daemon.mode)}: unknown`;
+  const metadataCaveat = daemon.mode && daemon.mode !== AUTO_MODE
+    ? remoteDebuggingMetadataCaveat(daemon.mode)
+    : "";
   if (!daemon.running) {
+    const bannerLine = "Chrome banner: not attributable to a running realbrowser daemon.";
+    const cleanupLine = chromeRemoteDebugging?.known && !chromeRemoteDebugging.userEnabled
+      ? "Cleanup: no realbrowser cleanup needed; if a banner remains, another tool/session may still be attached."
+      : `Cleanup: use the banner's "Turn off in settings" button or open ${browserControl.turnOffChromeRemoteDebugging}.`;
     return [
       "realbrowser daemon: not running",
-      "Chrome banner: not currently attributable to a running realbrowser daemon. If it remains visible, Chrome remote debugging may still be enabled or another tool may be attached.",
-      `Cleanup: use the banner's "Turn off in settings" button or open ${browserControl.turnOffChromeRemoteDebugging}.`,
-    ].join("\n");
+      bannerLine,
+      metadataLine,
+      metadataCaveat,
+      cleanupLine,
+    ].filter(Boolean).join("\n");
   }
   return [
     `realbrowser daemon: running pid ${daemon.pid} mode ${daemon.mode}`,
     `Chrome DevTools MCP connected: ${formatMaybeBoolean(daemon.mcpConnected)}`,
+    metadataLine,
+    metadataCaveat,
     `Chrome banner: ${browserControl.chromeBannerExpectedNow === true ? "expected now" : browserControl.chromeBannerExpectedNow === false ? "may appear when the next browser command attaches" : "unknown; this daemon predates banner status reporting"}`,
     `Real signed-in profile may be controlled: ${browserControl.realSignedInProfileMayBeControlled ? "yes" : "no"}`,
     `Cleanup: run \`${browserControl.stopRealbrowserCommand}\`; if the banner remains, turn off Chrome remote debugging from the banner or ${browserControl.turnOffChromeRemoteDebugging}.`,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 function formatMaybeBoolean(value) {
@@ -1074,6 +1287,37 @@ function normalizeToolResult(result) {
   };
 }
 
+function parseListPagesResult(result) {
+  const pages = [];
+  const structuredPages = result?.structuredContent?.pages;
+  if (Array.isArray(structuredPages)) {
+    for (const entry of structuredPages) {
+      if (entry?.id === undefined) {
+        continue;
+      }
+      pages.push({
+        id: parsePageId(entry.id),
+        url: String(entry.url ?? ""),
+        selected: entry.selected === true,
+      });
+    }
+  }
+  if (pages.length > 0) {
+    return pages;
+  }
+  const text = String(result?.text ?? "");
+  const pattern = /^\s*(\d+):\s+(.+?)(?:\s+\[(selected)\])?\s*$/gim;
+  let match;
+  while ((match = pattern.exec(text))) {
+    pages.push({
+      id: parsePageId(match[1]),
+      url: match[2]?.trim() ?? "",
+      selected: Boolean(match[3]),
+    });
+  }
+  return pages;
+}
+
 function toolError(result, name) {
   if (!result?.isError) {
     return null;
@@ -1354,6 +1598,8 @@ class BrowserDaemon {
         return await this.handleResume(args, flags);
       case "trace":
         return await this.handleTrace(args, flags);
+      case "cleanup-remote-debugging":
+        return await this.handleCleanupRemoteDebugging(flags);
       case "stop":
         await this.mcp?.close().catch(() => {});
         await fsp.rm(this.stateFile, { force: true }).catch(() => {});
@@ -1362,6 +1608,120 @@ class BrowserDaemon {
       default:
         throw new Error(`Unknown command: ${command}\n\n${usage()}`);
     }
+  }
+
+  async handleCleanupRemoteDebugging(flags = {}) {
+    const settingsPage = await this.openRemoteDebuggingSettingsPage(flags);
+    let cleanup = null;
+    let errorText = "";
+    try {
+      const result = await this.callTool(
+        "evaluate_script",
+        {
+          pageId: settingsPage.pageId,
+          function: `async () => {
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            let checkbox = null;
+            for (let attempt = 0; attempt < 30; attempt += 1) {
+              checkbox = document.querySelector("#remote-debugging-enabled");
+              if (checkbox) break;
+              await sleep(100);
+            }
+            if (!checkbox) {
+              return {
+                attempted: false,
+                confirmed: false,
+                reason: "checkbox-not-found",
+                url: location.href,
+                title: document.title,
+              };
+            }
+            const before = Boolean(checkbox.checked);
+            if (!before) {
+              return { attempted: false, confirmed: true, before, after: false, reason: "already-disabled" };
+            }
+            if (checkbox.disabled) {
+              return { attempted: false, confirmed: false, before, after: before, reason: "checkbox-disabled" };
+            }
+            checkbox.click();
+            await sleep(500);
+            checkbox = document.querySelector("#remote-debugging-enabled");
+            const after = Boolean(checkbox?.checked);
+            return { attempted: true, confirmed: !after, before, after, reason: after ? "still-enabled" : "disabled" };
+          }`,
+        },
+        { noFallback: true },
+      );
+      cleanup = extractJsonFromToolText(result.text);
+    } catch (error) {
+      errorText = error instanceof Error ? error.message : String(error);
+      cleanup = { attempted: true, confirmed: false, reason: "connection-ended-before-confirmation" };
+    }
+    if (settingsPage.openedByCleanup) {
+      await this.callTool("close_page", { pageId: settingsPage.pageId }).catch(() => {});
+    }
+    if (cleanup?.confirmed) {
+      return {
+        text: "Chrome remote debugging cleanup completed.",
+        cleanupRemoteDebugging: cleanup,
+      };
+    }
+    return {
+      text: [
+        "Chrome remote debugging cleanup was not confirmed.",
+        cleanup?.reason ? `Reason: ${cleanup.reason}` : "",
+        errorText ? `Error: ${errorText}` : "",
+        `Manual cleanup: open ${REMOTE_DEBUGGING_SETTINGS_URL} and turn off remote debugging.`,
+      ].filter(Boolean).join("\n"),
+      cleanupRemoteDebugging: cleanup,
+    };
+  }
+
+  async openRemoteDebuggingSettingsPage(flags = {}) {
+    const beforePages = await this.listPagesForCleanup();
+    const beforeIds = new Set(beforePages.map((page) => page.id));
+    await this.callTool(
+      "new_page",
+      {
+        url: REMOTE_DEBUGGING_SETTINGS_URL,
+        background: !flags.front,
+      },
+      { noFallback: true },
+    );
+    await sleep(500);
+    const afterPages = await this.listPagesForCleanup();
+    const inspectPages = afterPages.filter((page) => page.url.startsWith("chrome://inspect/"));
+    const newInspectPage =
+      inspectPages.find((page) => !beforeIds.has(page.id)) ??
+      inspectPages.find((page) => page.selected) ??
+      null;
+    if (newInspectPage) {
+      return {
+        pageId: newInspectPage.id,
+        openedByCleanup: !beforeIds.has(newInspectPage.id),
+      };
+    }
+    const existingInspectPage = beforePages.find((page) => page.url.startsWith("chrome://inspect/"));
+    if (existingInspectPage) {
+      return {
+        pageId: existingInspectPage.id,
+        openedByCleanup: false,
+      };
+    }
+    throw new Error(`Could not find ${REMOTE_DEBUGGING_SETTINGS_URL} after opening it`);
+  }
+
+  async listPagesForCleanup() {
+    const result = await this.callTool("list_pages", {}, { noFallback: true });
+    return parseListPagesResult(result);
+  }
+
+  async findPageIdByUrlPrefix(prefix) {
+    const page = (await this.listPagesForCleanup()).find((entry) => entry.url.startsWith(prefix));
+    if (page) {
+      return page.id;
+    }
+    return null;
   }
 
   async doctor(deep) {
@@ -1388,7 +1748,7 @@ class BrowserDaemon {
 
   async status() {
     const tabs = await this.callTool("list_pages", {});
-    const pages = tabs.structuredContent?.pages ?? [];
+    const pages = parseListPagesResult(tabs);
     const selected = pages.find((page) => page.selected) ?? null;
     return {
       daemon: {
@@ -3691,6 +4051,10 @@ function runSelfTest() {
   assertSelfTest(parsedBackgroundOpen.flags.front !== true, "open defaults to background mode");
   const parsedForegroundOpen = parseArgv(["open", "https://example.com", "--front"]);
   assertSelfTest(parsedForegroundOpen.flags.front === true, "open --front opts into focus");
+  const parsedCleanupDetach = parseArgv(["detach", "--cleanup-remote-debugging"]);
+  assertSelfTest(parsedCleanupDetach.flags.cleanupRemoteDebugging === true, "parser handles cleanup remote debugging flag");
+  const parsedAllowAttach = parseArgv(["cleanup-remote-debugging", "--allow-attach"]);
+  assertSelfTest(parsedAllowAttach.flags.allowAttach === true, "parser handles cleanup allow attach flag");
   const backgroundPayload = daemonPayloadForCommand(parsedBackgroundOpen.command, parsedBackgroundOpen.args, parsedBackgroundOpen.flags);
   assertSelfTest(backgroundPayload.command === "tool", "open is client-translated for old daemons");
   assertSelfTest(backgroundPayload.args[0] === "new_page", "open translation calls new_page");
@@ -3743,6 +4107,20 @@ function runSelfTest() {
     detachedControl.reason.includes("No running realbrowser daemon"),
     "detached status reports realbrowser daemon absence",
   );
+  const cleanupText = formatRemoteDebuggingCleanupText(
+    { text: "cleanup done" },
+    { known: true, userEnabled: true },
+    { known: true, userEnabled: false },
+    { mode: AUTO_MODE },
+  );
+  assertSelfTest(
+    cleanupText.includes("Default local Chrome remote-debugging setting: no"),
+    "cleanup status reports disabled setting",
+  );
+  const parsedPages = parseListPagesResult({
+    text: "## Pages\n1: about:blank\n2: chrome://inspect/#remote-debugging [selected]",
+  });
+  assertSelfTest(parsedPages[1]?.url.startsWith("chrome://inspect/"), "list_pages text parser keeps inspect urls");
   console.log("self-test ok");
 }
 
