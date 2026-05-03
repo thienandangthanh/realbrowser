@@ -449,9 +449,9 @@ function usage(commandName = "") {
     "",
     "Common examples:",
     "  realbrowser status",
-    "  realbrowser claim https://ninzap.dev --handle-name ninzap --json",
-    "  realbrowser --handle ninzap screenshot tmp/ninzap.png",
-    "  realbrowser mobile-screenshot https://ninzap.dev tmp/ninzap-mobile.png --viewport 390x844",
+    "  realbrowser claim https://app.example.com --handle-name app --json",
+    "  realbrowser --handle app screenshot tmp/app.png",
+    "  realbrowser mobile-screenshot https://app.example.com tmp/app-mobile.png --viewport 390x844",
     "  realbrowser handles",
     "",
     "Commands:",
@@ -9188,7 +9188,7 @@ async function runSelfTest() {
   );
   assertSelfTest(second.text.includes("(empty)"), "line clear hides previous lines");
 
-  const windowsPath = String.raw`C:\Users\Tuyen Hx\Pictures\screen shot.png`;
+  const windowsPath = String.raw`C:\Users\Example User\Pictures\screen shot.png`;
   const parsedWindowsPath = parseArgv(["screenshot", windowsPath, "--format", "png"]);
   assertSelfTest(parsedWindowsPath.command === "screenshot", "parser keeps command before Windows path");
   assertSelfTest(parsedWindowsPath.args[0] === windowsPath, "parser preserves Windows path with spaces");
@@ -9217,13 +9217,13 @@ async function runSelfTest() {
   const parsedAnonymousOpen = parseArgv(["open", "https://example.com", "--anonymous", "--select"]);
   assertSelfTest(parsedAnonymousOpen.flags.anonymous === true, "parser handles anonymous flag");
   assertSelfTest(parsedAnonymousOpen.flags.select === true, "parser handles anonymous select flag");
-  const parsedSessionOpen = parseArgv(["open", "https://example.com", "--anonymous", "--session", "tom-anon"]);
-  assertSelfTest(parsedSessionOpen.flags.session === "tom-anon", "parser handles session flag");
-  const parsedHandle = parseArgv(["screenshot", "out.png", "--handle", "ninzap", "--handle-out", "tmp/next.json", "--viewport", "390x844"]);
-  assertSelfTest(parsedHandle.flags.handle === "ninzap", "parser handles handle flag");
+  const parsedSessionOpen = parseArgv(["open", "https://example.com", "--anonymous", "--session", "work-anon"]);
+  assertSelfTest(parsedSessionOpen.flags.session === "work-anon", "parser handles session flag");
+  const parsedHandle = parseArgv(["screenshot", "out.png", "--handle", "app", "--handle-out", "tmp/next.json", "--viewport", "390x844"]);
+  assertSelfTest(parsedHandle.flags.handle === "app", "parser handles handle flag");
   assertSelfTest(parsedHandle.flags.handleOut === "tmp/next.json", "parser handles handle output flag");
   assertSelfTest(parsedHandle.flags.viewport === "390x844", "parser handles viewport flag");
-  assertSelfTest(handlePathFromValue("ninzap").endsWith(path.join(".realbrowser", "handles", "ninzap.json")), "handle names map to handle directory");
+  assertSelfTest(handlePathFromValue("app").endsWith(path.join(".realbrowser", "handles", "app.json")), "handle names map to handle directory");
   const customHandleStateFile = path.resolve(os.tmpdir(), "realbrowser-custom-state.json");
   assertSelfTest(
     stateFileFromHandle({ path: "handle", session: "named", stateFile: customHandleStateFile, pageId: 7 }) === customHandleStateFile,
@@ -9292,11 +9292,11 @@ async function runSelfTest() {
   assertSelfTest(shouldReuseExistingRealProfileSession({ profile: "chrome:Default" }) === false, "profile-targeted commands do not auto-route");
   const parsedNoActive = parseArgv(["observe", "--no-active-session"]);
   assertSelfTest(parsedNoActive.flags.noActiveSession === true, "parser handles no-active-session flag");
-  const parsedNoActivate = parseArgv(["select-tab", "ninzap.dev", "--no-activate-session"]);
+  const parsedNoActivate = parseArgv(["select-tab", "app.example.com", "--no-activate-session"]);
   assertSelfTest(parsedNoActivate.flags.activateSession === false, "parser handles no-activate-session flag");
-  const parsedForceSession = parseArgv(["use-session", "tom-anon", "--force"]);
+  const parsedForceSession = parseArgv(["use-session", "work-anon", "--force"]);
   assertSelfTest(parsedForceSession.flags.force === true, "parser handles force flag");
-  assertSelfTest(path.basename(sessionStateFile("tom anon")) === "tom%20anon.json", "session names map to encoded state files");
+  assertSelfTest(path.basename(sessionStateFile("work anon")) === "work%20anon.json", "session names map to encoded state files");
   assertSelfTest(autoSessionNameForBrowserTab({ browserUrl: "http://127.0.0.1:9222" }) === "cdp-127-0-0-1-9222", "CDP endpoints map to stable automatic session names");
   assertSelfTest(
     shouldUseRealProfileAttachLock({ browserUrl: "http://127.0.0.1:9222" }) === true,
@@ -9356,20 +9356,20 @@ async function runSelfTest() {
   );
   const exactUrlPageCandidates = pageCandidatesForBrowserTab(
     [
-      { id: 1, url: "https://www.facebook.com/" },
-      { id: 2, url: "https://www.facebook.com/search/groups/?q=OpenClaw%20VN" },
+      { id: 1, url: "https://social.example.com/" },
+      { id: 2, url: "https://social.example.com/search/groups/?q=Example%20Group" },
     ],
     {
       targetId: "2",
-      url: "https://www.facebook.com/search/groups/?q=OpenClaw%20VN",
+      url: "https://social.example.com/search/groups/?q=Example%20Group",
     },
-    "https://www.facebook.com/search/groups/?q=OpenClaw%20VN",
+    "https://social.example.com/search/groups/?q=Example%20Group",
   );
   assertSelfTest(
     exactUrlPageCandidates.length === 1 && exactUrlPageCandidates[0].id === 2,
     "absolute URL tab selection does not fuzzy-match shorter parent URLs",
   );
-  const parsedAllSessions = parseArgv(["find-tab", "ninzap.dev", "--all-sessions"]);
+  const parsedAllSessions = parseArgv(["find-tab", "app.example.com", "--all-sessions"]);
   assertSelfTest(parsedAllSessions.flags.allSessions === true, "parser handles all-sessions flag");
   const parsedNetworkCapture = parseArgv(["capture-network", "https://example.com", "--anonymous", "--duration", "15000", "--har", "example.har", "--reload"]);
   assertSelfTest(parsedNetworkCapture.command === "capture-network", "parser handles capture-network command");
@@ -9395,10 +9395,10 @@ async function runSelfTest() {
   assertSelfTest(desiredMode({ anonymous: true }) === ANONYMOUS_MODE, "anonymous flag selects anonymous mode");
   const mockProfiles = [
     { id: "chrome:Default", browserName: "Google Chrome", profileDirectory: "Default", displayName: "Person 1", email: "one@example.com", lastUsed: true, lastActive: true, activeRank: 0 },
-    { id: "chrome:Profile 4", browserName: "Google Chrome", profileDirectory: "Profile 4", displayName: "Tom", email: "tom@example.com", lastUsed: false, lastActive: true, activeRank: 1 },
+    { id: "chrome:Profile 4", browserName: "Google Chrome", profileDirectory: "Profile 4", displayName: "Work", email: "work@example.com", lastUsed: false, lastActive: true, activeRank: 1 },
   ];
-  assertSelfTest(selectBrowserProfile(mockProfiles, "chrome:Profile 4")?.displayName === "Tom", "profile selection supports stable id");
-  assertSelfTest(selectBrowserProfile(mockProfiles, "tom@example.com")?.profileDirectory === "Profile 4", "profile selection supports account email");
+  assertSelfTest(selectBrowserProfile(mockProfiles, "chrome:Profile 4")?.displayName === "Work", "profile selection supports stable id");
+  assertSelfTest(selectBrowserProfile(mockProfiles, "work@example.com")?.profileDirectory === "Profile 4", "profile selection supports account email");
   assertSelfTest(filterProfilesByActivity(mockProfiles, { active: true }).length === 2, "active profile filter uses Chrome activity hints");
   assertSelfTest(formatProfileActivity(mockProfiles[0]) === "last-used,active#1", "profile activity formatter marks last-used profile");
   assertSelfTest(
@@ -9503,7 +9503,7 @@ async function runSelfTest() {
   const parsedRestartDaemon = parseArgv(["tabs", "--restart-daemon"]);
   assertSelfTest(parsedRestartDaemon.flags.restartDaemon === true, "parser handles daemon restart flag");
   assertSelfTest(
-    requiredCapabilitiesForPayload({ command: "chain", args: ['[["wait","OpenClaw VN"],["blocks","--limit","5"]]'] }).has("visible-blocks"),
+    requiredCapabilitiesForPayload({ command: "chain", args: ['[["wait","Example Group"],["blocks","--limit","5"]]'] }).has("visible-blocks"),
     "daemon capability check inspects chain steps",
   );
   assertSelfTestThrows(
@@ -9565,12 +9565,12 @@ async function runSelfTest() {
   const parsedVersion = parseArgv(["--version"]);
   assertSelfTest(parsedVersion.flags.version === true, "parser supports version flag");
   assertSelfTestThrows(() => parseArgv(["claim", "--accept"]), "command-owned argument tokens fail on unrelated commands");
-  assertSelfTestThrows(() => parseArgv(["claim", "--hanlde", "ninzap"]), "unknown flags fail before daemon startup");
+  assertSelfTestThrows(() => parseArgv(["claim", "--hanlde", "app"]), "unknown flags fail before daemon startup");
   assertSelfTestThrows(() => parseArgv(["claim", "--session"]), "missing flag values fail before daemon startup");
   const parsedWaitNetworkIdle = parseArgv(["wait", "--networkidle"]);
   assertSelfTest(parsedWaitNetworkIdle.args[0] === "--networkidle", "parser preserves wait readiness tokens");
-  assertSelfTest(waitForTextFunction("OpenClaw VN", 1000).includes("OpenClaw VN"), "wait text uses page-local polling function");
-  new Function(`return (${waitForTextFunction("OpenClaw VN", 1000)})`);
+  assertSelfTest(waitForTextFunction("Example Group", 1000).includes("Example Group"), "wait text uses page-local polling function");
+  new Function(`return (${waitForTextFunction("Example Group", 1000)})`);
   const parsedBlocks = parseArgv(["blocks", "[role=article]", "--limit", "5"]);
   assertSelfTest(parsedBlocks.command === "blocks" && parsedBlocks.flags.limit === "5", "parser handles visible blocks command");
   assertSelfTest(visibleBlocksFunction("[role=article]").includes("querySelectorAll"), "visible blocks builds a DOM query function");

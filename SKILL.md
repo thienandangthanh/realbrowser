@@ -47,7 +47,7 @@ show one fresh remote-debugging approval prompt.
 
 `status` is side-effect-light by default and should be used to check whether realbrowser is already controlling Chrome. It may inspect default-local-Chrome remote-debugging metadata when that file is available, without attaching to the browser backend; treat that metadata as a hint, not proof for every backend. Use `status --deep`, `tabs`, or any page command only when you intentionally want to attach to the browser backend.
 
-Use `--session <name>` whenever multiple browser contexts may exist. A named session has its own state file under `~/.realbrowser/sessions/`, so `tom-anon`, `default-anon`, and the default session do not overwrite each other.
+Use `--session <name>` whenever multiple browser contexts may exist. A named session has its own state file under `~/.realbrowser/sessions/`, so `work-anon`, `default-anon`, and the default session do not overwrite each other.
 
 Realbrowser also has one active session pointer at `~/.realbrowser/active-session.json`. `select-tab` sets it after a unique match, explicit `--session <name>` commands set it after successful page commands, and `use-session <name>` sets it manually. Plain follow-up commands such as `observe`, `console`, `capture-network`, `viewport`, and `screenshot` use the active running session automatically. Use `sessions` to see the active `*`, `active-session` to inspect it, `clear-session` to forget it, and `--no-active-session` when you intentionally want the default state file instead.
 
@@ -59,10 +59,10 @@ to that tab even when another Codex tab selects a different page in the same
 browser profile:
 
 ```bash
-HANDLE="tmp/realbrowser-handles/ninzap-dev-mobile.json"
-"$REALBROWSER_CLI" claim https://ninzap.dev --session work-profile --handle-out "$HANDLE" --json
+HANDLE="tmp/realbrowser-handles/app-mobile.json"
+"$REALBROWSER_CLI" claim https://app.example.com --session work-profile --handle-out "$HANDLE" --json
 export REALBROWSER_HANDLE="$HANDLE"
-"$REALBROWSER_CLI" screenshot tmp/ninzap.png
+"$REALBROWSER_CLI" screenshot tmp/app.png
 "$REALBROWSER_CLI" viewport 390x844
 "$REALBROWSER_CLI" handles
 "$REALBROWSER_CLI" release-handle "$HANDLE"
@@ -132,15 +132,15 @@ Use `--browser <key>` to disambiguate matching profiles. Use `--json` when you n
 
 `open --profile <id> <url>` is the script-owned profile-open primitive; do not call OS launchers directly from an agent. Internally the script reuses an existing approved endpoint session when the requested profile is safe to open through that endpoint. For a browser-level endpoint shared by several Chrome profiles, CDP can only reliably create a new normal tab in Chrome's `last-used` profile; for other profiles the script uses the OS browser launcher with Chrome's `--profile-directory=<dir>` flag, then attaches through the debuggable endpoint. After that, page automation still needs a debuggable backend: enable remote debugging in that profile and use `--profile <id> --no-fallback`, or pass `--browser-url <cdp-url>` when you already know the endpoint. Chrome may expose one browser-level DevTools endpoint for several profiles under the same user-data root; in that case, attach to the endpoint, then verify/select the intended tab by URL/title before taking action. If `profiles` shows no debug endpoint for the selected profile, do not continue in the dedicated fallback when login state matters.
 
-For requests like "go to staging.ninzap.com on Tom's browser profile, check inbox, take screenshot", use a profile-targeted open and select in one step:
+For requests like "go to staging.example.com on a work browser profile, check inbox, take screenshot", use a profile-targeted open and select in one step:
 
 ```bash
-"$REALBROWSER_CLI" profiles "tuyenhx.tanker" --browser chrome
-"$REALBROWSER_CLI" open --profile "chrome:Profile 4" https://staging.ninzap.com/ --select --no-fallback --timeout 15000
+"$REALBROWSER_CLI" profiles "work@example.com" --browser chrome
+"$REALBROWSER_CLI" open --profile "chrome:Profile 4" https://staging.example.com/ --select --no-fallback --timeout 15000
 "$REALBROWSER_CLI" active-session
 "$REALBROWSER_CLI" observe
 "$REALBROWSER_CLI" snapshot --efficient
-"$REALBROWSER_CLI" screenshot staging-ninzap-inbox.png --full
+"$REALBROWSER_CLI" screenshot staging-app-inbox.png --full
 ```
 
 For authenticated social or feed-reading tasks where the goal is "what is the
@@ -148,9 +148,9 @@ first visible post/content?", prefer compact DOM reads over screenshots or full
 snapshots:
 
 ```bash
-"$REALBROWSER_CLI" profiles "Tuyen" --browser chrome
-"$REALBROWSER_CLI" open --profile "chrome:Default" "https://www.facebook.com/" --select --no-fallback --timeout 15000 --quiet
-"$REALBROWSER_CLI" chain '[["goto","https://www.facebook.com/groups/852586990732832/"],["wait","OpenClaw VN","--timeout","15000"],["blocks","--limit","8","--max-chars","6000"]]' --return final
+"$REALBROWSER_CLI" profiles "work@example.com" --browser chrome
+"$REALBROWSER_CLI" open --profile "chrome:Default" "https://social.example.com/" --select --no-fallback --timeout 15000 --quiet
+"$REALBROWSER_CLI" chain '[["goto","https://social.example.com/groups/example-group"],["wait","Example Group","--timeout","15000"],["blocks","--limit","8","--max-chars","6000"]]' --return final
 ```
 
 Use `blocks` first for feeds because it returns visible content blocks in
@@ -158,13 +158,13 @@ screen order. Fall back to targeted `js` only when the page's DOM structure
 needs custom extraction. `chain` includes per-step durations in JSON/trace and
 summary output; use that instead of shell-level timing when analyzing speed.
 
-Use the stable profile id when a human name is ambiguous. For example, `Tom` may match more than one account; `chrome:Profile 4`, `tuyenhx.tanker`, or the account email is safer. `--select` opens the tab with Chrome's profile selector, waits for a matching debuggable tab, attaches to the endpoint, and selects the page. If `--select` reports no endpoint, stop and ask the user to enable Chrome remote debugging for that profile instead of falling back to the dedicated profile.
+Use the stable profile id when a human name is ambiguous. For example, a first name may match more than one account; `chrome:Profile 4`, the account email, or another stable profile identifier is safer. `--select` opens the tab with Chrome's profile selector, waits for a matching debuggable tab, attaches to the endpoint, and selects the page. If `--select` reports no endpoint, stop and ask the user to enable Chrome remote debugging for that profile instead of falling back to the dedicated profile.
 
 When the user asks to check a URL that may already be open, search existing debuggable tabs before opening a new one:
 
 ```bash
-"$REALBROWSER_CLI" find-tab "developers.facebook.com/apps/1788280045116508"
-"$REALBROWSER_CLI" select-tab "developers.facebook.com/apps/1788280045116508" --no-fallback
+"$REALBROWSER_CLI" find-tab "admin.example.com/apps/example-app"
+"$REALBROWSER_CLI" select-tab "admin.example.com/apps/example-app" --no-fallback
 "$REALBROWSER_CLI" observe
 ```
 
@@ -175,9 +175,9 @@ When the user asks to check a URL that may already be open, search existing debu
 `--anonymous` means Chrome DevTools MCP isolated browser state in a Chrome Incognito window, not privacy/anonymity on the network. It starts Chrome DevTools MCP with isolated mode and an incognito Chrome argument, then navigates the initial incognito `about:blank` page instead of using MCP `new_page`, because `new_page` can open a separate normal isolated window. Use it when the user asks for anonymous mode, clean login testing, first-run UI checks, or cookie-free behavior:
 
 ```bash
-"$REALBROWSER_CLI" open https://ninzap.dev --anonymous --select
+"$REALBROWSER_CLI" open https://app.example.com --anonymous --select
 "$REALBROWSER_CLI" observe
-"$REALBROWSER_CLI" screenshot ninzap-dev-anonymous.png --full
+"$REALBROWSER_CLI" screenshot app-anonymous.png --full
 "$REALBROWSER_CLI" detach
 ```
 
@@ -186,21 +186,21 @@ An anonymous daemon keeps its isolated browser state for follow-up commands unti
 For multiple anonymous/profile contexts, name every context and search all sessions before opening a duplicate:
 
 ```bash
-"$REALBROWSER_CLI" open https://ninzap.dev --anonymous --session tom-anon --select
+"$REALBROWSER_CLI" open https://app.example.com --anonymous --session work-anon --select
 "$REALBROWSER_CLI" open about:blank --anonymous --session default-anon --select
 "$REALBROWSER_CLI" sessions
-"$REALBROWSER_CLI" find-tab ninzap.dev --all-sessions
-"$REALBROWSER_CLI" select-tab ninzap.dev --all-sessions
+"$REALBROWSER_CLI" find-tab app.example.com --all-sessions
+"$REALBROWSER_CLI" select-tab app.example.com --all-sessions
 "$REALBROWSER_CLI" observe
 ```
 
 For a profile-bound Incognito window, combine `--profile`, `--anonymous`, `--session`, and `--select`. This opens Chrome with `--profile-directory=<profile>` plus `--incognito`, then attaches to the profile's detected DevTools endpoint. It requires that profile to expose a DevTools endpoint for automation:
 
 ```bash
-"$REALBROWSER_CLI" open https://ninzap.dev --profile "chrome:Profile 4" --anonymous --session tom-anon --select --no-fallback
+"$REALBROWSER_CLI" open https://app.example.com --profile "chrome:Profile 4" --anonymous --session work-anon --select --no-fallback
 ```
 
-When the user says "check the current UI on ninzap.dev" and there may be several profiles or anonymous sessions, first run `sessions` and `find-tab ninzap.dev --all-sessions`. If exactly one tab matches, run `select-tab ninzap.dev --all-sessions`; this activates that session, so continue with plain commands like `observe`, `responsive`, `console`, or `screenshot`. If several match, show the candidates and ask; do not guess.
+When the user says "check the current UI on app.example.com" and there may be several profiles or anonymous sessions, first run `sessions` and `find-tab app.example.com --all-sessions`. If exactly one tab matches, run `select-tab app.example.com --all-sessions`; this activates that session, so continue with plain commands like `observe`, `responsive`, `console`, or `screenshot`. If several match, show the candidates and ask; do not guess.
 
 For a mobile viewport screenshot, prefer the atomic command. It opens or
 navigates the pinned tab, sets the requested viewport, waits for network idle,
@@ -257,9 +257,9 @@ when available. If the PNG dimensions are not the requested viewport, reapply
 For performance/network requests, start capture before navigation or reload:
 
 ```bash
-"$REALBROWSER_CLI" capture-network https://ninzap.dev --anonymous --duration 15000 --har ninzap-dev.har
-"$REALBROWSER_CLI" select-tab ninzap.dev
-"$REALBROWSER_CLI" capture-network --reload --duration 15000 --har ninzap-dev-auth.har
+"$REALBROWSER_CLI" capture-network https://app.example.com --anonymous --duration 15000 --har app.har
+"$REALBROWSER_CLI" select-tab app.example.com
+"$REALBROWSER_CLI" capture-network --reload --duration 15000 --har app-auth.har
 ```
 
 `capture-network` records browser performance entries plus DevTools network rows, summarizes slow requests, large transfers, failed/error lines, render-blocking resources, top hosts, and navigation timing. It does not capture response bodies or auth headers. URLs in summaries redact query strings unless `--values` or `--raw` is passed; HAR files preserve full URLs because they are local artifacts.
@@ -269,9 +269,9 @@ do not stop at the `capture-network` summary. Pin the proof to an exact current
 request row after the navigation/reload:
 
 ```bash
-"$REALBROWSER_CLI" select-tab ninzap.dev --no-fallback
+"$REALBROWSER_CLI" select-tab app.example.com --no-fallback
 "$REALBROWSER_CLI" network --clear --limit 200
-"$REALBROWSER_CLI" capture-network --reload --duration 8000 --har tmp/ninzap-cache.har
+"$REALBROWSER_CLI" capture-network --reload --duration 8000 --har tmp/app-cache.har
 "$REALBROWSER_CLI" network --filter "/api/cache-target" --limit 20
 "$REALBROWSER_CLI" network get <reqid> --request-file tmp/cache-target.request.txt --response-file tmp/cache-target.response.txt --raw
 ```
@@ -283,12 +283,12 @@ itself. Avoid `--preserve` for cache verdicts unless you are intentionally
 comparing previous navigations, because preserved DevTools rows can mix older
 requests with the current reload.
 
-For render bugs or requests like "check ninzap.dev console log to see what is the problem", capture console logs into an artifact the agent can analyze. Chrome DevTools Console can also show network failures when "Network messages" is enabled, so `capture-console` includes failed DevTools network rows by default; use `--no-network` only when the user needs JavaScript console messages alone.
+For render bugs or requests like "check app.example.com console log to see what is the problem", capture console logs into an artifact the agent can analyze. Chrome DevTools Console can also show network failures when "Network messages" is enabled, so `capture-console` includes failed DevTools network rows by default; use `--no-network` only when the user needs JavaScript console messages alone.
 
 ```bash
-"$REALBROWSER_CLI" capture-console https://ninzap.dev --anonymous --duration 5000 --out ninzap-dev-console.json
-"$REALBROWSER_CLI" select-tab ninzap.dev
-"$REALBROWSER_CLI" capture-console --reload --duration 5000 --out ninzap-dev-auth-console.json
+"$REALBROWSER_CLI" capture-console https://app.example.com --anonymous --duration 5000 --out app-console.json
+"$REALBROWSER_CLI" select-tab app.example.com
+"$REALBROWSER_CLI" capture-console --reload --duration 5000 --out app-auth-console.json
 "$REALBROWSER_CLI" console --errors
 "$REALBROWSER_CLI" console get <msgid> --raw
 ```
@@ -304,7 +304,7 @@ REALBROWSER_BROWSER_URL=http://127.0.0.1:9222 "$REALBROWSER_CLI" tabs
 REALBROWSER_BROWSER_URL=http://127.0.0.1:9222 "$REALBROWSER_CLI" download <uid> report.pdf
 REALBROWSER_CDP_URL=http://127.0.0.1:9222 "$REALBROWSER_CLI" wait-download report.pdf
 REALBROWSER_STATE_FILE=/tmp/realbrowser.json "$REALBROWSER_CLI" doctor
-REALBROWSER_SESSION=tom-anon "$REALBROWSER_CLI" observe
+REALBROWSER_SESSION=work-anon "$REALBROWSER_CLI" observe
 REALBROWSER_NO_ACTIVE_SESSION=1 "$REALBROWSER_CLI" status
 REALBROWSER_BROWSER_USER_DATA_DIR=/path/to/browser/profile-root "$REALBROWSER_CLI" status
 REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dismiss-banner
