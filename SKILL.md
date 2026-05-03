@@ -34,6 +34,24 @@ Use `--session <name>` whenever multiple browser contexts may exist. A named ses
 
 Realbrowser also has one active session pointer at `~/.realbrowser/active-session.json`. `select-tab` sets it after a unique match, explicit `--session <name>` commands set it after successful page commands, and `use-session <name>` sets it manually. Plain follow-up commands such as `observe`, `console`, `capture-network`, `viewport`, and `screenshot` use the active running session automatically. Use `sessions` to see the active `*`, `active-session` to inspect it, `clear-session` to forget it, and `--no-active-session` when you intentionally want the default state file instead.
 
+For concurrent Codex tabs or other multi-agent work, use tab handles instead of
+selected-tab state. A handle is a small JSON file containing `session + pageId`.
+Commands that accept page context can use `--handle <path-or-name>` or
+`REALBROWSER_HANDLE`, which pins follow-up commands to that tab even when another
+Codex tab selects a different page in the same browser profile:
+
+```bash
+"$REALBROWSER_CLI" claim https://ninzap.dev --session work-profile --handle-name ninzap --json
+export REALBROWSER_HANDLE=ninzap
+"$REALBROWSER_CLI" screenshot tmp/ninzap.png
+"$REALBROWSER_CLI" viewport 390x844
+"$REALBROWSER_CLI" handles
+"$REALBROWSER_CLI" release-handle ninzap
+```
+
+Prefer `claim` + `--handle`/`REALBROWSER_HANDLE` for daily automation. Use
+`select` only for manual handoff or single-agent interactive browsing.
+
 Viewport and screenshot operations are page-scoped in Chrome DevTools. When a
 task depends on an exact viewport, especially mobile screenshots, capture the
 page id printed by `open --select`, `select-tab`, or `tabs`, and pass
@@ -128,9 +146,18 @@ For a profile-bound Incognito window, combine `--profile`, `--anonymous`, `--ses
 
 When the user says "check the current UI on ninzap.dev" and there may be several profiles or anonymous sessions, first run `sessions` and `find-tab ninzap.dev --all-sessions`. If exactly one tab matches, run `select-tab ninzap.dev --all-sessions`; this activates that session, so continue with plain commands like `observe`, `responsive`, `console`, or `screenshot`. If several match, show the candidates and ask; do not guess.
 
-For a mobile viewport screenshot, use the page-scoped flow. This avoids a common
-failure where `viewport` appears to succeed but the screenshot still captures the
-desktop-sized browser page. Keep the verification portable: use
+For a mobile viewport screenshot, prefer the atomic command. It opens or
+navigates the pinned tab, sets the requested viewport, waits for network idle,
+captures a raw-size PNG, and verifies the PNG dimensions:
+
+```bash
+"$REALBROWSER_CLI" mobile-screenshot https://example.com tmp/site-mobile.png --session site-mobile --anonymous --viewport 390x844
+"$REALBROWSER_CLI" mobile-screenshot https://example.com tmp/site-mobile.png --handle-name site-mobile-handle --viewport 390x844
+```
+
+For manual mobile flows, use `claim` or an explicit `--page`. This avoids a
+common failure where `viewport` appears to succeed but the screenshot still
+captures the desktop-sized browser page. Keep the verification portable: use
 `tabs --json` plus `scripts/realbrowser-helper.mjs` to find the selected page id,
 and read PNG dimensions from the PNG header instead of OS-specific tools such as
 `awk`, `file`, or macOS `sips`.
@@ -217,6 +244,9 @@ REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dis
 - `active-session` / `current-session`: show the remembered active session and whether it is running.
 - `use-session <name> [--force]`: make a running named session the active session. `--force` only remembers the name before the daemon starts; normal use should not need it.
 - `clear-session`: forget the active session pointer without stopping any browser daemon.
+- `claim [url] [--handle-out <path>|--handle-name <name>]`: claim the selected page or open a URL and write a reusable tab handle containing `session + pageId`.
+- `handles` / `list-handles`: list saved tab handles.
+- `release-handle <path-or-name>`: delete a saved tab handle without closing the browser tab.
 - `find-tab [query] [--browser <key>] [--session <name>|--all-sessions]` / `tabs-all [query]`: search existing debuggable tabs across discovered browser/profile endpoints and, with `--all-sessions`, running realbrowser sessions. Without `--all-sessions`, it also searches the active running session.
 - `select-tab <query> [--browser <key>] [--session <name>|--all-sessions] [--front] [--no-activate-session]`: attach to the endpoint for a unique matching existing tab and select it for later commands. A unique match activates its session unless `--no-activate-session` is passed. If the match is ambiguous, it prints candidates instead of selecting.
 - `open-profile <profile-query> <url> [--select]`: open a URL in a selected browser UI profile. Equivalent to `open <url> --profile <profile-query>`.
@@ -250,6 +280,7 @@ REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dis
 - `wait <text> [more text...] [--timeout <ms>] [--page <id>]`: wait until one text value appears. Use `wait --load`, `wait --domcontentloaded`, or `wait --networkidle` for page readiness checks.
 - `scroll [selector|uid] [--page <id>]`: scroll a selector/ref into view, or scroll to bottom.
 - `viewport <WxH|reset> [--page <id>]`: emulate viewport size without resizing the real Chrome window, or clear emulation.
+- `mobile-screenshot [url] [path] [--viewport <WxH>] [--handle <path-or-name>]`: page-scoped mobile screenshot flow with viewport, network-idle wait, raw-size capture, and PNG dimension verification.
 - `emulate`: set or reset Chrome MCP emulation options such as network, CPU, user agent, color scheme, and geolocation.
 - `useragent <ua|reset>`: gstack-compatible shortcut for `emulate --user-agent`.
 - `cookie <name=value>`: set a cookie on the current page path.

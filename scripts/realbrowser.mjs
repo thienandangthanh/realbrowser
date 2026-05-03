@@ -13,6 +13,7 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DEFAULT_STATE_FILE = path.join(os.homedir(), ".realbrowser", "state.json");
 const DEFAULT_SESSION_DIR = path.join(os.homedir(), ".realbrowser", "sessions");
 const ACTIVE_SESSION_FILE = path.join(os.homedir(), ".realbrowser", "active-session.json");
+const DEFAULT_HANDLE_DIR = path.join(os.homedir(), ".realbrowser", "handles");
 const DEFAULT_PROFILE_DIR = path.join(os.homedir(), ".realbrowser", "profile");
 const DEFAULT_SCREENSHOT_DIR = path.join(os.homedir(), ".realbrowser", "screenshots");
 const DEFAULT_DOWNLOAD_DIR = path.join(os.homedir(), ".realbrowser", "downloads");
@@ -260,6 +261,9 @@ Usage:
   realbrowser active-session|current-session [--json]
   realbrowser use-session <name> [--force] [--json]
   realbrowser clear-session [--json]
+  realbrowser claim [url] [--handle-out <path>|--handle-name <name>] [--session <name>] [--json]
+  realbrowser handles|list-handles [--json]
+  realbrowser release-handle <path-or-name> [--json]
   realbrowser find-tab|tabs-all [query] [--browser <key>] [--all-sessions] [--json]
   realbrowser select-tab <query> [--browser <key>] [--all-sessions] [--front] [--no-activate-session] [--json]
   realbrowser open-profile <profile-query> <url> [--browser <key>] [--select] [--front] [--json]
@@ -292,6 +296,7 @@ Usage:
   realbrowser wait --load|--domcontentloaded|--networkidle [--timeout <ms>] [--page <id>]
   realbrowser scroll [selector|uid] [--page <id>]
   realbrowser viewport <WxH|reset> [--page <id>]
+  realbrowser mobile-screenshot [url] [path] [--viewport <WxH>] [--handle <path-or-name>] [--handle-out <path>] [--session <name>]
   realbrowser emulate [--network <name|Offline|reset>] [--cpu <rate>] [--user-agent <ua|reset>] [--color-scheme dark|light|auto] [--geolocation <lat>x<long>] [--page <id>]
   realbrowser useragent <ua|reset> [--page <id>]
   realbrowser cookie <name=value> [--page <id>]
@@ -328,6 +333,9 @@ Global flags:
   --raw
   --mode compact|normal|verbose|raw
   --session <name>
+  --handle <path-or-name>
+  --handle-out <path>
+  --handle-name <name>
   --no-active-session
   --no-activate-session
   --all-sessions
@@ -460,6 +468,20 @@ function parseArgv(argv) {
       flags.session = argv[++index];
     } else if (arg?.startsWith("--session=")) {
       flags.session = arg.slice("--session=".length);
+    } else if (arg === "--handle") {
+      flags.handle = argv[++index];
+    } else if (arg?.startsWith("--handle=")) {
+      flags.handle = arg.slice("--handle=".length);
+    } else if (arg === "--handle-out") {
+      flags.handleOut = argv[++index];
+    } else if (arg?.startsWith("--handle-out=")) {
+      flags.handleOut = arg.slice("--handle-out=".length);
+    } else if (arg === "--handle-name" || arg === "--name") {
+      flags.handleName = argv[++index];
+    } else if (arg?.startsWith("--handle-name=")) {
+      flags.handleName = arg.slice("--handle-name=".length);
+    } else if (arg?.startsWith("--name=")) {
+      flags.handleName = arg.slice("--name=".length);
     } else if (arg === "--no-active-session" || arg === "--ignore-active-session") {
       flags.noActiveSession = true;
     } else if (arg === "--no-activate-session") {
@@ -557,6 +579,10 @@ function parseArgv(argv) {
       flags.page = argv[++index];
     } else if (arg?.startsWith("--page=")) {
       flags.page = arg.slice("--page=".length);
+    } else if (arg === "--viewport") {
+      flags.viewport = argv[++index];
+    } else if (arg?.startsWith("--viewport=")) {
+      flags.viewport = arg.slice("--viewport=".length);
     } else if (arg === "--uid") {
       flags.uid = argv[++index];
     } else if (arg?.startsWith("--uid=")) {
@@ -748,6 +774,144 @@ function sessionNameFromStateFile(filePath) {
   }
 }
 
+function handlePathFromValue(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (
+    path.isAbsolute(raw) ||
+    raw.includes("/") ||
+    raw.includes("\\") ||
+    raw.startsWith(".") ||
+    raw.endsWith(".json")
+  ) {
+    return path.resolve(raw);
+  }
+  return path.join(DEFAULT_HANDLE_DIR, `${encodeURIComponent(raw)}.json`);
+}
+
+function handlePathFromFlags(flags = {}) {
+  return handlePathFromValue(flags.handle ?? process.env.REALBROWSER_HANDLE);
+}
+
+function handleOutputPathFromFlags(flags = {}) {
+  if (flags.handleOut) {
+    return handlePathFromValue(flags.handleOut);
+  }
+  if (flags.handleName) {
+    return handlePathFromValue(flags.handleName);
+  }
+  return path.join(DEFAULT_HANDLE_DIR, `rb-${crypto.randomBytes(6).toString("hex")}.json`);
+}
+
+async function readHandleFile(filePath) {
+  const resolved = handlePathFromValue(filePath);
+  const handle = await readJson(resolved);
+  if (!handle || handle.kind !== "realbrowser-tab-handle") {
+    throw new Error(`Invalid realbrowser handle: ${resolved}`);
+  }
+  if (handle.pageId === undefined || handle.pageId === null) {
+    throw new Error(`Realbrowser handle is missing pageId: ${resolved}`);
+  }
+  return {
+    path: resolved,
+    session: String(handle.session ?? "").trim(),
+    stateFile: handle.stateFile ? path.resolve(String(handle.stateFile)) : "",
+    pageId: parsePageId(handle.pageId),
+    url: String(handle.url ?? ""),
+    createdAt: handle.createdAt ?? null,
+    updatedAt: handle.updatedAt ?? null,
+    raw: handle,
+  };
+}
+
+function handleAwareCommands() {
+  return new Set([
+    "observe",
+    "navigate",
+    "goto",
+    "back",
+    "forward",
+    "reload",
+    "snapshot",
+    "accessibility",
+    "click",
+    "hover",
+    "drag",
+    "type",
+    "fill",
+    "fill-form",
+    "press",
+    "click-coords",
+    "highlight",
+    "upload",
+    "wait",
+    "scroll",
+    "viewport",
+    "emulate",
+    "useragent",
+    "cookie",
+    "dialog",
+    "dialog-accept",
+    "dialog-dismiss",
+    "eval",
+    "js",
+    "text",
+    "html",
+    "links",
+    "forms",
+    "cookies",
+    "storage",
+    "perf",
+    "url",
+    "css",
+    "attrs",
+    "is",
+    "console",
+    "capture-console",
+    "network",
+    "capture-network",
+    "errors",
+    "requests",
+    "screenshot",
+    "download",
+    "handoff",
+    "resume",
+    "trace",
+    "mobile-screenshot",
+  ]);
+}
+
+async function applyHandleToFlags(command, flags = {}) {
+  if (!handleAwareCommands().has(command)) {
+    return null;
+  }
+  const handlePath = handlePathFromFlags(flags);
+  if (!handlePath) {
+    return null;
+  }
+  const handle = await readHandleFile(handlePath);
+  const explicitHandle = Boolean(flags.handle);
+  if (explicitHandle && flags.session && handle.session && flags.session !== handle.session) {
+    throw new Error(`--handle session mismatch: handle uses "${handle.session}", command passed "${flags.session}"`);
+  }
+  if (explicitHandle && flags.page !== undefined && parsePageId(flags.page) !== handle.pageId) {
+    throw new Error(`--handle page mismatch: handle uses page ${handle.pageId}, command passed page ${flags.page}`);
+  }
+  if (!flags.session && handle.session) {
+    flags.session = handle.session;
+  }
+  if (!flags.stateFile && !handle.session && handle.stateFile) {
+    flags.stateFile = handle.stateFile;
+  }
+  if (flags.page === undefined) {
+    flags.page = String(handle.pageId);
+  }
+  flags.resolvedHandle = handle.path;
+  return handle;
+}
+
 async function readJson(file) {
   try {
     return JSON.parse(await fsp.readFile(file, "utf8"));
@@ -860,6 +1024,10 @@ function desiredMode(flags = {}) {
 }
 
 function profileDirForMode(mode, flags = {}) {
+  const configured = flags.profileDir ?? process.env.REALBROWSER_PROFILE_DIR;
+  if (configured) {
+    return path.resolve(configured);
+  }
   if (
     mode === ANONYMOUS_MODE &&
     !flags.keepAnonymous &&
@@ -867,11 +1035,13 @@ function profileDirForMode(mode, flags = {}) {
   ) {
     return "";
   }
-  return (
-    flags.profileDir ??
-    process.env.REALBROWSER_PROFILE_DIR ??
-    (mode === ANONYMOUS_MODE ? "" : DEFAULT_PROFILE_DIR)
-  );
+  if (mode !== ANONYMOUS_MODE) {
+    const sessionName = sessionNameFromFlags(flags);
+    if (sessionName && sessionName !== "default") {
+      return path.join(DEFAULT_PROFILE_DIR, "sessions", encodeURIComponent(sessionName));
+    }
+  }
+  return mode === ANONYMOUS_MODE ? "" : DEFAULT_PROFILE_DIR;
 }
 
 function modeKey(flags = {}) {
@@ -1196,6 +1366,21 @@ async function runCli() {
     return;
   }
 
+  if (command === "claim" || command === "claim-tab" || command === "handle-claim") {
+    printResult(await claimPageHandle(args, flags), flags);
+    return;
+  }
+
+  if (command === "handles" || command === "list-handles" || command === "handle-list") {
+    printResult(await listPageHandles(), flags);
+    return;
+  }
+
+  if (command === "release-handle" || command === "handle-release" || command === "delete-handle") {
+    printResult(await releasePageHandle(args), flags);
+    return;
+  }
+
   if (command === "find-tab" || command === "tabs-all" || command === "search-tabs") {
     const tabs = await findBrowserTabs({
       query: args.join(" "),
@@ -1347,13 +1532,13 @@ async function runCli() {
     return;
   }
 
-  if (flags.profile && !flags.browserUrl) {
-    const profile = await resolveBrowserProfileSelection(flags.profile, flags);
-    if (!profile.devtoolsHttpUrl) {
-      throw new Error(`Profile ${profile.id} is not exposing a DevTools endpoint. Open it with \`realbrowser open --profile "${profile.id}" <url>\`, enable Chrome remote debugging in that profile, then retry with \`--no-fallback\`.`);
-    }
-    flags.browserUrl = profile.devtoolsWsEndpoint ?? profile.devtoolsHttpUrl;
+  if (command === "mobile-screenshot") {
+    printResult(await mobileScreenshot(args, flags), flags);
+    return;
   }
+
+  await applyHandleToFlags(command, flags);
+  await resolveProfileForAutomation(flags);
 
   const state = await ensureDaemon(flags);
   const response = await daemonRpc(state, daemonPayloadForCommand(command, args, flags, state));
@@ -1384,6 +1569,271 @@ function daemonPayloadForCommand(command, args, flags = {}, state = null) {
     };
   }
   return { command, args, flags };
+}
+
+async function resolveProfileForAutomation(flags = {}) {
+  if (flags.profile && !flags.browserUrl) {
+    const profile = await resolveBrowserProfileSelection(flags.profile, flags);
+    if (!profile.devtoolsHttpUrl) {
+      throw new Error(`Profile ${profile.id} is not exposing a DevTools endpoint. Open it with \`realbrowser open --profile "${profile.id}" <url>\`, enable Chrome remote debugging in that profile, then retry with \`--no-fallback\`.`);
+    }
+    flags.browserUrl = profile.devtoolsWsEndpoint ?? profile.devtoolsHttpUrl;
+  }
+}
+
+function sessionNameForState(state, flags = {}) {
+  return (
+    String(state?.session ?? "").trim() ||
+    sessionNameFromFlags(flags) ||
+    sessionNameFromStateFile(stateFileFromFlags(flags))
+  );
+}
+
+function publicHandle(handle) {
+  return {
+    path: handle.path,
+    session: handle.session,
+    stateFile: handle.stateFile || undefined,
+    pageId: handle.pageId,
+    url: handle.url,
+    createdAt: handle.createdAt,
+    updatedAt: handle.updatedAt,
+  };
+}
+
+async function writePageHandle({ state, flags, page, handlePath }) {
+  const now = new Date().toISOString();
+  const session = sessionNameForState(state, flags);
+  const resolvedPath = handlePath ?? handleOutputPathFromFlags(flags);
+  const handle = {
+    kind: "realbrowser-tab-handle",
+    version: 1,
+    session,
+    stateFile: stateFileFromFlags({ ...flags, session }),
+    pageId: page.id,
+    url: page.url,
+    createdAt: now,
+    updatedAt: now,
+  };
+  await writeJson(resolvedPath, handle);
+  return {
+    path: resolvedPath,
+    session,
+    stateFile: handle.stateFile,
+    pageId: page.id,
+    url: page.url,
+    createdAt: now,
+    updatedAt: now,
+    raw: handle,
+  };
+}
+
+function pickClaimedPage(pages, targetUrl = "") {
+  if (!Array.isArray(pages) || pages.length === 0) {
+    return null;
+  }
+  if (targetUrl) {
+    const exact = [...pages].reverse().find((page) => sameDocumentUrl(page.url, targetUrl));
+    if (exact) {
+      return exact;
+    }
+  }
+  return pages.find((page) => page.selected) ?? pages[0] ?? null;
+}
+
+function formatClaimText(handle) {
+  return [
+    `Handle: ${handle.path}`,
+    `Session: ${handle.session || "(custom state file)"}`,
+    `Page: ${handle.pageId}`,
+    `URL: ${handle.url || "(blank)"}`,
+    "",
+    `Use: realbrowser --handle "${handle.path}" screenshot out.png`,
+  ].join("\n");
+}
+
+async function claimPageHandle(args, flags = {}) {
+  const targetUrl = args[0] ?? "";
+  await resolveProfileForAutomation(flags);
+  const state = await ensureDaemon(flags);
+  if (targetUrl) {
+    const openFlags = { ...flags, select: true };
+    await daemonRpc(state, daemonPayloadForCommand("open", [targetUrl], openFlags, state));
+  }
+  const pagesResult = await daemonRpc(state, { command: "tabs", args: [], flags: {} });
+  const page = pickClaimedPage(parseListPagesResult(pagesResult), targetUrl);
+  if (!page) {
+    throw new Error("Could not find a page to claim.");
+  }
+  const handle = await writePageHandle({
+    state,
+    flags,
+    page,
+    handlePath: handleOutputPathFromFlags(flags),
+  });
+  const explicitSessionName = sessionNameFromFlags(flags);
+  if (explicitSessionName) {
+    await writeActiveSessionName(explicitSessionName);
+  }
+  return {
+    text: formatClaimText(handle),
+    handle: publicHandle(handle),
+    path: handle.path,
+    filePath: handle.path,
+  };
+}
+
+async function listPageHandles() {
+  const entries = await fsp.readdir(DEFAULT_HANDLE_DIR).catch(() => []);
+  const handles = [];
+  for (const entry of entries) {
+    if (!entry.endsWith(".json")) {
+      continue;
+    }
+    const filePath = path.join(DEFAULT_HANDLE_DIR, entry);
+    try {
+      handles.push(publicHandle(await readHandleFile(filePath)));
+    } catch {
+      // Ignore stale or non-handle JSON.
+    }
+  }
+  handles.sort((a, b) => String(a.path).localeCompare(String(b.path)));
+  return {
+    text: handles.length === 0
+      ? "No realbrowser handles found."
+      : handles.map((handle) => `${handle.path}  session=${handle.session || "-"} page=${handle.pageId}  ${handle.url || ""}`).join("\n"),
+    handles,
+  };
+}
+
+async function releasePageHandle(args) {
+  requireArgs("release-handle", args, 1);
+  const handlePath = handlePathFromValue(args[0]);
+  await fsp.rm(handlePath, { force: true });
+  return {
+    text: `Released realbrowser handle: ${handlePath}`,
+    path: handlePath,
+  };
+}
+
+function parseViewportSize(sizeText) {
+  const size = String(sizeText ?? "390x844").trim();
+  const [width, height] = size.split(/[x,]/).map((value) => Number.parseInt(value, 10));
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error("viewport expects a size like 390x844");
+  }
+  return {
+    width,
+    height,
+    viewport: size.includes("x") && size.split("x").length >= 3 ? size : `${width}x${height}x1`,
+    requested: `${width}x${height}`,
+  };
+}
+
+function readPngDimensions(filePath) {
+  const buffer = fs.readFileSync(filePath);
+  const pngSignature = "89504e470d0a1a0a";
+  if (buffer.length < 24 || buffer.subarray(0, 8).toString("hex") !== pngSignature) {
+    throw new Error(`Not a PNG file: ${filePath}`);
+  }
+  return {
+    pixelWidth: buffer.readUInt32BE(16),
+    pixelHeight: buffer.readUInt32BE(20),
+  };
+}
+
+function defaultMobileScreenshotPath() {
+  return path.join(
+    DEFAULT_SCREENSHOT_DIR,
+    `mobile-screenshot-${new Date().toISOString().replaceAll(/[:.]/g, "-")}.png`,
+  );
+}
+
+async function findCurrentPage(state, flags = {}, targetUrl = "") {
+  const pagesResult = await daemonRpc(state, { command: "tabs", args: [], flags: {} });
+  const pages = parseListPagesResult(pagesResult);
+  if (flags.page !== undefined) {
+    const pageId = parsePageId(flags.page);
+    return pages.find((page) => page.id === pageId) ?? { id: pageId, url: targetUrl };
+  }
+  return pickClaimedPage(pages, targetUrl);
+}
+
+async function mobileScreenshot(args, flags = {}) {
+  const targetUrl = args[0] ?? "";
+  const outputPath = path.resolve(args[1] ?? defaultMobileScreenshotPath());
+  const viewport = parseViewportSize(flags.viewport ?? "390x844");
+  await applyHandleToFlags("mobile-screenshot", flags);
+  await resolveProfileForAutomation(flags);
+  const state = await ensureDaemon(flags);
+
+  let page = null;
+  if (targetUrl && flags.page !== undefined) {
+    await daemonRpc(state, {
+      command: "navigate",
+      args: [targetUrl],
+      flags: { page: flags.page },
+    });
+    page = await findCurrentPage(state, flags, targetUrl);
+  } else if (targetUrl) {
+    const openFlags = { ...flags, select: true };
+    await daemonRpc(state, daemonPayloadForCommand("open", [targetUrl], openFlags, state));
+    page = await findCurrentPage(state, flags, targetUrl);
+  } else {
+    page = await findCurrentPage(state, flags);
+  }
+  if (!page) {
+    throw new Error("Could not find a page for mobile-screenshot.");
+  }
+  const pageFlags = { page: page.id };
+  await daemonRpc(state, { command: "viewport", args: [viewport.requested], flags: pageFlags });
+  const timeout = flags.timeout ?? "20000";
+  await daemonRpc(state, { command: "wait", args: ["--networkidle"], flags: { ...pageFlags, timeout } });
+  const metricsResult = await daemonRpc(state, {
+    command: "js",
+    args: ["({innerWidth,innerHeight,devicePixelRatio})"],
+    flags: pageFlags,
+  });
+  const metrics = extractJsonFromToolText(metricsResult.text) ?? null;
+  await daemonRpc(state, {
+    command: "screenshot",
+    args: [outputPath],
+    flags: {
+      ...pageFlags,
+      rawSize: flags.rawSize !== false,
+      full: Boolean(flags.full),
+      format: flags.format,
+      quality: flags.quality,
+    },
+  });
+  const png = inferScreenshotFormat(outputPath, { ...flags, rawSize: true }) === "png"
+    ? readPngDimensions(outputPath)
+    : null;
+  if (!flags.full && png && (png.pixelWidth !== viewport.width || png.pixelHeight !== viewport.height)) {
+    throw new Error(`mobile-screenshot dimension mismatch: expected ${viewport.width}x${viewport.height}, got ${png.pixelWidth}x${png.pixelHeight}`);
+  }
+  let handle = null;
+  if (flags.handleOut || flags.handleName) {
+    handle = publicHandle(await writePageHandle({ state, flags, page }));
+  }
+  const text = [
+    `Saved mobile screenshot to ${path.resolve(outputPath)}.`,
+    `Page: ${page.id}`,
+    `Viewport: ${viewport.requested}`,
+    metrics ? `Browser: ${metrics.innerWidth}x${metrics.innerHeight} @ ${metrics.devicePixelRatio}` : "",
+    png ? `PNG: ${png.pixelWidth}x${png.pixelHeight}` : "",
+    handle ? `Handle: ${handle.path}` : "",
+  ].filter(Boolean).join("\n");
+  return {
+    text,
+    filePath: path.resolve(outputPath),
+    path: path.resolve(outputPath),
+    pageId: page.id,
+    viewport: { width: viewport.width, height: viewport.height },
+    metrics,
+    png,
+    handle,
+  };
 }
 
 async function cleanupRemoteDebuggingViaDaemon(state) {
@@ -6606,6 +7056,12 @@ async function runDaemon() {
   const port = await findFreePort();
   const token = crypto.randomBytes(32).toString("hex");
   const daemon = new BrowserDaemon(stateFile);
+  let rpcQueue = Promise.resolve();
+  const enqueueRpc = (task) => {
+    const run = rpcQueue.catch(() => {}).then(task);
+    rpcQueue = run.catch(() => {});
+    return run;
+  };
   const server = http.createServer(async (req, res) => {
     try {
       if (req.method === "GET" && req.url === "/health") {
@@ -6627,7 +7083,7 @@ async function runDaemon() {
         return;
       }
       const body = await readRequestJson(req);
-      const result = await daemon.handle(body.command, body.args ?? [], body.flags ?? {});
+      const result = await enqueueRpc(() => daemon.handle(body.command, body.args ?? [], body.flags ?? {}));
       sendJson(res, 200, result);
     } catch (error) {
       sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
@@ -6747,6 +7203,17 @@ function runSelfTest() {
   assertSelfTest(parsedAnonymousOpen.flags.select === true, "parser handles anonymous select flag");
   const parsedSessionOpen = parseArgv(["open", "https://example.com", "--anonymous", "--session", "tom-anon"]);
   assertSelfTest(parsedSessionOpen.flags.session === "tom-anon", "parser handles session flag");
+  const parsedHandle = parseArgv(["screenshot", "out.png", "--handle", "ninzap", "--handle-out", "tmp/next.json", "--viewport", "390x844"]);
+  assertSelfTest(parsedHandle.flags.handle === "ninzap", "parser handles handle flag");
+  assertSelfTest(parsedHandle.flags.handleOut === "tmp/next.json", "parser handles handle output flag");
+  assertSelfTest(parsedHandle.flags.viewport === "390x844", "parser handles viewport flag");
+  assertSelfTest(handlePathFromValue("ninzap").endsWith(path.join(".realbrowser", "handles", "ninzap.json")), "handle names map to handle directory");
+  assertSelfTest(parseViewportSize("390x844").width === 390, "viewport parser reads width");
+  assertSelfTest(parseViewportSize("390x844").height === 844, "viewport parser reads height");
+  assertSelfTest(
+    profileDirForMode(DEDICATED_MODE, { session: "codex-a" }) !== profileDirForMode(DEDICATED_MODE, { session: "codex-b" }),
+    "named dedicated sessions use isolated managed profiles",
+  );
   const parsedNoActive = parseArgv(["observe", "--no-active-session"]);
   assertSelfTest(parsedNoActive.flags.noActiveSession === true, "parser handles no-active-session flag");
   const parsedNoActivate = parseArgv(["select-tab", "ninzap.dev", "--no-activate-session"]);
