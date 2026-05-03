@@ -1180,6 +1180,64 @@ async function listKnownSessions(flags = {}) {
   ));
 }
 
+function isRealProfileSessionMode(mode) {
+  return mode === AUTO_MODE || mode === "browserUrl";
+}
+
+function shouldReuseExistingRealProfileSession(flags = {}) {
+  if (desiredMode(flags) !== AUTO_MODE) {
+    return false;
+  }
+  if (
+    flags.stateFile ||
+    flags.handle ||
+    flags.profile ||
+    flags.browserUrl ||
+    flags.cdpUrl ||
+    flags.profileDir ||
+    flags.noFallback ||
+    flags.keepAnonymous ||
+    process.env.REALBROWSER_STATE_FILE ||
+    process.env.REALBROWSER_HANDLE ||
+    process.env.REALBROWSER_MODE ||
+    process.env.REALBROWSER_ANONYMOUS ||
+    process.env.REALBROWSER_BROWSER_URL ||
+    process.env.REALBROWSER_PROFILE_DIR ||
+    process.env.REALBROWSER_NO_FALLBACK
+  ) {
+    return false;
+  }
+  return true;
+}
+
+async function reuseExistingRealProfileSession(flags = {}) {
+  if (!shouldReuseExistingRealProfileSession(flags)) {
+    return null;
+  }
+  const requestedSession = sessionNameFromFlags(flags);
+  if (requestedSession) {
+    const requestedState = await readJson(stateFileForSessionName(requestedSession));
+    if (requestedState?.pid && isProcessAlive(requestedState.pid)) {
+      const requestedHealth = await health(requestedState).catch(() => null);
+      if (requestedHealth?.ok) {
+        return null;
+      }
+    }
+  } else if (activeSessionNameFromFlags(flags)) {
+    return null;
+  }
+  const sessions = await listKnownSessions({ noActiveSession: true });
+  const reusable =
+    sessions.find((session) => session.name === "default" && isRealProfileSessionMode(session.mode)) ??
+    sessions.find((session) => isRealProfileSessionMode(session.mode));
+  if (!reusable || reusable.name === "default" || reusable.name === requestedSession) {
+    return reusable ?? null;
+  }
+  flags.session = reusable.name;
+  flags.reusedRealProfileSession = reusable.name;
+  return reusable;
+}
+
 async function ensureDaemon(flags = {}) {
   const stateFile = stateFileFromFlags(flags);
   const existing = await readJson(stateFile);
@@ -1538,6 +1596,7 @@ async function runCli() {
   }
 
   await applyHandleToFlags(command, flags);
+  await reuseExistingRealProfileSession(flags);
   await resolveProfileForAutomation(flags);
 
   const state = await ensureDaemon(flags);
@@ -1654,6 +1713,7 @@ function formatClaimText(handle) {
 
 async function claimPageHandle(args, flags = {}) {
   const targetUrl = args[0] ?? "";
+  await reuseExistingRealProfileSession(flags);
   await resolveProfileForAutomation(flags);
   const state = await ensureDaemon(flags);
   if (targetUrl) {
@@ -1764,6 +1824,7 @@ async function mobileScreenshot(args, flags = {}) {
   const outputPath = path.resolve(args[1] ?? defaultMobileScreenshotPath());
   const viewport = parseViewportSize(flags.viewport ?? "390x844");
   await applyHandleToFlags("mobile-screenshot", flags);
+  await reuseExistingRealProfileSession(flags);
   await resolveProfileForAutomation(flags);
   const state = await ensureDaemon(flags);
 
@@ -7214,6 +7275,10 @@ function runSelfTest() {
     profileDirForMode(DEDICATED_MODE, { session: "codex-a" }) !== profileDirForMode(DEDICATED_MODE, { session: "codex-b" }),
     "named dedicated sessions use isolated managed profiles",
   );
+  assertSelfTest(shouldReuseExistingRealProfileSession({}) === true, "plain real-profile commands can reuse an existing attach");
+  assertSelfTest(shouldReuseExistingRealProfileSession({ session: "codex-a" }) === true, "new auto sessions can reuse an existing real-profile attach");
+  assertSelfTest(shouldReuseExistingRealProfileSession({ dedicated: true }) === false, "dedicated sessions do not auto-route");
+  assertSelfTest(shouldReuseExistingRealProfileSession({ profile: "chrome:Default" }) === false, "profile-targeted commands do not auto-route");
   const parsedNoActive = parseArgv(["observe", "--no-active-session"]);
   assertSelfTest(parsedNoActive.flags.noActiveSession === true, "parser handles no-active-session flag");
   const parsedNoActivate = parseArgv(["select-tab", "ninzap.dev", "--no-activate-session"]);
