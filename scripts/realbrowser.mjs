@@ -93,7 +93,7 @@ Usage:
   realbrowser status [--json]
   realbrowser restart [--json]
   realbrowser tabs [--json]
-  realbrowser open|newtab <url> [--json]
+  realbrowser open|newtab <url> [--front] [--json]
   realbrowser navigate|goto <url>
   realbrowser back|forward|reload [--page <id>]
   realbrowser select <pageId> [--front]
@@ -645,8 +645,27 @@ async function runCli() {
   }
 
   const state = await ensureDaemon(flags);
-  const response = await daemonRpc(state, { command, args, flags });
+  const response = await daemonRpc(state, daemonPayloadForCommand(command, args, flags));
   printResult(response, flags);
+}
+
+function daemonPayloadForCommand(command, args, flags = {}) {
+  if (command === "open" || command === "newtab") {
+    requireArgs(command, args, 1);
+    return {
+      command: "tool",
+      args: [
+        "new_page",
+        JSON.stringify({
+          url: args[0],
+          background: !flags.front,
+          ...(flags.timeout ? { timeout: parsePositiveInteger(flags.timeout, "timeout") } : {}),
+        }),
+      ],
+      flags,
+    };
+  }
+  return { command, args, flags };
 }
 
 class McpClient {
@@ -1027,7 +1046,10 @@ class BrowserDaemon {
       case "open":
       case "newtab":
         requireArgs(command, args, 1);
-        return await this.callTool("new_page", { url: args[0] });
+        return await this.callTool("new_page", {
+          url: args[0],
+          background: !flags.front,
+        });
       case "navigate":
       case "goto":
         requireArgs(command, args, 1);
@@ -3497,6 +3519,17 @@ function runSelfTest() {
   assertSelfTest(parsedWindowsPath.command === "screenshot", "parser keeps command before Windows path");
   assertSelfTest(parsedWindowsPath.args[0] === windowsPath, "parser preserves Windows path with spaces");
   assertSelfTest(parsedWindowsPath.flags.format === "png", "parser handles flags after Windows path");
+
+  const parsedBackgroundOpen = parseArgv(["open", "https://example.com"]);
+  assertSelfTest(parsedBackgroundOpen.flags.front !== true, "open defaults to background mode");
+  const parsedForegroundOpen = parseArgv(["open", "https://example.com", "--front"]);
+  assertSelfTest(parsedForegroundOpen.flags.front === true, "open --front opts into focus");
+  const backgroundPayload = daemonPayloadForCommand(parsedBackgroundOpen.command, parsedBackgroundOpen.args, parsedBackgroundOpen.flags);
+  assertSelfTest(backgroundPayload.command === "tool", "open is client-translated for old daemons");
+  assertSelfTest(backgroundPayload.args[0] === "new_page", "open translation calls new_page");
+  assertSelfTest(JSON.parse(backgroundPayload.args[1]).background === true, "open translation uses background by default");
+  const foregroundPayload = daemonPayloadForCommand(parsedForegroundOpen.command, parsedForegroundOpen.args, parsedForegroundOpen.flags);
+  assertSelfTest(JSON.parse(foregroundPayload.args[1]).background === false, "open --front uses foreground");
 
   const parsedScreenshotLimits = parseArgv(["screenshot", "--max-side", "2000", "--max-bytes=5mb", "--raw-size"]);
   assertSelfTest(parsedScreenshotLimits.flags.maxSide === "2000", "parser handles screenshot max-side");

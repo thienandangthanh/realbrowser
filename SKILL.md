@@ -49,7 +49,7 @@ REALBROWSER_STATE_FILE=/tmp/realbrowser.json "$REALBROWSER_CLI" doctor
 - `status`: show daemon mode, tab count, and selected tab.
 - `restart`: restart the persistent daemon's MCP/browser connection without changing the daemon token or port.
 - `tabs`: list open pages.
-- `open <url>` / `newtab <url>`: open a URL in a new page.
+- `open <url>` / `newtab <url>`: open a URL in a new background page without bringing Chrome to the front. Pass `--front` only when the user explicitly wants Chrome focused.
 - `navigate <url>` / `goto <url>`: navigate the selected page to a URL.
 - `back`, `forward`, `reload`: navigate browser history or reload the page.
 - `select <pageId> [--front]` / `tab <pageId>`: select a page for later commands. It does not bring Chrome to the front unless `--front` is passed.
@@ -93,7 +93,7 @@ REALBROWSER_STATE_FILE=/tmp/realbrowser.json "$REALBROWSER_CLI" doctor
 - `tool <mcpToolName> [jsonArgs]`: call a raw MCP tool for features not wrapped yet.
 - `chain '[["observe"],["snapshot","--efficient"],["console","--errors"]]' [--return summary|final|all] [--trace <path>]`: run multiple commands in one daemon RPC for speed. Default output is a compact summary; full traces should go to disk.
 
-Passing `--page <id>` targets a tab directly without focusing Chrome, so background screenshots and snapshots do not cover the terminal.
+Passing `--page <id>` targets a tab directly without focusing Chrome, so background screenshots and snapshots do not cover the terminal. Opening pages should also stay background by default; use `--front` or `focus` only for explicit handoff.
 
 Global flags:
 

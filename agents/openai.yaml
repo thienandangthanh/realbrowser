@@ -1,7 +1,7 @@
 interface:
   display_name: "Realbrowser"
   short_description: "Fast local real Chrome automation CLI"
-  default_prompt: "Use $realbrowser to open the local app, observe the page, take an efficient snapshot only when refs are needed, use default normalized screenshots unless exact pixels require --raw-size, avoid restarting the daemon because Chrome may ask for remote-debugging approval again, switch to verbose/raw output only when requested, and verify the UI in the user's real browser."
+  default_prompt: "Use $realbrowser to open the local app in a background tab, observe the page, take an efficient snapshot only when refs are needed, use default normalized screenshots unless exact pixels require --raw-size, avoid restarting the daemon because Chrome may ask for remote-debugging approval again, switch to verbose/raw output only when requested, and verify the UI in the user's real browser."
 
 policy:
   allow_implicit_invocation: true

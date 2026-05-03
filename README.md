@@ -93,6 +93,7 @@ Realbrowser is designed to keep Codex token use low:
 - Use `observe` for the first page read.
 - Use `snapshot --efficient` when clickable `uid` refs are needed.
 - Use `snapshot --labels` or `screenshot --labels` for annotated screenshots.
+- `open` and `newtab` open background tabs by default; pass `--front` only for an explicit visual handoff.
 - Use `console --errors --limit 20` and `network --failed --limit 30`.
 - Use `errors` and `requests` if you want OpenClaw-style aliases.
 - Use `chain --return summary --trace ~/.realbrowser/trace.json` for multi-step flows.
