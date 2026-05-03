@@ -19,6 +19,11 @@ REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
 "$REALBROWSER_CLI" snapshot --efficient
 ```
 
+For simple one-off captures, do not spend a command on `doctor` unless setup is
+unknown or a browser command fails. Start with `open`/`select-tab`, then verify
+the result directly; `doctor` is for environment diagnosis, not a required
+preflight for every screenshot.
+
 On Windows PowerShell, prefer `scripts\realbrowser.ps1 ...`. On `cmd.exe`, use `scripts\realbrowser.cmd ...`. `node scripts\realbrowser.mjs ...` and the installed `realbrowser` npm bin are also portable. The POSIX `scripts/realbrowser` wrapper is for macOS/Linux shells.
 
 The CLI starts a persistent loopback daemon on demand. The daemon stores its port and bearer token in `~/.realbrowser/state.json` and talks to `chrome-devtools-mcp` over stdio.
@@ -28,6 +33,14 @@ The CLI starts a persistent loopback daemon on demand. The daemon stores its por
 Use `--session <name>` whenever multiple browser contexts may exist. A named session has its own state file under `~/.realbrowser/sessions/`, so `tom-anon`, `default-anon`, and the default session do not overwrite each other.
 
 Realbrowser also has one active session pointer at `~/.realbrowser/active-session.json`. `select-tab` sets it after a unique match, explicit `--session <name>` commands set it after successful page commands, and `use-session <name>` sets it manually. Plain follow-up commands such as `observe`, `console`, `capture-network`, `viewport`, and `screenshot` use the active running session automatically. Use `sessions` to see the active `*`, `active-session` to inspect it, `clear-session` to forget it, and `--no-active-session` when you intentionally want the default state file instead.
+
+Viewport and screenshot operations are page-scoped in Chrome DevTools. When a
+task depends on an exact viewport, especially mobile screenshots, capture the
+page id printed by `open --select`, `select-tab`, or `tabs`, and pass
+`--page <id>` to `viewport`, readiness waits, viewport sanity checks, and
+`screenshot`. Do not trust the text `Emulating viewport: ...` by itself; verify
+`window.innerWidth`/`window.innerHeight` and the output PNG dimensions before
+finishing.
 
 ## Browser Choice
 
@@ -114,6 +127,49 @@ For a profile-bound Incognito window, combine `--profile`, `--anonymous`, `--ses
 ```
 
 When the user says "check the current UI on ninzap.dev" and there may be several profiles or anonymous sessions, first run `sessions` and `find-tab ninzap.dev --all-sessions`. If exactly one tab matches, run `select-tab ninzap.dev --all-sessions`; this activates that session, so continue with plain commands like `observe`, `responsive`, `console`, or `screenshot`. If several match, show the candidates and ask; do not guess.
+
+For a mobile viewport screenshot, use the page-scoped flow. This avoids a common
+failure where `viewport` appears to succeed but the screenshot still captures the
+desktop-sized browser page. Keep the verification portable: use
+`tabs --json` plus `scripts/realbrowser-helper.mjs` to find the selected page id,
+and read PNG dimensions from the PNG header instead of OS-specific tools such as
+`awk`, `file`, or macOS `sips`.
+
+```bash
+REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
+REALBROWSER_HELPER="$HOME/.codex/skills/realbrowser/scripts/realbrowser-helper.mjs"
+SESSION="site-mobile"
+OUT="tmp/site-mobile.png"
+
+"$REALBROWSER_CLI" open https://example.com --anonymous --session "$SESSION" --select --timeout 20000
+PAGE=$("$REALBROWSER_CLI" --session "$SESSION" tabs --json | node "$REALBROWSER_HELPER" selected-page-id)
+"$REALBROWSER_CLI" --session "$SESSION" viewport 390x844 --page "$PAGE"
+"$REALBROWSER_CLI" --session "$SESSION" wait --networkidle --timeout 20000 --page "$PAGE"
+"$REALBROWSER_CLI" --session "$SESSION" js "({innerWidth,innerHeight,devicePixelRatio})" --page "$PAGE"
+"$REALBROWSER_CLI" --session "$SESSION" screenshot "$OUT" --raw-size --page "$PAGE"
+node "$REALBROWSER_HELPER" png-size "$OUT"
+```
+
+PowerShell equivalent:
+
+```powershell
+$RealbrowserCli = Join-Path $HOME ".codex/skills/realbrowser/scripts/realbrowser.ps1"
+$RealbrowserHelper = Join-Path $HOME ".codex/skills/realbrowser/scripts/realbrowser-helper.mjs"
+$Session = "site-mobile"
+$Out = "tmp/site-mobile.png"
+
+& $RealbrowserCli open https://example.com --anonymous --session $Session --select --timeout 20000
+$Page = & $RealbrowserCli --session $Session tabs --json | node $RealbrowserHelper selected-page-id
+& $RealbrowserCli --session $Session viewport 390x844 --page $Page
+& $RealbrowserCli --session $Session wait --networkidle --timeout 20000 --page $Page
+& $RealbrowserCli --session $Session js "({innerWidth,innerHeight,devicePixelRatio})" --page $Page
+& $RealbrowserCli --session $Session screenshot $Out --raw-size --page $Page
+node $RealbrowserHelper png-size $Out
+```
+
+Show or inspect the saved PNG before final response. In Codex, use `view_image`
+when available. If the PNG dimensions are not the requested viewport, reapply
+`viewport ... --page <id>` and recapture with `screenshot ... --page <id>`.
 
 For performance/network requests, start capture before navigation or reload:
 
