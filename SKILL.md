@@ -60,8 +60,12 @@ desktop/tablet/mobile screenshots":
 - Public page or clean login test: use `--anonymous --session <task> --select`.
 - Existing user cookies, a named Chrome profile, or `--no-fallback`: read
   `references/profiles.md`.
-- Focus-gated or lazy social/feed pages that do not hydrate in a background tab:
+- Focus-gated or lazy pages that do not hydrate in a background tab:
   use explicit `--foreground-until-ready` plus `wait-ready` criteria.
+- Large dynamic pages, social feeds, or pages with thousands of nodes:
+  read `references/debugging.md` before dumping HTML. Start with compact
+  snapshots, write deep reads to files, and inspect those files with
+  OS-available local tools.
 - Exact viewport, mobile screenshot, raw PNG dimensions, or responsive capture:
   read `references/screenshots.md`.
 - Full-size screenshots of fixed-body apps with internal scroll panes, or
@@ -144,15 +148,15 @@ before opening or attaching.
 For a page that stalls until the tab is active, foregrounding is explicit:
 
 ```bash
-"$REALBROWSER_CLI" claim https://app.example/feed \
+"$REALBROWSER_CLI" claim https://app.example/items \
   --profile "chrome:Default" \
-  --handle-name app-feed \
+  --handle-name app-items \
   --no-fallback \
   --foreground-until-ready \
-  --selector '[role="feed"]' \
+  --selector main \
   --min-cards 3 \
   --timeout 20000
-"$REALBROWSER_CLI" --handle app-feed wait-ready --selector '[role="feed"]' --min-cards 3 --visual-stable
+"$REALBROWSER_CLI" --handle app-items wait-ready --selector main --min-cards 3 --visual-stable
 ```
 
 ### 5. Render Or Network Debug
@@ -168,14 +172,23 @@ body conclusions.
 ## Speed And Token Rules
 
 - Cap routine reads: `observe --max-chars 2000`, `console --errors --limit 20`,
-  `network --failed --limit 30`, `posts --limit <n> --max-chars 2000`.
-- On CDP-backed real-profile sessions, `posts` and `blocks` read the same
-  OpenClaw-style role snapshot substrate first. Treat the output as a generic
-  page element tree, not a site-specific feed parser.
+  `network --failed --limit 30`, `snapshot --compact --max-chars 2000`.
+- On CDP-backed real-profile sessions, `snapshot --compact` reads the
+  OpenClaw-style role snapshot substrate first.
+- Use `snapshot-aria` when you need OpenClaw-style AX node records.
+- On CDP-backed real-profile sessions, `text`, `html`, and `query-selector`
+  use OpenClaw-style `getDomText` / `querySelector` primitives.
+- Use `snapshot-dom --out <path>` when you need OpenClaw-style DOM element
+  records for local inspection instead of raw HTML.
 - Use `screenshot` for visual evidence and `html --out <path>` for
   selector/debug work, not as the default page parser.
 - Do not use `--full-stdout` for large or unknown output. Prefer artifacts and
   targeted local inspection.
+- For Facebook/X/Zalo-style feeds, do not treat full-page HTML as the parser and
+  do not rely on removed semantic shortcuts such as `posts`, `blocks`, or
+  `content-blocks`. Use `snapshot --compact`, `snapshot-aria`,
+  `snapshot-dom --out`, and `query-selector --out`; use screenshots only to
+  verify visual boundaries or media-heavy content.
 - Use `--raw-size` only when exact browser pixels matter. Default screenshots
   are normalized for agent use.
 

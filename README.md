@@ -15,7 +15,7 @@ The default Codex browser automation path is useful, but it is not enough for we
   DevTools HTTP where possible and one persistent CDP socket per daemon when a
   WebSocket is needed.
 - A dedicated profile fallback at `~/.realbrowser/profile`.
-- Short tab targets for daemon sessions, tab listing/selection, navigation, compact observations, visible content cards/text blocks, efficient snapshots, clicks, typing, forms, JavaScript evaluation, capped console and network inspection, OpenClaw-style normalized screenshots, annotated labels, pre-armed dialog handling, user-agent emulation, and download interception.
+- Short tab targets for daemon sessions, tab listing/selection, navigation, compact observations, OpenClaw-style role/DOM snapshots, efficient snapshots, clicks, typing, forms, JavaScript evaluation, capped console and network inspection, OpenClaw-style normalized screenshots, annotated labels, pre-armed dialog handling, user-agent emulation, and download interception.
 
 ## Why Not Just Playwright?
 
@@ -162,8 +162,19 @@ Stopping or detaching realbrowser closes its daemon/MCP connection. If Chrome st
 Realbrowser is designed to keep Codex token use low:
 
 - Use `observe` for the first page read.
-- Use `posts --limit <n>` for feed-like content, and `blocks --limit <n>`
-  for search results and dashboards where full-page text is too noisy.
+- Use `snapshot --compact --max-chars <n>` for compact OpenClaw-style role
+  snapshot reads.
+- Use `snapshot-aria --out <path>` for OpenClaw-style AX node records.
+- Use `snapshot-dom --out <path>` when element records are needed for local
+  inspection without dumping full HTML into the model context.
+- Use `query-selector <selector> --out <path>` for OpenClaw-style selector
+  match records.
+- For large dynamic pages such as Facebook-style feeds, chats, dashboards, or
+  virtualized lists, start with compact snapshots, then write
+  `snapshot-dom`/`snapshot-aria`/`query-selector` results to files and inspect
+  those files with OS-available tools. `rg`/`jq` are optional; PowerShell
+  `Select-String`/`ConvertFrom-Json` or Node work on Windows. Do not use
+  full-page HTML stdout as the default parser.
 - Managed anonymous/dedicated sessions run headless by default. Use `--headed`
   or `--front` only for an explicit visual handoff.
 - Managed anonymous/dedicated sessions idle-shutdown after

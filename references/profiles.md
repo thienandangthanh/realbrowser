@@ -55,12 +55,12 @@ Default profile opens are background-friendly. If a site does not finish
 hydrating until its tab is active, opt in explicitly:
 
 ```bash
-"$REALBROWSER_CLI" claim https://example.com/feed \
+"$REALBROWSER_CLI" claim https://example.com/items \
   --profile "chrome:Profile 4" \
-  --handle-name feed \
+  --handle-name items \
   --no-fallback \
   --foreground-until-ready \
-  --selector '[role="feed"]' \
+  --selector main \
   --min-cards 3 \
   --timeout 20000
 ```
@@ -73,7 +73,7 @@ the user's terminal.
 Use generic readiness criteria:
 
 - `--selector <css>`: a visible container must exist.
-- `--min-cards <n>`: repeated visible content cards must be present.
+- `--min-cards <n>`: repeated visible page items must be present.
 - `--card-selector <css>`: override generic card detection.
 - `--ready-text <text>`: required text must appear.
 - `--visual-stable`: text/card/image/loading-marker counts must settle.

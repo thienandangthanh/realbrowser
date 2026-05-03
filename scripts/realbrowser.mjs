@@ -31,7 +31,6 @@ const SCRIPT_HASH = crypto.createHash("sha256").update(fs.readFileSync(SCRIPT_PA
 const DAEMON_CAPABILITIES = Object.freeze([
   "bounded-raw-output",
   "chain-step-durations",
-  "content-posts",
   "device-screenshots",
   "endpoint-session-manager",
   "area-screenshot",
@@ -42,8 +41,10 @@ const DAEMON_CAPABILITIES = Object.freeze([
   "managed-idle-timeout",
   "page-local-wait",
   "persistent-cdp-ws-target-list",
+  "query-selector",
+  "snapshot-aria",
+  "snapshot-dom",
   "visible-wait",
-  "visible-blocks",
 ]);
 const AUTO_MODE = "auto";
 const DEDICATED_MODE = "dedicated";
@@ -345,8 +346,9 @@ const CLI_COMMAND_GROUPS = [
     commands: [
       { name: "eval", aliases: ["js"], usage: "realbrowser eval <js> [--page <id>] [--max-chars <n>] [--out <path>] [--raw] [--json]", summary: "Run JavaScript in the page.", handle: true, minArgs: 1 },
       { name: "text", usage: "realbrowser text [selector|uid] [--page <id>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read text.", handle: true },
-      { name: "blocks", aliases: ["visible-blocks"], usage: "realbrowser blocks [selector] [--page <id>] [--limit <n>] [--max-chars <n>] [--fallback-text] [--out <path>] [--raw]", summary: "Read compact visible text blocks.", handle: true },
-      { name: "posts", aliases: ["feed", "content-blocks"], usage: "realbrowser posts [selector] [--page <id>] [--limit <n>] [--max-chars <n>] [--out <path>] [--json]", summary: "Read OpenClaw-style role snapshot content.", handle: true },
+      { name: "snapshot-aria", usage: "realbrowser snapshot-aria [--limit <n>] [--out <path>] [--json]", summary: "Read OpenClaw-style AX node snapshot over CDP.", handle: true },
+      { name: "snapshot-dom", usage: "realbrowser snapshot-dom [--limit <n>|--max-nodes <n>] [--max-text-chars <n>] [--out <path>] [--json]", summary: "Read OpenClaw-style DOM element snapshot over CDP.", handle: true },
+      { name: "query-selector", usage: "realbrowser query-selector <selector> [--limit <n>] [--max-text-chars <n>] [--max-html-chars <n>] [--out <path>] [--json]", summary: "Read OpenClaw-style selector matches over CDP.", handle: true, minArgs: 1 },
       { name: "html", usage: "realbrowser html [selector|uid] [--page <id>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read HTML.", handle: true },
       { name: "links", usage: "realbrowser links [selector|uid] [--page <id>] [--limit <n>] [--filter <text>] [--text-filter <text>] [--href-filter <text>] [--visible] [--json]", summary: "Read links.", handle: true },
       { name: "forms", usage: "realbrowser forms [selector|uid] [--page <id>] [--json]", summary: "Read forms.", handle: true },
@@ -571,9 +573,12 @@ const FLAG_VALUE_NAMES = new Set([
   "--min-cards",
   "--max-bytes",
   "--max-chars",
+  "--max-html-chars",
   "--max-labels",
   "--max-nodes",
   "--max-side",
+  "--max-text",
+  "--max-text-chars",
   "--mode",
   "--name",
   "--out",
@@ -588,6 +593,7 @@ const FLAG_VALUE_NAMES = new Set([
   "--selector",
   "--settle-ms",
   "--session",
+  "--text-chars",
   "--stable-ms",
   "--state-file",
   "--submit",
@@ -634,7 +640,6 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--efficient",
   "--errors",
   "--failed",
-  "--fallback-text",
   "--force",
   "--foreground-until-ready",
   "--front",
@@ -659,7 +664,6 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--no-auto-out",
   "--no-dismiss-banner",
   "--no-fallback",
-  "--no-fallback-text",
   "--no-headless",
   "--no-fast",
   "--no-network",
@@ -869,10 +873,22 @@ function parseArgv(argv) {
       flags.maxChars = argv[++index];
     } else if (arg?.startsWith("--max-chars=")) {
       flags.maxChars = arg.slice("--max-chars=".length);
+    } else if (arg === "--max-html-chars") {
+      flags.maxHtmlChars = argv[++index];
+    } else if (arg?.startsWith("--max-html-chars=")) {
+      flags.maxHtmlChars = arg.slice("--max-html-chars=".length);
     } else if (arg === "--max-nodes") {
       flags.maxNodes = argv[++index];
     } else if (arg?.startsWith("--max-nodes=")) {
       flags.maxNodes = arg.slice("--max-nodes=".length);
+    } else if (arg === "--max-text-chars" || arg === "--max-text" || arg === "--text-chars") {
+      flags.maxTextChars = argv[++index];
+    } else if (arg?.startsWith("--max-text-chars=")) {
+      flags.maxTextChars = arg.slice("--max-text-chars=".length);
+    } else if (arg?.startsWith("--max-text=")) {
+      flags.maxTextChars = arg.slice("--max-text=".length);
+    } else if (arg?.startsWith("--text-chars=")) {
+      flags.maxTextChars = arg.slice("--text-chars=".length);
     } else if (arg === "--limit") {
       flags.limit = argv[++index];
     } else if (arg?.startsWith("--limit=")) {
@@ -915,10 +931,6 @@ function parseArgv(argv) {
       flags.selector = arg.slice("--selector=".length);
     } else if (arg === "--visible") {
       flags.visible = true;
-    } else if (arg === "--fallback-text") {
-      flags.fallbackText = true;
-    } else if (arg === "--no-fallback-text") {
-      flags.fallbackText = false;
     } else if (arg === "--clear") {
       flags.clear = true;
     } else if (arg === "--failed") {
@@ -2444,13 +2456,12 @@ function requiredCapabilitiesForCommand(command, args = []) {
     case "attrs":
     case "is":
       return args.includes("--raw") ? new Set(["bounded-raw-output"]) : new Set();
-    case "blocks":
-    case "visible-blocks":
-      return new Set(["visible-blocks"]);
-    case "posts":
-    case "feed":
-    case "content-blocks":
-      return new Set(["content-posts"]);
+    case "snapshot-dom":
+      return new Set(["snapshot-dom"]);
+    case "snapshot-aria":
+      return new Set(["snapshot-aria"]);
+    case "query-selector":
+      return new Set(["query-selector"]);
     case "links":
       return new Set(["filtered-links"]);
     case "device-screenshots":
@@ -4835,6 +4846,61 @@ function axValue(value) {
   return "";
 }
 
+function formatAriaSnapshotNodes(nodes, limit) {
+  const byId = new Map();
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    if (node?.nodeId) {
+      byId.set(node.nodeId, node);
+    }
+  }
+  const referenced = new Set();
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    for (const child of node?.childIds ?? []) {
+      referenced.add(child);
+    }
+  }
+  const root = (Array.isArray(nodes) ? nodes : []).find((node) => node?.nodeId && !referenced.has(node.nodeId)) ?? nodes?.[0];
+  if (!root?.nodeId) {
+    return [];
+  }
+  const out = [];
+  const stack = [{ id: root.nodeId, depth: 0 }];
+  while (stack.length && out.length < limit) {
+    const current = stack.pop();
+    if (!current) {
+      break;
+    }
+    const node = byId.get(current.id);
+    if (!node) {
+      continue;
+    }
+    const role = axValue(node.role);
+    const name = axValue(node.name);
+    const value = axValue(node.value);
+    const description = axValue(node.description);
+    out.push({
+      ref: `ax${out.length + 1}`,
+      role: role || "unknown",
+      name: name || "",
+      ...(value ? { value } : {}),
+      ...(description ? { description } : {}),
+      ...(typeof node.backendDOMNodeId === "number" ? { backendDOMNodeId: node.backendDOMNodeId } : {}),
+      depth: current.depth,
+    });
+    const children = (node.childIds ?? []).filter((child) => byId.has(child));
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push({ id: children[index], depth: current.depth + 1 });
+    }
+  }
+  return out;
+}
+
+async function snapshotAriaFromSession(send, options = {}) {
+  const limit = Math.max(1, Math.min(5000, Math.floor(options.limit ?? 800)));
+  const res = await send("Accessibility.getFullAXTree");
+  return { nodes: formatAriaSnapshotNodes(Array.isArray(res?.nodes) ? res.nodes : [], limit) };
+}
+
 function buildCdpRoleTree(nodes) {
   const byId = new Map();
   const tree = [];
@@ -4932,71 +4998,6 @@ function renderCdpRoleTree(tree, index, output, options = {}, indentOffset = 0) 
   for (const child of node.children) {
     renderCdpRoleTree(tree, child, output, options, indentOffset);
   }
-}
-
-function buildCdpReadableEntriesFromRoleTree(snapshot, options = {}) {
-  const tree = Array.isArray(snapshot?.tree) ? snapshot.tree : [];
-  const roots = Array.isArray(snapshot?.roots) ? snapshot.roots : [];
-  const limit = Math.max(1, Number.parseInt(String(options.limit ?? "20"), 10) || 20);
-  const kind = String(options.kind ?? "blocks").toLowerCase();
-  const isPostKind = kind === "posts" || kind === "feed" || kind === "content-blocks";
-  const entries = [];
-  const cleanText = (value) => String(value ?? "").replace(/\s+/gu, " ").trim();
-  const nodeText = (node) => cleanText([
-    node?.name,
-    node?.value,
-    node?.description,
-  ].filter(Boolean).join(" "));
-
-  const collectText = (index, rootIndex) => {
-    const node = tree[index];
-    if (!node) {
-      return "";
-    }
-    if (index !== rootIndex && normalizeRole(node) === "article") {
-      return "";
-    }
-    return cleanText([
-      nodeText(node),
-      ...(node.children ?? []).map((child) => collectText(child, rootIndex)),
-    ].filter(Boolean).join(" "));
-  };
-
-  const visit = (index, insideArticle = false) => {
-    if (entries.length >= limit) {
-      return;
-    }
-    const node = tree[index];
-    if (!node) {
-      return;
-    }
-    const role = normalizeRole(node);
-    const isArticle = role === "article";
-    const isCandidate = isPostKind
-      ? isArticle && !insideArticle
-      : CONTENT_ROLES.has(role) && Boolean(nodeText(node));
-    if (isCandidate) {
-      const text = collectText(index, index);
-      if (text) {
-        entries.push({
-          role,
-          ...(node.ref ? { ref: node.ref } : {}),
-          text,
-        });
-      }
-      if (isPostKind) {
-        return;
-      }
-    }
-    for (const child of node.children ?? []) {
-      visit(child, insideArticle || isArticle);
-    }
-  };
-
-  for (const root of roots) {
-    visit(root, false);
-  }
-  return entries;
 }
 
 async function findCdpCursorInteractiveElements(send) {
@@ -5232,8 +5233,6 @@ async function buildCdpRoleSnapshotFromSession(params) {
   return {
     lines,
     refs,
-    tree,
-    roots,
     stats: {
       refs: refValues.length,
       interactive: refValues.filter((ref) => INTERACTIVE_ROLES.has(ref.role)).length,
@@ -5252,7 +5251,7 @@ async function prepareCdpPageSession(send) {
   await send("Runtime.runIfWaitingForDebugger").catch(() => null);
 }
 
-async function cdpDomSnapshotFromSession(send, options = {}) {
+async function snapshotDomFromSession(send, options = {}) {
   const limit = Math.max(1, Math.min(5000, Math.floor(options.limit ?? 800)));
   const maxTextChars = Math.max(0, Math.min(5000, Math.floor(options.maxTextChars ?? 220)));
   const expression = `(() => {
@@ -5307,6 +5306,85 @@ async function cdpDomSnapshotFromSession(send, options = {}) {
   });
   const nodes = evaluated?.result?.value?.nodes;
   return { nodes: Array.isArray(nodes) ? nodes : [] };
+}
+
+async function getDomTextFromSession(send, options = {}) {
+  const maxChars = Math.max(0, Math.min(5_000_000, Math.floor(options.maxChars ?? 200_000)));
+  const selectorExpr = options.selector ? JSON.stringify(options.selector) : "null";
+  const format = options.format === "html" ? "html" : "text";
+  const expression = `(() => {
+    const fmt = ${JSON.stringify(format)};
+    const max = ${JSON.stringify(maxChars)};
+    const sel = ${selectorExpr};
+    const pick = sel ? document.querySelector(sel) : null;
+    let out = "";
+    if (fmt === "text") {
+      const el = pick || document.body || document.documentElement;
+      try { out = String(el && el.innerText ? el.innerText : ""); } catch { out = ""; }
+    } else {
+      const el = pick || document.documentElement;
+      try { out = String(el && el.outerHTML ? el.outerHTML : ""); } catch { out = ""; }
+    }
+    if (max && out.length > max) out = out.slice(0, max) + "\\n<!-- ...truncated... -->";
+    return out;
+  })()`;
+  const evaluated = await send("Runtime.evaluate", {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  const textValue = evaluated?.result?.value ?? "";
+  const text =
+    typeof textValue === "string"
+      ? textValue
+      : typeof textValue === "number" || typeof textValue === "boolean"
+        ? String(textValue)
+        : "";
+  return { text };
+}
+
+async function querySelectorFromSession(send, options = {}) {
+  const limit = Math.max(1, Math.min(200, Math.floor(options.limit ?? 20)));
+  const maxText = Math.max(0, Math.min(5000, Math.floor(options.maxTextChars ?? 500)));
+  const maxHtml = Math.max(0, Math.min(20000, Math.floor(options.maxHtmlChars ?? 1500)));
+  const expression = `(() => {
+    const sel = ${JSON.stringify(options.selector ?? "")};
+    const lim = ${JSON.stringify(limit)};
+    const maxText = ${JSON.stringify(maxText)};
+    const maxHtml = ${JSON.stringify(maxHtml)};
+    const lower = (value) => String(value || "").toLocaleLowerCase();
+    const els = Array.from(document.querySelectorAll(sel)).slice(0, lim);
+    return els.map((el, i) => {
+      const tag = lower(el.tagName);
+      const id = el.id ? String(el.id) : undefined;
+      const className = el.className ? String(el.className).slice(0, 300) : undefined;
+      let text = "";
+      try { text = String(el.innerText || "").trim(); } catch {}
+      if (maxText && text.length > maxText) text = text.slice(0, maxText) + "...";
+      const value = (el.value !== undefined && el.value !== null) ? String(el.value).slice(0, 500) : undefined;
+      const href = (el.href !== undefined && el.href !== null) ? String(el.href) : undefined;
+      let outerHTML = "";
+      try { outerHTML = String(el.outerHTML || ""); } catch {}
+      if (maxHtml && outerHTML.length > maxHtml) outerHTML = outerHTML.slice(0, maxHtml) + "...";
+      return {
+        index: i + 1,
+        tag,
+        ...(id ? { id } : {}),
+        ...(className ? { className } : {}),
+        ...(text ? { text } : {}),
+        ...(value ? { value } : {}),
+        ...(href ? { href } : {}),
+        ...(outerHTML ? { outerHTML } : {}),
+      };
+    });
+  })()`;
+  const evaluated = await send("Runtime.evaluate", {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  const matches = evaluated?.result?.value;
+  return { matches: Array.isArray(matches) ? matches : [] };
 }
 
 function browserTabMatchesQuery(tab, query) {
@@ -6321,7 +6399,7 @@ class BrowserDaemon {
     if (isRealProfileSessionMode(this.currentMode()) && !allowsProfileControllerStart(this.activeCommandFlags ?? {})) {
       throw usageError([
         "Refusing to start a Chrome DevTools MCP controller for a real Chrome profile because Chrome may show an \"Allow remote debugging?\" approval dialog.",
-        "Use CDP-backed commands such as tabs, goto, wait, js, text, blocks, posts, links, or plain screenshot when possible.",
+        "Use CDP-backed commands such as tabs, goto, wait, js, text, links, snapshot, snapshot-aria, snapshot-dom, query-selector, or plain screenshot when possible.",
         "For MCP-only commands, rerun with `--allow-profile-reattach` only when you explicitly accept that prompt.",
       ].join("\n"));
     }
@@ -6646,18 +6724,61 @@ class BrowserDaemon {
     };
   }
 
-  async cdpDomSnapshot(flags = {}) {
+  async snapshotAria(flags = {}) {
+    const targetId = await this.resolveCdpTargetId(flags);
+    const requestedLimit = flags.limit;
+    return await this.withCdpPageSession(targetId, async (client, sessionId) => {
+      const send = async (method, params = {}) => await client.request(method, params, { sessionId });
+      await prepareCdpPageSession(send);
+      const snap = await snapshotAriaFromSession(send, {
+        limit: requestedLimit ? parsePositiveInteger(requestedLimit, "limit") : undefined,
+      });
+      return { ...snap, targetId, cdp: true };
+    });
+  }
+
+  async snapshotDom(flags = {}) {
     const targetId = await this.resolveCdpTargetId(flags);
     const requestedLimit = flags.domLimit ?? flags.nodes ?? flags.limit;
     const requestedMaxText = flags.maxTextChars ?? flags.maxText ?? flags.textChars;
     return await this.withCdpPageSession(targetId, async (client, sessionId) => {
       const send = async (method, params = {}) => await client.request(method, params, { sessionId });
       await prepareCdpPageSession(send);
-      const snap = await cdpDomSnapshotFromSession(send, {
+      const snap = await snapshotDomFromSession(send, {
         limit: requestedLimit ? parsePositiveInteger(requestedLimit, "dom-limit") : undefined,
         maxTextChars: requestedMaxText ? parsePositiveInteger(requestedMaxText, "max-text-chars") : undefined,
       });
       return { ...snap, targetId, cdp: true };
+    });
+  }
+
+  async getDomText(format, flags = {}, selector = undefined) {
+    const targetId = await this.resolveCdpTargetId(flags);
+    const requestedMaxChars = flags.maxChars;
+    return await this.withCdpPageSession(targetId, async (client, sessionId) => {
+      const send = async (method, params = {}) => await client.request(method, params, { sessionId });
+      await prepareCdpPageSession(send);
+      const result = await getDomTextFromSession(send, {
+        format,
+        selector,
+        maxChars: requestedMaxChars ? parsePositiveInteger(requestedMaxChars, "max-chars") : undefined,
+      });
+      return { ...result, targetId, cdp: true };
+    });
+  }
+
+  async querySelector(selector, flags = {}) {
+    const targetId = await this.resolveCdpTargetId(flags);
+    return await this.withCdpPageSession(targetId, async (client, sessionId) => {
+      const send = async (method, params = {}) => await client.request(method, params, { sessionId });
+      await prepareCdpPageSession(send);
+      const result = await querySelectorFromSession(send, {
+        selector,
+        limit: flags.limit ? parsePositiveInteger(flags.limit, "limit") : undefined,
+        maxTextChars: flags.maxTextChars ? parsePositiveInteger(flags.maxTextChars, "max-text-chars") : undefined,
+        maxHtmlChars: flags.maxHtmlChars ? parsePositiveInteger(flags.maxHtmlChars, "max-html-chars") : undefined,
+      });
+      return { ...result, targetId, cdp: true };
     });
   }
 
@@ -7110,6 +7231,13 @@ class BrowserDaemon {
       case "snapshot":
       case "accessibility":
         return await this.handleSnapshot(args, flags);
+      case "snapshot-aria":
+        return await this.handleSnapshotAria(args, flags);
+      case "snapshot-dom":
+        return await this.handleSnapshotDom(args, flags);
+      case "query-selector":
+        requireArgs(command, args, 1);
+        return await this.handleQuerySelector(args, flags);
       case "observe":
         return await this.handleObserve(args, flags);
       case "click":
@@ -7213,11 +7341,6 @@ class BrowserDaemon {
         return await this.handleEval(args, flags);
       case "url":
       case "text":
-      case "blocks":
-      case "visible-blocks":
-      case "posts":
-      case "feed":
-      case "content-blocks":
       case "html":
       case "links":
       case "forms":
@@ -7736,6 +7859,75 @@ class BrowserDaemon {
         truncated: built.truncated,
         ...(outPath ? { out: outPath } : {}),
         ...(annotated ? { annotatedScreenshot: annotated } : {}),
+      },
+    };
+  }
+
+  async handleSnapshotAria(args, flags = {}) {
+    if (!this.shouldUseFastCdp(flags)) {
+      throw new Error("snapshot-aria requires a CDP-backed browser endpoint; use snapshot for MCP fallback reads.");
+    }
+    const snap = await this.snapshotAria(flags);
+    const payload = {
+      nodes: snap.nodes,
+      targetId: snap.targetId,
+      cdp: true,
+    };
+    const formatted = await formatReadResult("snapshot-aria", { text: formatValue(payload) }, flags);
+    return {
+      ...formatted,
+      structuredContent: {
+        ...(formatted.structuredContent ?? {}),
+        command: "snapshot-aria",
+        count: snap.nodes.length,
+        targetId: snap.targetId,
+        cdp: true,
+      },
+    };
+  }
+
+  async handleSnapshotDom(args, flags = {}) {
+    if (!this.shouldUseFastCdp(flags)) {
+      throw new Error("snapshot-dom requires a CDP-backed browser endpoint; use text/html for MCP fallback reads.");
+    }
+    const snap = await this.snapshotDom(flags);
+    const payload = {
+      nodes: snap.nodes,
+      targetId: snap.targetId,
+      cdp: true,
+    };
+    const formatted = await formatRawResult("snapshot-dom", { text: formatValue(payload) }, flags);
+    return {
+      ...formatted,
+      structuredContent: {
+        ...(formatted.structuredContent ?? {}),
+        command: "snapshot-dom",
+        count: snap.nodes.length,
+        targetId: snap.targetId,
+        cdp: true,
+      },
+    };
+  }
+
+  async handleQuerySelector(args, flags = {}) {
+    if (!this.shouldUseFastCdp(flags)) {
+      throw new Error("query-selector requires a CDP-backed browser endpoint; use text/html selector reads for MCP fallback.");
+    }
+    const result = await this.querySelector(args[0], flags);
+    const payload = {
+      matches: result.matches,
+      targetId: result.targetId,
+      cdp: true,
+    };
+    const formatted = await formatReadResult("query-selector", { text: formatValue(payload) }, flags);
+    return {
+      ...formatted,
+      structuredContent: {
+        ...(formatted.structuredContent ?? {}),
+        command: "query-selector",
+        count: result.matches.length,
+        targetId: result.targetId,
+        cdp: true,
       },
     };
   }
@@ -8337,19 +8529,18 @@ class BrowserDaemon {
       const result = await this.evaluateFunction(fn, flags, selectorOrUid);
       return flags.raw ? await formatRawResult(command, result, flags) : await formatReadResult(command, result, flags);
     };
-    const cdpSnapshotReadResult = async () => {
-      const snap = await this.cdpRoleSnapshot({ ...flags, compact: true });
+    const cdpDomTextResult = async (format) => {
+      const result = await this.getDomText(format, flags, target);
       const formatted = flags.raw
-        ? await formatRawResult(command, { text: snap.snapshot }, flags)
-        : await formatReadResult(command, { text: snap.snapshot }, flags);
+        ? await formatRawResult(command, { text: result.text }, flags)
+        : await formatReadResult(command, { text: result.text }, flags);
       return {
         ...formatted,
         structuredContent: {
           ...(formatted.structuredContent ?? {}),
           cdp: true,
-          targetId: snap.targetId,
-          source: "cdp-role-snapshot",
-          stats: snap.stats,
+          targetId: result.targetId,
+          source: "cdp-get-dom-text",
         },
       };
     };
@@ -8357,6 +8548,15 @@ class BrowserDaemon {
       case "url":
         return await rawResult("() => location.href");
       case "text":
+        if (this.shouldUseFastCdp(flags) && !(target && (isUidRef(target) || isCdpRoleRef(target)))) {
+          try {
+            return await cdpDomTextResult("text");
+          } catch (error) {
+            if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+              throw error;
+            }
+          }
+        }
         return await rawResult(
           target
             ? selectorOrUidFunction(target, "(el) => el.innerText || el.textContent || ''")
@@ -8368,38 +8568,16 @@ class BrowserDaemon {
               }`,
           target,
         );
-      case "blocks":
-      case "visible-blocks":
-        if (!target && this.shouldUseFastCdp(flags)) {
-          try {
-            return await cdpSnapshotReadResult();
-          } catch (error) {
-            if (!this.shouldFallbackToMcpAfterCdp(flags)) {
-              throw error;
-            }
-          }
-        }
-        return await rawResult(
-          visibleBlocksFunction(target, { fallbackText: flags.fallbackText === true }),
-          target,
-        );
-      case "posts":
-      case "feed":
-      case "content-blocks":
-        if (!target && this.shouldUseFastCdp(flags)) {
-          try {
-            return await cdpSnapshotReadResult();
-          } catch (error) {
-            if (!this.shouldFallbackToMcpAfterCdp(flags)) {
-              throw error;
-            }
-          }
-        }
-        return await rawResult(
-          visibleBlocksFunction(target, { fallbackText: false }),
-          target,
-        );
       case "html":
+        if (this.shouldUseFastCdp(flags) && !(target && (isUidRef(target) || isCdpRoleRef(target)))) {
+          try {
+            return await cdpDomTextResult("html");
+          } catch (error) {
+            if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+              throw error;
+            }
+          }
+        }
         return await rawResult(
           target ? selectorOrUidFunction(target, "(el) => el.innerHTML") : "() => document.documentElement.outerHTML",
           target,
@@ -9320,7 +9498,6 @@ class BrowserDaemon {
       bounds: info.rect,
     };
   }
-
 
   async handleScreenshot(args, flags) {
     const explicitPath = args.find((arg) => !arg.startsWith("--"));
@@ -10859,13 +11036,7 @@ async function formatReadResult(command, result, flags = {}) {
   const rawText = Array.isArray(rawValue) || (rawValue && typeof rawValue === "object") ? formatValue(rawValue) : String(rawValue);
   let fullText;
   let displayedValue = rawValue;
-  if ((command === "blocks" || command === "visible-blocks") && Array.isArray(rawValue)) {
-    displayedValue = rawValue.slice(0, limit);
-    fullText = displayedValue.length ? displayedValue.map(formatVisibleBlock).join("\n\n") : "(no visible blocks)";
-  } else if ((command === "posts" || command === "feed" || command === "content-blocks") && Array.isArray(rawValue)) {
-    displayedValue = rawValue.slice(0, limit);
-    fullText = displayedValue.length ? displayedValue.map(formatVisibleBlock).join("\n\n") : "(no visible entries)";
-  } else if (Array.isArray(rawValue)) {
+  if (Array.isArray(rawValue)) {
     displayedValue = rawValue.slice(0, limit);
     fullText = formatValue(displayedValue);
   } else if (rawValue && typeof rawValue === "object") {
@@ -11002,33 +11173,12 @@ async function formatRawResult(command, result, flags = {}) {
   };
 }
 
-function formatVisibleBlock(block, index) {
-  const label = block?.role || block?.tag || "block";
-  const geometry = [
-    Number.isFinite(block?.top) ? `top=${Math.round(block.top)}` : "",
-    Number.isFinite(block?.height) ? `h=${Math.round(block.height)}` : "",
-  ].filter(Boolean).join(" ");
-  const source = block?.source ? ` source=${block.source}` : "";
-  const ref = block?.ref ? ` ref=${block.ref}` : "";
-  const depth = Number.isFinite(block?.depth) ? ` depth=${Math.round(block.depth)}` : "";
-  const selector = block?.selector ? ` ${block.selector}` : "";
-  const header = `[${index + 1}] ${label}${geometry ? ` ${geometry}` : ""}${ref}${depth}${source}${selector}`;
-  return `${header}\n${String(block?.text ?? "").trim()}`.trim();
-}
-
 function defaultLimitForReadCommand(command) {
   switch (command) {
     case "links":
       return "100";
     case "forms":
       return "20";
-    case "posts":
-    case "feed":
-    case "content-blocks":
-      return "5";
-    case "blocks":
-    case "visible-blocks":
-      return "12";
     default:
       return String(DEFAULT_LINE_LIMIT);
   }
@@ -11301,143 +11451,6 @@ function observePageFunction({ limit, maxChars, selector }) {
       fields,
       textSample,
     };
-  }`;
-}
-
-function visibleBlocksFunction(selector = undefined, options = {}) {
-  const allowFallbackText = options.fallbackText === true;
-  return `() => {
-    const explicitSelector = ${selector ? JSON.stringify(selector) : "null"};
-    const allowFallbackText = ${allowFallbackText ? "true" : "false"};
-    const visible = (el) => {
-      if (!(el instanceof Element)) return false;
-      const rect = el.getBoundingClientRect();
-      if (rect.width < 40 || rect.height < 16 || rect.bottom < -20 || rect.top > innerHeight * 3) return false;
-      const style = getComputedStyle(el);
-      return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || "1") > 0;
-    };
-    const cleanLines = (value, max = 1200) => {
-      const seen = new Set();
-      const lines = String(value || "")
-        .split("\\n")
-        .map((line) => line.replace(/\\s+/g, " ").trim())
-        .filter((line) => line.length > 1)
-        .filter((line) => {
-          const key = line.toLowerCase();
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        });
-      return lines.join("\\n").slice(0, max).trim();
-    };
-    const cssPath = (el) => {
-      if (!(el instanceof Element)) return "";
-      const tag = el.tagName.toLowerCase();
-      if (el.id) return tag + "#" + CSS.escape(el.id);
-      const role = el.getAttribute("role");
-      if (role) return tag + '[role="' + role + '"]';
-      const parent = el.parentElement;
-      if (!parent) return tag;
-      const siblings = [...parent.children].filter((child) => child.tagName === el.tagName);
-      const index = siblings.indexOf(el) + 1;
-      return tag + (siblings.length > 1 ? ":nth-of-type(" + index + ")" : "");
-    };
-    const queryAll = (query) => {
-      try {
-        return [...document.querySelectorAll(query)];
-      } catch {
-        return [];
-      }
-    };
-    const pushCandidates = (items, source) => {
-      for (const item of items) {
-        if (item instanceof Element) {
-          candidates.push({ el: item, source });
-        }
-      }
-    };
-    const candidates = [];
-    if (explicitSelector) {
-      pushCandidates(queryAll(explicitSelector), "explicit");
-    } else {
-      pushCandidates(queryAll('[role="main"] [role="article"], [role="article"], article, [role="listitem"], [role="region"], section'), "content");
-      if (candidates.length < 4) {
-        pushCandidates(queryAll('[role="feed"] > *, main section, [role="main"] > section, main > article, [role="main"] > article, main > ul > li, [role="main"] li'), "main-child");
-      }
-      if (candidates.length < 4) {
-        const roots = queryAll('[role="main"], main').length ? queryAll('[role="main"], main') : [document.body].filter(Boolean);
-        for (const root of roots) {
-          const blocks = [...root.querySelectorAll('article, section, li, tr, td, th, [role="article"], [role="group"], [role="listitem"], [role="region"], [role="row"], [role="cell"], [role="gridcell"]')]
-            .filter((el) => {
-              if (!visible(el)) return false;
-              const text = cleanLines(el.innerText || el.textContent || "", 1600);
-              if (text.length < 40 || text.length > 5000) return false;
-              const parentText = el.parentElement ? cleanLines(el.parentElement.innerText || el.parentElement.textContent || "", 5200) : "";
-              if (parentText && parentText === text && el.parentElement !== root) return false;
-              return true;
-            })
-            .slice(0, 80);
-          pushCandidates(blocks, "visible-dom");
-        }
-      }
-    }
-    const unique = [];
-    const seenElements = new Set();
-    for (const candidate of candidates) {
-      if (seenElements.has(candidate.el)) continue;
-      seenElements.add(candidate.el);
-      unique.push(candidate);
-    }
-    const entries = unique
-      .filter((candidate) => visible(candidate.el))
-      .map((candidate) => {
-        const el = candidate.el;
-        const rect = el.getBoundingClientRect();
-        const text = cleanLines(el.innerText || el.textContent || el.getAttribute("aria-label") || "");
-        return {
-          tag: el.tagName.toLowerCase(),
-          role: el.getAttribute("role") || undefined,
-          source: candidate.source,
-          selector: cssPath(el),
-          top: Math.round(rect.top + scrollY),
-          left: Math.round(rect.left + scrollX),
-          height: Math.round(rect.height),
-          text,
-        };
-      })
-      .filter((entry) => entry.text.length >= 20)
-      .sort((a, b) => a.top - b.top || a.left - b.left || b.text.length - a.text.length);
-    const out = [];
-    for (const entry of entries) {
-      const normalized = entry.text.toLowerCase();
-      const duplicate = out.some((previous) => {
-        const previousText = previous.text.toLowerCase();
-        return previousText === normalized ||
-          (normalized.length > 80 && previousText.includes(normalized)) ||
-          (previousText.length > 80 && normalized.includes(previousText));
-      });
-      if (!duplicate) {
-        out.push(entry);
-      }
-      if (out.length >= 50) break;
-    }
-    if (out.length === 0 && allowFallbackText) {
-      const root = explicitSelector ? queryAll(explicitSelector)[0] : document.body;
-      const fallbackText = cleanLines(root?.innerText || root?.textContent || "", 1200);
-      if (fallbackText) {
-        out.push({
-          tag: root?.tagName?.toLowerCase?.() || "body",
-          role: root?.getAttribute?.("role") || "document",
-          source: "fallback-text",
-          selector: explicitSelector || "body",
-          top: 0,
-          left: 0,
-          height: 0,
-          text: fallbackText,
-        });
-      }
-    }
-    return out;
   }`;
 }
 
@@ -12220,10 +12233,10 @@ function waitForReadyContentFunction(text, timeoutMs, options = {}) {
     const visibleCardElements = () => {
       const explicit = opts.cardSelector ? queryAll(opts.cardSelector).filter(visible) : [];
       if (explicit.length) return explicit;
-      const feedChildren = queryAll('[role="feed"] > *, [role="list"] > *')
+      const collectionChildren = queryAll('[role="feed"] > *, [role="list"] > *')
         .filter(visible)
         .filter((el) => cleanText(el.innerText || el.textContent || "").length >= 2 || el.querySelector("img,video,canvas,svg"));
-      if (feedChildren.length) return feedChildren;
+      if (collectionChildren.length) return collectionChildren;
       return queryAll('main article, [role="main"] article, article, main [role="article"], [role="main"] [role="article"], [aria-posinset], main section, [role="main"] section')
         .filter(visible)
         .filter((el) => cleanText(el.innerText || el.textContent || "").length >= 2 || el.querySelector("img,video,canvas,svg"));
@@ -12620,16 +12633,6 @@ async function runSelfTest() {
     fs.rmSync(readOutTempDir, { recursive: true, force: true });
   }
 
-  assertSelfTest(
-    visibleBlocksFunction(undefined, { fallbackText: false }).includes("allowFallbackText = false"),
-    "visible blocks can disable fallback text",
-  );
-  assertSelfTest(
-    visibleBlocksFunction(undefined, { fallbackText: true }).includes("allowFallbackText = true"),
-    "visible blocks can opt into fallback text",
-  );
-  const pageletToken = "data-" + "pagelet";
-  assertSelfTest(!visibleBlocksFunction().includes(pageletToken), "visible blocks avoid site-specific pagelet selectors");
   assertSelfTest(
     [...INTERACTIVE_ROLES].join("|") === "button|checkbox|combobox|link|listbox|menuitem|menuitemcheckbox|menuitemradio|option|radio|searchbox|slider|spinbutton|switch|tab|textbox|treeitem",
     "interactive role set matches OpenClaw",
@@ -13093,14 +13096,6 @@ async function runSelfTest() {
     { restartDaemon: true },
   );
   assertSelfTest(
-    requiredCapabilitiesForPayload({ command: "chain", args: ['[["wait","Example Group"],["blocks","--limit","5"]]'] }).has("visible-blocks"),
-    "daemon capability check inspects chain steps",
-  );
-  assertSelfTest(
-    requiredCapabilitiesForPayload({ command: "chain", args: ['[["wait","Example Group","--visible"],["posts","--limit","1"]]'] }).has("content-posts"),
-    "daemon capability check inspects compact post chain steps",
-  );
-  assertSelfTest(
     requiredCapabilitiesForPayload({ command: "wait", args: [], flags: { selector: "main", visible: true } }).has("visible-wait"),
     "daemon capability check covers visible selector waits",
   );
@@ -13124,6 +13119,18 @@ async function runSelfTest() {
     requiredCapabilitiesForPayload({ command: "area-screenshot", args: [] }).has("area-screenshot"),
     "daemon capability check covers area screenshots",
   );
+  assertSelfTest(
+    requiredCapabilitiesForPayload({ command: "snapshot-dom", args: [] }).has("snapshot-dom"),
+    "daemon capability check covers DOM snapshots",
+  );
+  assertSelfTest(
+    requiredCapabilitiesForPayload({ command: "snapshot-aria", args: [] }).has("snapshot-aria"),
+    "daemon capability check covers AX snapshots",
+  );
+  assertSelfTest(
+    requiredCapabilitiesForPayload({ command: "query-selector", args: ["main"] }).has("query-selector"),
+    "daemon capability check covers selector queries",
+  );
   assertSelfTest(isDeviceScreenshotsCommand("responsive-exact") === true, "device screenshot aliases share the compatibility path");
   assertSelfTest(
     isMissingDaemonCapabilityError(new Error("does not support device-screenshots needed by device-screenshots"), "device-screenshots") === true,
@@ -13134,12 +13141,12 @@ async function runSelfTest() {
     "daemon capability check covers bounded raw eval output",
   );
   assertSelfTestThrows(
-    () => assertDaemonSupportsPayload({ pid: 1, session: "old" }, { command: "blocks", args: [] }),
+    () => assertDaemonSupportsPayload({ pid: 1, session: "old" }, { command: "snapshot-dom", args: [] }),
     "daemon capability check rejects unsupported old-daemon commands",
   );
   let realProfileCapabilityError = "";
   try {
-    assertDaemonSupportsPayload(realProfileState, { command: "blocks", args: [] });
+    assertDaemonSupportsPayload(realProfileState, { command: "snapshot-dom", args: [] });
   } catch (error) {
     realProfileCapabilityError = error instanceof Error ? error.message : String(error);
   }
@@ -13225,10 +13232,12 @@ async function runSelfTest() {
   assertSelfTest(parsedWaitNetworkIdle.args[0] === "--networkidle", "parser preserves wait readiness tokens");
   assertSelfTest(waitForTextFunction("Example Group", 1000).includes("Example Group"), "wait text uses page-local polling function");
   new Function(`return (${waitForTextFunction("Example Group", 1000)})`);
-  const parsedBlocks = parseArgv(["blocks", "[role=article]", "--limit", "5"]);
-  assertSelfTest(parsedBlocks.command === "blocks" && parsedBlocks.flags.limit === "5", "parser handles visible blocks command");
-  assertSelfTest(visibleBlocksFunction("[role=article]").includes("querySelectorAll"), "visible blocks builds a DOM query function");
-  new Function(`return (${visibleBlocksFunction("[role=article]")})`);
+  const parsedSnapshotDom = parseArgv(["snapshot-dom", "--max-text-chars", "180"]);
+  assertSelfTest(parsedSnapshotDom.command === "snapshot-dom" && parsedSnapshotDom.flags.maxTextChars === "180", "parser handles DOM snapshot text budget");
+  const parsedSnapshotAria = parseArgv(["snapshot-aria", "--limit", "180"]);
+  assertSelfTest(parsedSnapshotAria.command === "snapshot-aria" && parsedSnapshotAria.flags.limit === "180", "parser handles AX snapshot limit");
+  const parsedQuerySelector = parseArgv(["query-selector", "main", "--max-html-chars", "1200"]);
+  assertSelfTest(parsedQuerySelector.command === "query-selector" && parsedQuerySelector.flags.maxHtmlChars === "1200", "parser handles selector query HTML budget");
   const parsedDialogAccept = parseArgv(["dialog", "--accept", "ok"]);
   assertSelfTest(parsedDialogAccept.args.join(" ") === "--accept ok", "parser preserves dialog action tokens");
   const parsedEmulateNetwork = parseArgv(["emulate", "--network", "Offline"]);

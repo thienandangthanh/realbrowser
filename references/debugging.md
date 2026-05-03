@@ -7,9 +7,10 @@ captures, cache/header proof, or large HTML/text extraction.
 
 - `observe`: first pass for page state, visible controls, fields, console
   errors, and recent failed network lines.
-- `posts`: repeated content cards in screen order. Prefer visible container
-  boundaries such as direct children of a feed/list/grid.
-- `blocks`: dashboards, search results, documents, and generic pages.
+- `snapshot --compact`: compact OpenClaw-style role snapshots.
+- `snapshot-aria`: OpenClaw-style AX node records for local inspection.
+- `snapshot-dom`: OpenClaw-style DOM element records for local inspection.
+- `query-selector`: OpenClaw-style selector match records for local inspection.
 - `screenshot`: visual evidence, canvas/image/card-heavy content, or ambiguous
   visual boundaries.
 - `snapshot --efficient`: clickable/accessible refs for interaction.
@@ -24,15 +25,71 @@ when content boundaries are ambiguous.
 
 ```bash
 "$REALBROWSER_CLI" claim "https://example.com/items" --session content-read --handle-name content-read --timeout 15000 --quiet
-"$REALBROWSER_CLI" --handle content-read chain '[["wait","Items","--visible","--timeout","15000"],["posts","--limit","3","--max-chars","2000"]]' --return final
+"$REALBROWSER_CLI" --handle content-read chain '[["wait","Items","--visible","--timeout","15000"],["snapshot","--compact","--max-chars","2000"]]' --return final
 ```
+
+For large dynamic pages such as social feeds, dashboards, chats, search results,
+or virtualized lists:
+
+1. Reuse or claim the real tab/profile once. If the page does not hydrate until
+   visible, use `--foreground-until-ready` with a selector/card readiness guard.
+2. Start with `snapshot --compact --max-chars 2000-3000`.
+3. If item boundaries or nesting are ambiguous, write OpenClaw-style records to
+   files and inspect them with OS-available local tools. `rg`/`jq` are optional;
+   PowerShell `Select-String`/`ConvertFrom-Json` or Node work on Windows.
+   Do not dump full-page HTML into stdout.
+4. Use screenshots only for visual confirmation, media-heavy posts, canvas
+   content, or when text extraction cannot expose the visual boundary.
+
+```bash
+ARTIFACT_DIR="${TMPDIR:-/tmp}/realbrowser-feed"
+mkdir -p "$ARTIFACT_DIR"
+"$REALBROWSER_CLI" claim "https://example.com/feed" \
+  --profile "chrome:Default" \
+  --handle-name feed-read \
+  --no-fallback \
+  --foreground-until-ready \
+  --selector main \
+  --min-cards 2 \
+  --timeout 30000
+"$REALBROWSER_CLI" --handle feed-read snapshot --compact --max-chars 2500
+"$REALBROWSER_CLI" --handle feed-read snapshot-dom --out "$ARTIFACT_DIR/feed-dom.json" --limit 1800 --max-text-chars 180
+"$REALBROWSER_CLI" --handle feed-read snapshot-aria --out "$ARTIFACT_DIR/feed-aria.json" --limit 1800
+"$REALBROWSER_CLI" --handle feed-read query-selector 'main, [role="feed"], [role="article"], article' \
+  --out "$ARTIFACT_DIR/feed-elements.json" \
+  --limit 60 \
+  --max-text-chars 300 \
+  --max-html-chars 800
+```
+
+Search the saved artifacts with whichever local tool is available:
+
+```bash
+rg -n "needle|role|article|data-|aria" "$ARTIFACT_DIR"/feed-*.json
+```
+
+```powershell
+$ArtifactDir = Join-Path $env:TEMP "realbrowser-feed"
+Select-String -Path (Join-Path $ArtifactDir "feed-*.json") -Pattern "needle|role|article|data-|aria"
+```
+
+There is no generic `posts`, `blocks`, or `content-blocks` command. Use the
+generic snapshot/selector substrate above, then reason from the page's actual
+role and DOM records.
 
 For large HTML:
 
 ```bash
-"$REALBROWSER_CLI" html ".target" --out /tmp/target.html --max-chars 2000
-rg -n "needle|data-id|aria" /tmp/target.html
+ARTIFACT_DIR="${TMPDIR:-/tmp}/realbrowser-read"
+mkdir -p "$ARTIFACT_DIR"
+"$REALBROWSER_CLI" html ".target" --out "$ARTIFACT_DIR/target.html" --max-chars 2000
+"$REALBROWSER_CLI" snapshot-aria --out "$ARTIFACT_DIR/snapshot-aria.json" --limit 1200
+"$REALBROWSER_CLI" snapshot-dom --out "$ARTIFACT_DIR/snapshot-dom.json" --limit 1200 --max-text-chars 220
+"$REALBROWSER_CLI" query-selector ".target" --out "$ARTIFACT_DIR/query-selector.json" --limit 20
 ```
+
+Then inspect the saved files with `rg`, PowerShell `Select-String`, editor
+search, Node, or another local JSON/text tool that exists on the machine.
 
 Use `--raw --full-stdout --max-chars <n>` only when the user explicitly needs
 full raw stdout and you know it fits safely in context.

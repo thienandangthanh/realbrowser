@@ -58,11 +58,13 @@ Read this when you need command syntax beyond the common recipes in `SKILL.md`.
   redacted unless `--values` is passed.
 - `links [selector|uid] [--limit <n>] [--filter <text>]
   [--text-filter <text>] [--href-filter <text>] [--visible]`: deduped links.
-- `posts [selector] [--limit <n>] [--max-chars <n>] [--out <path>]`: repeated
-  feed/card extraction in screen order.
-- `blocks [selector] [--limit <n>] [--max-chars <n>] [--fallback-text]
-  [--out <path>]`: compact blocks for dashboards, search results, and generic
-  pages.
+- `snapshot-aria [--limit <n>] [--out <path>]`: OpenClaw-style AX node
+  records over CDP.
+- `snapshot-dom [--limit <n>|--max-nodes <n>] [--max-text-chars <n>]
+  [--out <path>]`: OpenClaw-style DOM element records over CDP.
+- `query-selector <selector> [--limit <n>] [--max-text-chars <n>]
+  [--max-html-chars <n>] [--out <path>]`: OpenClaw-style selector matches
+  over CDP.
 
 ## Interaction
 
