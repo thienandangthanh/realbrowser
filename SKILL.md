@@ -15,8 +15,11 @@ Run the bundled CLI:
 REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
 "$REALBROWSER_CLI" doctor
 "$REALBROWSER_CLI" open http://localhost:3000
-"$REALBROWSER_CLI" snapshot
+"$REALBROWSER_CLI" observe
+"$REALBROWSER_CLI" snapshot --efficient
 ```
+
+On Windows PowerShell, prefer `scripts\realbrowser.ps1 ...`. On `cmd.exe`, use `scripts\realbrowser.cmd ...`. `node scripts\realbrowser.mjs ...` and the installed `realbrowser` npm bin are also portable. The POSIX `scripts/realbrowser` wrapper is for macOS/Linux shells.
 
 The CLI starts a persistent loopback daemon on demand. The daemon stores its port and bearer token in `~/.realbrowser/state.json` and talks to `chrome-devtools-mcp` over stdio.
 
@@ -51,7 +54,8 @@ REALBROWSER_STATE_FILE=/tmp/realbrowser.json "$REALBROWSER_CLI" doctor
 - `select <uid|selector> <value> [--page <id>]`: select a dropdown option by value, label, or visible text.
 - `focus <pageId>`: select a page and bring Chrome to the front.
 - `close <pageId>` / `closetab <pageId>`: close a tab.
-- `snapshot` / `accessibility [--page <id>] [--verbose] [--annotate|-a] [--output <path>]`: get the accessibility snapshot with element `uid` refs. `--annotate` also saves a screenshot with temporary uid labels.
+- `observe [--screenshot] [--limit <n>] [--max-chars <n>]`: compact page overview with title, URL, headings, visible controls, fields, console errors, and failed/recent network lines. Use this first for "what is on the page?"
+- `snapshot` / `accessibility [--efficient] [--interactive] [--compact] [--depth <n>] [--max-chars <n>] [--max-nodes <n>] [--labels|--annotate] [--out <path>] [--raw|--verbose]`: get a capped role-style snapshot with actionable Chrome MCP `uid` refs. `--efficient` is the OpenClaw-style preset: interactive, compact, depth-limited, and capped. `--labels` saves a labeled screenshot and prints `MEDIA:<path>`.
 - `click <uid> [--page <id>]`: click a ref from the latest snapshot.
 - `hover <uid> [--page <id>]`: hover a snapshot ref.
 - `drag <fromUid> <toUid> [--page <id>]`: drag one snapshot ref to another.
@@ -59,6 +63,8 @@ REALBROWSER_STATE_FILE=/tmp/realbrowser.json "$REALBROWSER_CLI" doctor
 - `fill <uid> <value> [--page <id>]`: fill an input/select ref.
 - `fill-form '[{"uid":"...","value":"..."}]' [--page <id>]`: fill multiple refs in one command.
 - `press <key> [--page <id>]`: press a key or key chord, such as `Enter` or `Meta+L`.
+- `click-coords <x> <y> [--page <id>]`: click the element at viewport coordinates when refs are not enough.
+- `highlight <uid|selector> [--page <id>]`: temporarily highlight what a ref or selector resolves to.
 - `upload <uid> <file> [--page <id>]`: upload a local file through a file input ref.
 - `wait <text> [more text...] [--timeout <ms>] [--page <id>]`: wait until one text value appears. Use `wait --load`, `wait --domcontentloaded`, or `wait --networkidle` for page readiness checks.
 - `scroll [selector|uid] [--page <id>]`: scroll a selector/ref into view, or scroll to bottom.
@@ -66,12 +72,13 @@ REALBROWSER_STATE_FILE=/tmp/realbrowser.json "$REALBROWSER_CLI" doctor
 - `emulate`: set or reset Chrome MCP emulation options such as network, CPU, user agent, color scheme, and geolocation.
 - `useragent <ua|reset>`: gstack-compatible shortcut for `emulate --user-agent`.
 - `cookie <name=value>`: set a cookie on the current page path.
-- `dialog arm accept|dismiss [text]`, `dialog-accept [text]`, `dialog-dismiss`: pre-arm the next alert/confirm/prompt in the current page. Use `dialog list` to read captured dialog records, or `dialog current accept|dismiss` to handle a dialog that is already open.
-- `eval <js>` / `js <js> [--page <id>]`: run JavaScript in the page. Expressions are wrapped automatically.
-- `text`, `html`, `links`, `forms`, `cookies`, `storage`, `perf`, `url`: fast read helpers backed by page JavaScript. `cookies` and `storage` redact values unless `--values` is passed.
+- `dialog arm accept|dismiss [text]`, `dialog --accept|--dismiss [text]`, `dialog-accept [text]`, `dialog-dismiss`: pre-arm the next alert/confirm/prompt in the current page. Use `dialog list` to read captured dialog records, or `dialog current accept|dismiss` to handle a dialog that is already open.
+- `eval <js>` / `js <js> [--page <id>]`: run JavaScript in the page. Expressions are wrapped automatically. Output is capped unless `--raw` is passed.
+- `text`, `html`, `links`, `forms`, `cookies`, `storage`, `perf`, `url`: fast read helpers backed by page JavaScript. Use `--limit`, `--max-chars`, and `--out <path>` for large pages. `cookies` and `storage` redact values unless `--values` is passed.
 - `css <selector|uid> <property>`, `attrs <selector|uid>`, `is <state> <selector|uid>`: inspect elements by CSS selector or snapshot uid.
-- `console [get <msgid>] [--errors] [--preserve]`: list console messages, or fetch one message by id.
-- `network [get <reqid>] [--preserve] [--request-file path] [--response-file path]`: list network requests, or fetch one request by id.
+- `console [get <msgid>] [--errors] [--filter <text>] [--limit <n>] [--clear] [--preserve]`: list capped console messages, or fetch one message by id. `--clear` hides already-seen lines for the current daemon.
+- `network [get <reqid>] [--failed] [--filter <text>] [--limit <n>] [--clear] [--preserve] [--request-file path] [--response-file path]`: list capped network requests, or fetch one request by id. Use files for large request/response bodies.
+- `errors` / `requests`: OpenClaw-style aliases for `console --errors` and `network`.
 - `screenshot [path] [--full|--full-page] [--uid <uid>] [--labels|--annotate] [--format png|jpeg|webp]`: save a screenshot. `--labels` overlays snapshot uid labels before capture and removes them afterward. If `path` is omitted, a timestamped PNG is written under `~/.realbrowser/screenshots`.
 - `responsive <path-prefix>`: save mobile, tablet, and desktop screenshots in one daemon call.
 - `diff <url1> <url2>`: navigate and produce a simple text diff.
@@ -82,13 +89,18 @@ REALBROWSER_STATE_FILE=/tmp/realbrowser.json "$REALBROWSER_CLI" doctor
 - `trace start|stop`, `trace analyze <insightSetId> <insightName>`: run Chrome performance tracing.
 - `tools`: list available Chrome DevTools MCP tools.
 - `tool <mcpToolName> [jsonArgs]`: call a raw MCP tool for features not wrapped yet.
-- `chain '[["snapshot","--page","1"],["console","--errors","--page","1"]]'`: run multiple commands in one daemon RPC for speed.
+- `chain '[["observe"],["snapshot","--efficient"],["console","--errors"]]' [--return summary|final|all] [--trace <path>]`: run multiple commands in one daemon RPC for speed. Default output is a compact summary; full traces should go to disk.
 
 Passing `--page <id>` targets a tab directly without focusing Chrome, so background screenshots and snapshots do not cover the terminal.
 
 Global flags:
 
 - `--json`: print raw JSON responses.
+- `--quiet`: print only the shortest useful value when available.
+- `--verbose`: raise output caps and request more detail. Use when the compact result is missing useful context.
+- `--raw`: bypass realbrowser compaction and print the underlying MCP response. Use when the user asks for full output.
+- `--mode compact|normal|verbose|raw`: output mode shortcut. `REALBROWSER_OUTPUT=verbose|raw|quiet` can set the default for a command or session.
+- `--`: stop option parsing. Use before literal text or JavaScript that begins with a known flag, such as `type -- --raw`.
 - `--state-file <path>`: use a custom daemon state file.
 - `--backend real|dev`: choose real-browser auto-connect or the dedicated dev profile.
 - `--browser-url <url>`: connect to an existing CDP endpoint instead of autoConnect.
@@ -99,11 +111,29 @@ Global flags:
 
 1. Start with `doctor` when setup is uncertain.
 2. Use `tabs` before opening new pages if prior attempts may have left tabs around.
-3. Use `open` then `snapshot`; act only on current snapshot `uid` refs.
-4. After navigation, modal changes, or form submission, run `snapshot` again before the next action.
-5. If a `uid` is stale, snapshot once and retry with the new ref.
-6. Ask for explicit user approval before submitting sensitive data, making purchases, deleting data, changing account/security settings, granting permissions, or taking any action that is hard to undo.
-7. Stop and report manual blockers such as login, 2FA, captcha, camera/microphone permission, or Chrome remote debugging approval.
+3. Use `observe` first for page state; use `snapshot --efficient` only when you need clickable `uid` refs.
+4. Act only on current snapshot `uid` refs.
+5. After navigation, modal changes, or form submission, run `observe` or `snapshot --efficient` again before the next action.
+6. If a `uid` is stale, snapshot once and retry with the new ref.
+7. For workflows with several actions, prefer `chain --return summary --trace ~/.realbrowser/trace.json`.
+8. Ask for explicit user approval before submitting sensitive data, making purchases, deleting data, changing account/security settings, granting permissions, or taking any action that is hard to undo.
+9. Stop and report manual blockers such as login, 2FA, captcha, camera/microphone permission, or Chrome remote debugging approval.
+
+## Token And Speed Rules
+
+- Prefer `observe`, `snapshot --efficient`, `console --errors --limit 20`, and `network --failed --limit 30`.
+- Do not call raw/full snapshot by default. If the user asks for verbose or full output, use `--verbose`, `--raw`, `REALBROWSER_OUTPUT=verbose`, `REALBROWSER_OUTPUT=raw`, or `--out <path>`.
+- On Windows PowerShell, set full-output mode with `$env:REALBROWSER_OUTPUT = "raw"` before running `scripts\realbrowser.ps1`, then remove it with `Remove-Item Env:\REALBROWSER_OUTPUT`.
+- For large HTML/text/network bodies, use `--out <path>` or `network get --response-file <path>`.
+- Use `--page <id>` after `tabs` or `select` to avoid extra target discovery.
+- Screenshot commands return file paths; inspect the image only when visual evidence is needed.
+
+## Platform Notes
+
+- Supported runtimes: macOS, Linux, and Windows with Node.js 22+ and `npm`/`npx`.
+- Use `scripts/realbrowser` on macOS/Linux; use `scripts\realbrowser.ps1` on Windows PowerShell; use `scripts\realbrowser.cmd` on `cmd.exe`; `node scripts\realbrowser.mjs` and the npm bin are portable fallbacks.
+- Real-browser attach is delegated to Chrome DevTools MCP. If auto-connect cannot attach to a real profile on any OS, retry with `--backend dev`.
+- Protocol actions, screenshots, snapshots, console, network, and downloads should not require focusing the browser window.
 
 ## Security Notes
 

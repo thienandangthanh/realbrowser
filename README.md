@@ -11,7 +11,7 @@ The default Codex browser automation path is useful, but it is not enough for we
 - A persistent loopback daemon for fast follow-up commands.
 - Chrome DevTools MCP integration for real Chrome attach.
 - A dedicated profile fallback at `~/.realbrowser/profile`.
-- Tab listing/selection, navigation, snapshots, clicks, typing, forms, JavaScript evaluation, console and network inspection, screenshots, annotated labels, dialog handling, user-agent emulation, and downloads.
+- Tab listing/selection, navigation, compact observations, efficient snapshots, clicks, typing, forms, JavaScript evaluation, capped console and network inspection, screenshots, annotated labels, pre-armed dialog handling, user-agent emulation, and download interception.
 
 ## Why Not Just Playwright?
 
@@ -19,11 +19,46 @@ Playwright is excellent for isolated automation, but this project is for the opp
 
 ## Quick Start
 
+Requirements:
+
+- Node.js 22 or newer.
+- `npm`/`npx`, used to run `chrome-devtools-mcp`.
+- Chrome or a Chromium-family browser supported by Chrome DevTools MCP.
+
+macOS/Linux:
+
 ```bash
 ./scripts/realbrowser doctor
 ./scripts/realbrowser tabs
 ./scripts/realbrowser open http://localhost:3000
-./scripts/realbrowser snapshot
+./scripts/realbrowser observe
+./scripts/realbrowser snapshot --efficient
+```
+
+Windows PowerShell:
+
+```powershell
+.\scripts\realbrowser.ps1 doctor
+.\scripts\realbrowser.ps1 tabs
+.\scripts\realbrowser.ps1 open http://localhost:3000
+.\scripts\realbrowser.ps1 observe
+.\scripts\realbrowser.ps1 snapshot --efficient
+```
+
+Windows `cmd.exe`:
+
+```bat
+scripts\realbrowser.cmd doctor
+scripts\realbrowser.cmd tabs
+scripts\realbrowser.cmd open http://localhost:3000
+scripts\realbrowser.cmd observe
+scripts\realbrowser.cmd snapshot --efficient
+```
+
+Portable Node entrypoint on any OS:
+
+```bash
+node scripts/realbrowser.mjs doctor
 ```
 
 Use `--backend dev` for the dedicated fallback profile:
@@ -38,6 +73,82 @@ Use `--browser-url` or `REALBROWSER_BROWSER_URL` when you have an explicit Chrom
 REALBROWSER_BROWSER_URL=http://127.0.0.1:9222 ./scripts/realbrowser tabs
 ```
 
+## Fast Agent Defaults
+
+Realbrowser is designed to keep Codex token use low:
+
+- Use `observe` for the first page read.
+- Use `snapshot --efficient` when clickable `uid` refs are needed.
+- Use `snapshot --labels` or `screenshot --labels` for annotated screenshots.
+- Use `console --errors --limit 20` and `network --failed --limit 30`.
+- Use `errors` and `requests` if you want OpenClaw-style aliases.
+- Use `chain --return summary --trace ~/.realbrowser/trace.json` for multi-step flows.
+- Use `--raw`, `--verbose`, `--max-chars`, or `--out <path>` only when the compact result is not enough.
+
+The implementation intentionally copies the proven shape of OpenClaw's efficient browser snapshots and gstack's compact localhost command loop while keeping the backend attached to the user's real Chrome session when possible.
+
+## Verbose And Full Output
+
+Default output is intentionally compact for agent token efficiency. Use these when you need more detail:
+
+```bash
+./scripts/realbrowser snapshot --verbose
+./scripts/realbrowser snapshot --raw
+./scripts/realbrowser text --max-chars 50000
+./scripts/realbrowser html --out /tmp/page.html
+./scripts/realbrowser network get 12 --response-file /tmp/response.json
+REALBROWSER_OUTPUT=verbose ./scripts/realbrowser observe
+REALBROWSER_OUTPUT=raw ./scripts/realbrowser snapshot
+```
+
+Windows PowerShell equivalents:
+
+```powershell
+.\scripts\realbrowser.ps1 snapshot --verbose
+.\scripts\realbrowser.ps1 snapshot --raw
+$env:REALBROWSER_OUTPUT = "raw"; .\scripts\realbrowser.ps1 snapshot
+Remove-Item Env:\REALBROWSER_OUTPUT
+```
+
+Output modes:
+
+- Compact default: capped, model-friendly output.
+- `--verbose` or `REALBROWSER_OUTPUT=verbose`: raises caps and requests more detail where the backend supports it.
+- `--raw` or `REALBROWSER_OUTPUT=raw`: bypasses realbrowser compaction and prints the underlying MCP response.
+- `--out <path>` and `--request-file`/`--response-file`: write large data to disk instead of putting it in the agent transcript.
+- `--` stops option parsing. Use it before literal text or JavaScript that starts with a known flag, for example `realbrowser type -- --raw`.
+
+## Platform Support
+
+Realbrowser is implemented in Node.js and is intended to run on macOS, Linux, and Windows.
+
+- macOS and Linux can run `scripts/realbrowser` directly.
+- Windows PowerShell should prefer `scripts\realbrowser.ps1`, which passes arguments as an array. `scripts\realbrowser.cmd` is available for `cmd.exe`; `node scripts\realbrowser.mjs` and the npm `realbrowser` bin also work.
+- Real-browser attach depends on Chrome DevTools MCP and the local browser's remote debugging support. If attach is unavailable, use `--backend dev` for the dedicated profile.
+- CDP download interception requires Node's built-in `WebSocket` support, available in current Node 22+ builds.
+- Screenshots, snapshots, console, network, JavaScript evaluation, clicks, typing, dialogs, and downloads are protocol-driven and do not require the browser window to be focused.
+
+## Verification
+
+```bash
+npm test
+```
+
+The test script runs a syntax check and a small self-test for compact snapshots, truncation, and capped log output. Live browser smoke checks should additionally verify:
+
+```bash
+./scripts/realbrowser doctor --deep
+./scripts/realbrowser open http://localhost:3000
+./scripts/realbrowser observe --screenshot
+./scripts/realbrowser snapshot --efficient --labels
+./scripts/realbrowser console --errors --limit 20
+./scripts/realbrowser network --failed --limit 30
+```
+
 ## Safety Model
 
 The daemon binds only to `127.0.0.1` and requires a bearer token stored in its state file. Realbrowser can inspect and change browser state, so agents should avoid sensitive tabs unless the user explicitly asks for that. Agents must ask before submitting sensitive data, making purchases, deleting data, changing account/security settings, granting permissions, or taking actions that are hard to undo.
+
+## License
+
+MIT. See `LICENSE`.

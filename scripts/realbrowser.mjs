@@ -21,6 +21,64 @@ const PACKAGE_SPEC = process.env.REALBROWSER_MCP_PACKAGE ?? "chrome-devtools-mcp
 const AUTO_MODE = "auto";
 const DEDICATED_MODE = "dedicated";
 const LABEL_OVERLAY_ATTR = "data-realbrowser-labels";
+const DEFAULT_SNAPSHOT_MAX_CHARS = 8_000;
+const DEFAULT_READ_MAX_CHARS = 12_000;
+const DEFAULT_CHAIN_STEP_MAX_CHARS = 4_000;
+const DEFAULT_LINE_LIMIT = 50;
+const DEFAULT_OBSERVE_LIMIT = 30;
+const DEFAULT_OBSERVE_TEXT_CHARS = 900;
+const NPX_COMMAND = process.platform === "win32" ? "npx.cmd" : "npx";
+
+const INTERACTIVE_ROLES = new Set([
+  "button",
+  "link",
+  "textbox",
+  "checkbox",
+  "radio",
+  "combobox",
+  "listbox",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
+  "searchbox",
+  "slider",
+  "spinbutton",
+  "switch",
+  "tab",
+  "treeitem",
+]);
+
+const CONTENT_ROLES = new Set([
+  "heading",
+  "img",
+  "image",
+  "paragraph",
+  "text",
+  "statictext",
+  "listitem",
+  "cell",
+  "rowheader",
+  "columnheader",
+]);
+
+const STRUCTURAL_ROLES = new Set([
+  "generic",
+  "none",
+  "presentation",
+  "document",
+  "group",
+  "section",
+  "region",
+  "main",
+  "navigation",
+  "banner",
+  "contentinfo",
+  "complementary",
+  "list",
+  "table",
+  "row",
+]);
 
 function usage() {
   return `realbrowser
@@ -38,7 +96,8 @@ Usage:
   realbrowser tab <pageId> [--front]
   realbrowser focus <pageId>
   realbrowser close|closetab <pageId>
-  realbrowser snapshot|accessibility [--page <id>] [--verbose] [--annotate|-a] [--output <path>] [--json]
+  realbrowser observe [--screenshot] [--limit <n>] [--max-chars <n>] [--page <id>] [--json]
+  realbrowser snapshot|accessibility [--page <id>] [--efficient] [--interactive] [--compact] [--depth <n>] [--max-chars <n>] [--max-nodes <n>] [--labels|--annotate] [--out <path>] [--raw|--verbose] [--json]
   realbrowser click <uid> [--page <id>]
   realbrowser hover <uid> [--page <id>]
   realbrowser drag <fromUid> <toUid> [--page <id>]
@@ -46,6 +105,8 @@ Usage:
   realbrowser fill <uid> <value> [--page <id>]
   realbrowser fill-form '[{"uid":"...","value":"..."}]' [--page <id>]
   realbrowser press <key> [--page <id>]
+  realbrowser click-coords <x> <y> [--page <id>]
+  realbrowser highlight <uid|selector> [--page <id>]
   realbrowser upload <uid> <file> [--page <id>]
   realbrowser wait <text> [more text...] [--timeout <ms>] [--page <id>]
   realbrowser wait --load|--domcontentloaded|--networkidle [--timeout <ms>] [--page <id>]
@@ -54,16 +115,18 @@ Usage:
   realbrowser emulate [--network <name|Offline|reset>] [--cpu <rate>] [--user-agent <ua|reset>] [--color-scheme dark|light|auto] [--geolocation <lat>x<long>] [--page <id>]
   realbrowser useragent <ua|reset> [--page <id>]
   realbrowser cookie <name=value> [--page <id>]
-  realbrowser dialog [list|arm accept|arm dismiss|current accept|current dismiss] [text] [--page <id>]
+  realbrowser dialog [list|arm accept|arm dismiss|--accept|--dismiss|current accept|current dismiss] [text] [--page <id>]
   realbrowser dialog-accept [text] [--page <id>]
   realbrowser dialog-dismiss [--page <id>]
   realbrowser eval|js <js> [--page <id>] [--json]
-  realbrowser text|html|links|forms|cookies|storage|perf|url [selector|uid] [--page <id>]
+  realbrowser text|html|links|forms|cookies|storage|perf|url [selector|uid] [--page <id>] [--max-chars <n>] [--limit <n>] [--out <path>] [--raw]
   realbrowser css <selector|uid> <property> [--page <id>]
   realbrowser attrs <selector|uid> [--page <id>]
   realbrowser is <visible|hidden|enabled|disabled|checked|editable|focused> <selector|uid> [--page <id>]
-  realbrowser console [get <msgid>] [--errors] [--preserve] [--json]
-  realbrowser network [get <reqid>] [--preserve] [--request-file path] [--response-file path] [--json]
+  realbrowser console [get <msgid>] [--errors] [--filter <text>] [--limit <n>] [--clear] [--preserve] [--json]
+  realbrowser network [get <reqid>] [--failed] [--filter <text>] [--limit <n>] [--clear] [--preserve] [--request-file path] [--response-file path] [--json]
+  realbrowser errors [--clear] [--limit <n>] [--page <id>]
+  realbrowser requests [--failed] [--filter <text>] [--clear] [--limit <n>] [--page <id>]
   realbrowser screenshot [path] [--full|--full-page] [--uid <uid>] [--labels|--annotate] [--format png|jpeg|webp] [--quality <0-100>] [--page <id>]
   realbrowser responsive <path-prefix> [--page <id>]
   realbrowser diff <url1> <url2> [--page <id>]
@@ -75,11 +138,15 @@ Usage:
   realbrowser trace analyze <insightSetId> <insightName> [--page <id>]
   realbrowser tool <mcpToolName> [jsonArgs]
   realbrowser tools [--json]
-  realbrowser chain '[["snapshot","--page","1"],["console","--errors","--page","1"]]' [--json]
+  realbrowser chain '[["snapshot","--page","1"],["console","--errors","--page","1"]]' [--return summary|final|all] [--trace <path>] [--json]
   realbrowser stop
 
 Global flags:
   --json
+  --quiet
+  --verbose
+  --raw
+  --mode compact|normal|verbose|raw
   --state-file <path>
   --backend real|dev
   --browser-url <url>
@@ -93,8 +160,76 @@ function parseArgv(argv) {
   const flags = { json: false, deep: false, full: false, verbose: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === "--json") {
+    if (arg === "--") {
+      args.push(...argv.slice(index + 1));
+      break;
+    } else if (arg === "--json") {
       flags.json = true;
+    } else if (arg === "-q" || arg === "--quiet") {
+      flags.quiet = true;
+    } else if (arg === "--raw") {
+      flags.raw = true;
+    } else if (arg === "--efficient") {
+      flags.efficient = true;
+      flags.mode = "efficient";
+    } else if (arg === "--compact") {
+      flags.compact = true;
+    } else if (arg === "-i" || arg === "--interactive") {
+      flags.interactive = true;
+    } else if (arg === "-d" || arg === "--depth") {
+      flags.depth = argv[++index];
+    } else if (arg?.startsWith("--depth=")) {
+      flags.depth = arg.slice("--depth=".length);
+    } else if (arg === "--max-chars") {
+      flags.maxChars = argv[++index];
+    } else if (arg?.startsWith("--max-chars=")) {
+      flags.maxChars = arg.slice("--max-chars=".length);
+    } else if (arg === "--max-nodes") {
+      flags.maxNodes = argv[++index];
+    } else if (arg?.startsWith("--max-nodes=")) {
+      flags.maxNodes = arg.slice("--max-nodes=".length);
+    } else if (arg === "--limit") {
+      flags.limit = argv[++index];
+    } else if (arg?.startsWith("--limit=")) {
+      flags.limit = arg.slice("--limit=".length);
+    } else if (arg === "--filter") {
+      flags.filter = argv[++index];
+    } else if (arg?.startsWith("--filter=")) {
+      flags.filter = arg.slice("--filter=".length);
+    } else if (arg === "--clear") {
+      flags.clear = true;
+    } else if (arg === "--failed") {
+      flags.failed = true;
+    } else if (arg === "--screenshot") {
+      flags.screenshot = true;
+    } else if (arg === "--no-screenshot") {
+      flags.screenshot = false;
+    } else if (arg === "--return") {
+      flags.return = argv[++index];
+    } else if (arg?.startsWith("--return=")) {
+      flags.return = arg.slice("--return=".length);
+    } else if (arg === "--trace") {
+      flags.trace = argv[++index];
+    } else if (arg?.startsWith("--trace=")) {
+      flags.trace = arg.slice("--trace=".length);
+    } else if (arg === "--mode") {
+      flags.mode = argv[++index];
+      if (flags.mode === "efficient") {
+        flags.efficient = true;
+      } else if (flags.mode === "raw") {
+        flags.raw = true;
+      } else if (flags.mode === "verbose") {
+        flags.verbose = true;
+      }
+    } else if (arg?.startsWith("--mode=")) {
+      flags.mode = arg.slice("--mode=".length);
+      if (flags.mode === "efficient") {
+        flags.efficient = true;
+      } else if (flags.mode === "raw") {
+        flags.raw = true;
+      } else if (flags.mode === "verbose") {
+        flags.verbose = true;
+      }
     } else if (arg === "-a" || arg === "--annotate") {
       flags.annotate = true;
       flags.labels = true;
@@ -114,6 +249,10 @@ function parseArgv(argv) {
       flags.output = argv[++index];
     } else if (arg?.startsWith("--output=")) {
       flags.output = arg.slice("--output=".length);
+    } else if (arg === "--out") {
+      flags.out = argv[++index];
+    } else if (arg?.startsWith("--out=")) {
+      flags.out = arg.slice("--out=".length);
     } else if (arg === "--max-labels") {
       flags.maxLabels = argv[++index];
     } else if (arg?.startsWith("--max-labels=")) {
@@ -211,6 +350,12 @@ function parseArgv(argv) {
     } else {
       args.push(arg);
     }
+  }
+  const envOutput = process.env.REALBROWSER_OUTPUT;
+  if (!flags.raw && !flags.verbose && !flags.quiet && envOutput) {
+    if (envOutput === "raw") flags.raw = true;
+    if (envOutput === "verbose") flags.verbose = true;
+    if (envOutput === "quiet") flags.quiet = true;
   }
   return { command: args[0] ?? "help", args: args.slice(1), flags };
 }
@@ -429,8 +574,16 @@ async function daemonRpc(state, payload) {
   });
 }
 
-function printResult(value, json = false) {
-  if (json) {
+function printResult(value, flagsOrJson = false) {
+  const flags = typeof flagsOrJson === "boolean" ? { json: flagsOrJson } : (flagsOrJson ?? {});
+  if (flags.quiet) {
+    const quiet = value?.quiet ?? value?.path ?? value?.filePath ?? value?.text;
+    if (quiet) {
+      console.log(String(quiet));
+    }
+    return;
+  }
+  if (flags.json) {
     console.log(JSON.stringify(value, null, 2));
     return;
   }
@@ -452,6 +605,10 @@ async function runCli() {
     console.log(usage());
     return;
   }
+  if (command === "self-test") {
+    runSelfTest();
+    return;
+  }
   if (command === "daemon") {
     await runDaemon();
     return;
@@ -470,7 +627,7 @@ async function runCli() {
 
   const state = await ensureDaemon(flags);
   const response = await daemonRpc(state, { command, args, flags });
-  printResult(response, flags.json);
+  printResult(response, flags);
 }
 
 class McpClient {
@@ -484,7 +641,7 @@ class McpClient {
 
   start() {
     const args = buildMcpArgs(this.config);
-    this.proc = spawn("npx", args, {
+    this.proc = spawn(NPX_COMMAND, args, {
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
       env: {
@@ -755,6 +912,8 @@ class BrowserDaemon {
     this.profileDir = process.env.REALBROWSER_PROFILE_DIR ?? DEFAULT_PROFILE_DIR;
     this.mcp = null;
     this.tools = null;
+    this.hiddenConsoleLines = new Set();
+    this.hiddenNetworkLines = new Set();
   }
 
   async ensureMcp() {
@@ -884,6 +1043,8 @@ class BrowserDaemon {
       case "snapshot":
       case "accessibility":
         return await this.handleSnapshot(args, flags);
+      case "observe":
+        return await this.handleObserve(args, flags);
       case "click":
         requireArgs(command, args, 1);
         return await this.callTool("click", { ...this.pageArgs(flags), uid: args[0] });
@@ -923,6 +1084,12 @@ class BrowserDaemon {
           ...this.pageArgs(flags),
           key: args.join(" "),
         });
+      case "click-coords":
+        requireArgs(command, args, 2);
+        return await this.handleClickCoords(args, flags);
+      case "highlight":
+        requireArgs(command, args, 1);
+        return await this.handleHighlight(args, flags);
       case "upload":
         requireArgs(command, args, 2);
         return await this.callTool("upload_file", {
@@ -973,6 +1140,10 @@ class BrowserDaemon {
         return await this.handleConsole(args, flags);
       case "network":
         return await this.handleNetwork(args, flags);
+      case "errors":
+        return await this.handleConsole(args, { ...flags, errors: true });
+      case "requests":
+        return await this.handleNetwork(args, flags);
       case "screenshot":
         return await this.handleScreenshot(args, flags);
       case "responsive":
@@ -1010,7 +1181,7 @@ class BrowserDaemon {
       },
       runtime: {
         node: process.version,
-        npx: await commandVersion("npx", ["--version"]),
+        npx: await commandVersion(NPX_COMMAND, ["--version"]),
         chromeDevtoolsMcp: PACKAGE_SPEC,
       },
       tools: tools.map((tool) => tool.name).sort(),
@@ -1059,6 +1230,8 @@ class BrowserDaemon {
     if (!Array.isArray(steps)) {
       throw new Error("chain expects a JSON array of command arrays");
     }
+    const returnMode = normalizeReturnMode(flags.return ?? (flags.summary ? "summary" : "summary"));
+    const stepMaxChars = parsePositiveInteger(flags.maxChars ?? String(DEFAULT_CHAIN_STEP_MAX_CHARS), "max-chars");
     const results = [];
     for (const [index, step] of steps.entries()) {
       if (!Array.isArray(step) || step.length === 0) {
@@ -1068,7 +1241,13 @@ class BrowserDaemon {
       const parsed = parseArgv(step.map((value) => String(value)));
       try {
         const result = await this.handle(parsed.command, parsed.args, { ...flags, ...parsed.flags });
-        results.push({ index, command: parsed.command, ok: true, result });
+        results.push({
+          index,
+          command: parsed.command,
+          ok: true,
+          result,
+          summary: summarizeResult(parsed.command, result, stepMaxChars),
+        });
       } catch (error) {
         results.push({
           index,
@@ -1078,8 +1257,42 @@ class BrowserDaemon {
         });
       }
     }
+    if (flags.trace) {
+      await writeTextFile(flags.trace, `${JSON.stringify(results, null, 2)}\n`);
+    }
     if (flags.json) {
-      return { results };
+      if (flags.raw || returnMode === "all") {
+        return { results, trace: flags.trace };
+      }
+      return {
+        ok: results.every((entry) => entry.ok),
+        returnMode,
+        trace: flags.trace,
+        results: results.map((entry) =>
+          entry.ok
+            ? { index: entry.index, command: entry.command, ok: true, summary: entry.summary }
+            : { index: entry.index, command: entry.command, ok: false, error: entry.error },
+        ),
+      };
+    }
+    const final = [...results].reverse().find((entry) => entry.ok);
+    if (returnMode === "final" && final) {
+      return {
+        text: resultText(final.result, stepMaxChars),
+        chain: { ok: results.every((entry) => entry.ok), trace: flags.trace },
+      };
+    }
+    if (returnMode === "all") {
+      return {
+        text: results
+          .map((entry) => {
+            if (!entry.ok) {
+              return `[${entry.index}] ${entry.command ?? "?"}: ERROR ${entry.error}`;
+            }
+            return `[${entry.index}] ${entry.command}: ${resultText(entry.result, stepMaxChars)}`;
+          })
+          .join("\n\n"),
+      };
     }
     return {
       text: results
@@ -1087,35 +1300,133 @@ class BrowserDaemon {
           if (!entry.ok) {
             return `[${entry.index}] ${entry.command ?? "?"}: ERROR ${entry.error}`;
           }
-          const text =
-            typeof entry.result === "string"
-              ? entry.result
-              : entry.result?.text
-                ? entry.result.text
-                : JSON.stringify(entry.result);
-          return `[${entry.index}] ${entry.command}: ${text}`;
+          return `[${entry.index}] ${entry.command}: ${entry.summary}`;
         })
-        .join("\n\n"),
+        .concat(flags.trace ? [`trace: ${flags.trace}`] : [])
+        .join("\n"),
     };
   }
 
   async handleSnapshot(args, flags = {}) {
     const snapshot = await this.callTool("take_snapshot", {
       ...this.pageArgs(flags),
-      verbose: Boolean(flags.verbose),
+      verbose: Boolean(flags.verbose || flags.raw),
     });
-    if (!flags.labels && !flags.annotate) {
+    if (flags.raw) {
       return snapshot;
     }
+    const built = buildCompactSnapshot(snapshot.structuredContent?.snapshot, snapshot.text, flags);
+    const outPath = flags.out ?? (!flags.labels && !flags.annotate ? flags.output : undefined);
+    if (outPath) {
+      await writeTextFile(outPath, `${built.text}\n`);
+    }
     const explicitPath = flags.output ?? args.find((arg) => !arg.startsWith("-"));
-    const annotated = await this.annotatedScreenshotFromSnapshot(snapshot, explicitPath, flags);
+    let annotated;
+    if (flags.labels || flags.annotate) {
+      annotated = await this.annotatedScreenshotFromSnapshot(snapshot, explicitPath, flags);
+    }
+    const lines = [];
+    if (!flags.quiet) {
+      lines.push(built.text);
+    }
+    if (outPath) {
+      lines.push(`snapshot: ${outPath}`);
+    }
+    if (annotated) {
+      lines.push(`MEDIA:${annotated.filePath}`);
+      lines.push(`labels: ${annotated.labels} skipped=${annotated.skipped}`);
+    }
+    lines.push(
+      `stats: lines=${built.stats.lines} chars=${built.stats.chars} refs=${built.stats.refs} interactive=${built.stats.interactive}${built.truncated ? " truncated=true" : ""}`,
+    );
     return {
-      text: `${snapshot.text}\n[annotated screenshot: ${annotated.filePath} labels=${annotated.labels} skipped=${annotated.skipped}]`,
+      text: lines.filter(Boolean).join("\n"),
       structuredContent: {
         ...snapshot.structuredContent,
-        annotatedScreenshot: annotated,
+        snapshotText: built.text,
+        refs: built.refs,
+        stats: built.stats,
+        truncated: built.truncated,
+        ...(outPath ? { out: outPath } : {}),
+        ...(annotated ? { annotatedScreenshot: annotated } : {}),
       },
-      raw: snapshot.raw,
+    };
+  }
+
+  async handleObserve(args, flags = {}) {
+    const limit = parsePositiveInteger(flags.limit ?? String(DEFAULT_OBSERVE_LIMIT), "limit");
+    const maxChars = parsePositiveInteger(flags.maxChars ?? String(DEFAULT_OBSERVE_TEXT_CHARS), "max-chars");
+    const selector = args[0] && !args[0].startsWith("-") ? args[0] : undefined;
+    const pageInfoResult = await this.evaluateFunction(
+      observePageFunction({ limit, maxChars, selector }),
+      flags,
+    );
+    const pageInfo = extractJsonFromToolText(pageInfoResult.text) ?? {};
+    const [consoleResult, networkResult] = await Promise.all([
+      this.handleConsole([], { ...flags, errors: true, limit: "5" }).catch((error) => ({
+        text: `console unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      })),
+      this.handleNetwork([], { ...flags, failed: true, limit: "5" }).catch((error) => ({
+        text: `network unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      })),
+    ]);
+    let screenshot;
+    if (flags.screenshot) {
+      screenshot = await this.handleScreenshot([], flags).catch((error) => ({
+        text: `screenshot unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      }));
+    }
+    if (flags.json) {
+      return {
+        page: pageInfo,
+        console: consoleResult.structuredContent ?? consoleResult.text,
+        network: networkResult.structuredContent ?? networkResult.text,
+        screenshot: screenshot?.filePath ?? screenshot?.text,
+      };
+    }
+    const lines = [];
+    lines.push(`${pageInfo.title || "(untitled)"}`);
+    lines.push(`${pageInfo.url || ""}`);
+    if (pageInfo.readyState) {
+      lines.push(`readyState: ${pageInfo.readyState}`);
+    }
+    if (Array.isArray(pageInfo.headings) && pageInfo.headings.length) {
+      lines.push("");
+      lines.push("Headings:");
+      lines.push(...pageInfo.headings.map((heading) => `- h${heading.level ?? "?"} ${heading.text}`));
+    }
+    if (Array.isArray(pageInfo.interactive) && pageInfo.interactive.length) {
+      lines.push("");
+      lines.push("Interactive:");
+      lines.push(...pageInfo.interactive.map(formatObservedElement));
+    }
+    if (Array.isArray(pageInfo.fields) && pageInfo.fields.length) {
+      lines.push("");
+      lines.push("Fields:");
+      lines.push(...pageInfo.fields.map(formatObservedElement));
+    }
+    if (pageInfo.textSample) {
+      lines.push("");
+      lines.push("Text:");
+      lines.push(pageInfo.textSample);
+    }
+    if (consoleResult.text) {
+      lines.push("");
+      lines.push("Console errors:");
+      lines.push(consoleResult.text);
+    }
+    if (networkResult.text) {
+      lines.push("");
+      lines.push("Failed/recent network:");
+      lines.push(networkResult.text);
+    }
+    if (screenshot?.text) {
+      lines.push("");
+      lines.push(screenshot.text);
+    }
+    return {
+      text: lines.filter((line) => line !== undefined).join("\n"),
+      structuredContent: { page: pageInfo },
     };
   }
 
@@ -1138,6 +1449,7 @@ class BrowserDaemon {
         filePath,
         labels: labelResult.labels,
         skipped: labelResult.skipped,
+        text: `MEDIA:${filePath}\nlabels: ${labelResult.labels} skipped=${labelResult.skipped}`,
         screenshot: screenshot.text,
       };
     } finally {
@@ -1234,25 +1546,33 @@ class BrowserDaemon {
   async handleConsole(args, flags = {}) {
     if (args[0] === "get") {
       requireArgs("console get", args, 2);
-      return await this.callTool("get_console_message", {
+      const result = await this.callTool("get_console_message", {
         ...this.pageArgs(flags),
         msgid: Number.parseInt(args[1], 10),
       });
+      return flags.raw ? result : compactTextResult(result, flags, DEFAULT_READ_MAX_CHARS);
     }
-    return await this.callTool("list_console_messages", {
+    const result = await this.callTool("list_console_messages", {
       ...this.pageArgs(flags),
       ...(flags.errors ? { types: ["error", "warn"] } : {}),
       ...(flags.preserve ? { includePreservedMessages: true } : {}),
+    });
+    return compactLineResult(result, {
+      flags,
+      hiddenSet: this.hiddenConsoleLines,
+      emptyText: flags.errors ? "(no console errors)" : "(no console messages)",
+      lineLimit: DEFAULT_LINE_LIMIT,
     });
   }
 
   async handleEval(args, flags = {}) {
     const pageId = await this.resolvePageId(flags);
-    return await this.callTool("evaluate_script", {
+    const result = await this.callTool("evaluate_script", {
       function: buildEvalFunction(args.join(" ")),
       pageId,
       ...(flags.uid ? { args: [flags.uid] } : {}),
     });
+    return flags.raw ? result : compactTextResult(result, flags, DEFAULT_READ_MAX_CHARS);
   }
 
   async resolvePageId(flags = {}) {
@@ -1274,26 +1594,38 @@ class BrowserDaemon {
   async handleNetwork(args, flags = {}) {
     if (args[0] === "get") {
       const reqid = args[1] === undefined ? undefined : Number.parseInt(args[1], 10);
-      return await this.callTool("get_network_request", {
+      const result = await this.callTool("get_network_request", {
         ...this.pageArgs(flags),
         ...(Number.isFinite(reqid) ? { reqid } : {}),
         ...(flags.requestFile ? { requestFilePath: flags.requestFile } : {}),
         ...(flags.responseFile ? { responseFilePath: flags.responseFile } : {}),
       });
+      return flags.raw ? result : compactTextResult(result, flags, DEFAULT_READ_MAX_CHARS);
     }
-    return await this.callTool("list_network_requests", {
+    const result = await this.callTool("list_network_requests", {
       ...this.pageArgs(flags),
       ...(flags.preserve ? { includePreservedRequests: true } : {}),
+    });
+    return compactLineResult(result, {
+      flags,
+      hiddenSet: this.hiddenNetworkLines,
+      emptyText: "(no network requests)",
+      lineLimit: DEFAULT_LINE_LIMIT,
+      linePredicate: flags.failed ? isFailedNetworkLine : undefined,
     });
   }
 
   async handleRead(command, args, flags = {}) {
     const target = args[0];
+    const rawResult = async (fn, selectorOrUid = undefined) => {
+      const result = await this.evaluateFunction(fn, flags, selectorOrUid);
+      return flags.raw ? result : await formatReadResult(command, result, flags);
+    };
     switch (command) {
       case "url":
-        return await this.evaluateFunction("() => location.href", flags);
+        return await rawResult("() => location.href");
       case "text":
-        return await this.evaluateFunction(
+        return await rawResult(
           target
             ? selectorOrUidFunction(target, "(el) => el.innerText || el.textContent || ''")
             : `() => {
@@ -1302,24 +1634,21 @@ class BrowserDaemon {
                 clone.querySelectorAll("script,style,noscript,svg").forEach((el) => el.remove());
                 return clone.innerText.split("\\n").map((line) => line.trim()).filter(Boolean).join("\\n");
               }`,
-          flags,
           target,
         );
       case "html":
-        return await this.evaluateFunction(
+        return await rawResult(
           target ? selectorOrUidFunction(target, "(el) => el.innerHTML") : "() => document.documentElement.outerHTML",
-          flags,
           target,
         );
       case "links":
-        return await this.evaluateFunction(
+        return await rawResult(
           `() => [...document.querySelectorAll("a[href]")]
             .map((a) => ({ text: (a.textContent || "").trim().slice(0, 120), href: a.href }))
             .filter((link) => link.text && link.href)`,
-          flags,
         );
       case "forms":
-        return await this.evaluateFunction(
+        return await rawResult(
           `() => [...document.querySelectorAll("form")].map((form, index) => ({
             index,
             action: form.action || undefined,
@@ -1338,10 +1667,9 @@ class BrowserDaemon {
                 : undefined,
             })),
           }))`,
-          flags,
         );
       case "cookies":
-        return await this.evaluateFunction(
+        return await rawResult(
           `() => document.cookie.split(";").map((part) => part.trim()).filter(Boolean).map((part) => {
             const index = part.indexOf("=");
             const name = index === -1 ? part : part.slice(0, index);
@@ -1351,15 +1679,13 @@ class BrowserDaemon {
               value: ${flags.values ? "value" : '"[redacted " + value.length + " chars]"'},
             };
           })`,
-          flags,
         );
       case "storage":
-        return await this.evaluateFunction(
+        return await rawResult(
           storageReadFunction(Boolean(flags.values)),
-          flags,
         );
       case "perf":
-        return await this.evaluateFunction(
+        return await rawResult(
           `() => {
             const nav = performance.getEntriesByType("navigation")[0];
             if (!nav) return null;
@@ -1375,30 +1701,26 @@ class BrowserDaemon {
               total: Math.round(nav.loadEventEnd - nav.startTime),
             };
           }`,
-          flags,
         );
       case "css":
         requireArgs(command, args, 2);
-        return await this.evaluateFunction(
+        return await rawResult(
           selectorOrUidFunction(args[0], `(el) => getComputedStyle(el).getPropertyValue(${JSON.stringify(args[1])})`),
-          flags,
           args[0],
         );
       case "attrs":
         requireArgs(command, args, 1);
-        return await this.evaluateFunction(
+        return await rawResult(
           selectorOrUidFunction(
             args[0],
             `(el) => Object.fromEntries([...el.attributes].map((attr) => [attr.name, attr.value]))`,
           ),
-          flags,
           args[0],
         );
       case "is":
         requireArgs(command, args, 2);
-        return await this.evaluateFunction(
+        return await rawResult(
           selectorOrUidFunction(args[1], stateFunctionBody(args[0])),
-          flags,
           args[1],
         );
       default:
@@ -1466,6 +1788,69 @@ class BrowserDaemon {
           el.dispatchEvent(new Event("input", { bubbles: true }));
           el.dispatchEvent(new Event("change", { bubbles: true }));
           return { value: el.value, text: option.textContent?.trim() || option.label || option.value };
+        }`,
+      ),
+      flags,
+      target,
+    );
+  }
+
+  async handleClickCoords(args, flags = {}) {
+    const x = Number.parseFloat(args[0]);
+    const y = Number.parseFloat(args[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      throw new Error("click-coords expects numeric x and y viewport coordinates");
+    }
+    return await this.evaluateFunction(
+      `() => {
+        const x = ${JSON.stringify(x)};
+        const y = ${JSON.stringify(y)};
+        const el = document.elementFromPoint(x, y);
+        if (!el) throw new Error("No element at coordinates " + x + "," + y);
+        const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
+        el.dispatchEvent(new PointerEvent("pointerdown", opts));
+        el.dispatchEvent(new MouseEvent("mousedown", opts));
+        el.dispatchEvent(new PointerEvent("pointerup", opts));
+        el.dispatchEvent(new MouseEvent("mouseup", opts));
+        el.dispatchEvent(new MouseEvent("click", opts));
+        return {
+          clicked: true,
+          tag: el.tagName.toLowerCase(),
+          text: (el.innerText || el.textContent || "").trim().slice(0, 120),
+          id: el.id || undefined,
+        };
+      }`,
+      flags,
+    );
+  }
+
+  async handleHighlight(args, flags = {}) {
+    const target = args[0];
+    return await this.evaluateFunction(
+      selectorOrUidFunction(
+        target,
+        `(el) => {
+          document.querySelectorAll("[data-realbrowser-highlight]").forEach((node) => node.remove());
+          const rect = el.getBoundingClientRect();
+          const overlay = document.createElement("div");
+          overlay.setAttribute("data-realbrowser-highlight", "true");
+          overlay.style.position = "fixed";
+          overlay.style.left = rect.left + "px";
+          overlay.style.top = rect.top + "px";
+          overlay.style.width = Math.max(1, rect.width) + "px";
+          overlay.style.height = Math.max(1, rect.height) + "px";
+          overlay.style.border = "3px solid #ff3366";
+          overlay.style.background = "rgba(255,51,102,0.12)";
+          overlay.style.pointerEvents = "none";
+          overlay.style.zIndex = "2147483647";
+          document.documentElement.appendChild(overlay);
+          setTimeout(() => overlay.remove(), 3000);
+          return {
+            highlighted: true,
+            tag: el.tagName.toLowerCase(),
+            text: (el.innerText || el.textContent || "").trim().slice(0, 120),
+            id: el.id || undefined,
+          };
         }`,
       ),
       flags,
@@ -1548,6 +1933,9 @@ class BrowserDaemon {
         `() => window.__realbrowserDialogHook?.log ?? []`,
         flags,
       );
+    }
+    if (args[0] === "--accept" || args[0] === "--dismiss") {
+      return await this.armDialog(args[0] === "--accept" ? "accept" : "dismiss", args.slice(1), flags);
     }
     if (args[0] === "arm") {
       const action = args[1];
@@ -1796,7 +2184,7 @@ class BrowserDaemon {
   async handleHandoff(args, flags = {}) {
     const pageId = args[0] !== undefined ? parsePageId(args[0]) : await this.resolvePageId(flags);
     await this.selectPage(pageId, true);
-    const snapshot = await this.callTool("take_snapshot", { pageId, verbose: Boolean(flags.verbose) });
+    const snapshot = await this.handleSnapshot([], { ...flags, page: String(pageId) });
     return {
       text: `Focused page ${pageId}\n\n${snapshot.text}`,
       structuredContent: snapshot.structuredContent,
@@ -1805,7 +2193,7 @@ class BrowserDaemon {
 
   async handleResume(args, flags = {}) {
     const pageId = args[0] !== undefined ? parsePageId(args[0]) : await this.resolvePageId(flags);
-    return await this.callTool("take_snapshot", { pageId, verbose: Boolean(flags.verbose) });
+    return await this.handleSnapshot([], { ...flags, page: String(pageId) });
   }
 
   async handleTrace(args, flags = {}) {
@@ -1826,6 +2214,399 @@ class BrowserDaemon {
     }
     throw new Error("trace expects start, stop, or analyze <insightName>");
   }
+}
+
+function normalizeReturnMode(value) {
+  if (value === "final" || value === "all" || value === "summary") {
+    return value;
+  }
+  return "summary";
+}
+
+function resultText(result, maxChars = DEFAULT_READ_MAX_CHARS) {
+  const text =
+    typeof result === "string"
+      ? result
+      : result?.text
+        ? result.text
+        : JSON.stringify(result);
+  return truncateText(String(text), maxChars).text;
+}
+
+function summarizeResult(command, result, maxChars) {
+  const text = resultText(result, maxChars).replace(/\s+/g, " ").trim();
+  const stats = result?.structuredContent?.stats ?? result?.stats;
+  const suffix = stats
+    ? ` (${Object.entries(stats)
+        .filter(([, value]) => typeof value === "number" || typeof value === "boolean")
+        .map(([key, value]) => `${key}=${value}`)
+        .join(" ")})`
+    : "";
+  if (!text) {
+    return `ok${suffix}`;
+  }
+  return `${truncateText(text, Math.min(maxChars, 500)).text}${suffix}`;
+}
+
+function normalizeRole(node = {}) {
+  return String(node.role || "generic").trim().toLowerCase() || "generic";
+}
+
+function normalizeOptionalString(value) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const text = String(value).trim();
+  return text || undefined;
+}
+
+function escapeQuoted(value) {
+  return String(value).replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+function shouldIncludeSnapshotNode({ role, name, value, description, flags }) {
+  if (flags.interactive && !INTERACTIVE_ROLES.has(role)) {
+    return false;
+  }
+  if (flags.compact && STRUCTURAL_ROLES.has(role) && !name && !value && !description) {
+    return false;
+  }
+  return true;
+}
+
+function shouldCountSnapshotRef(role, name) {
+  return INTERACTIVE_ROLES.has(role) || (CONTENT_ROLES.has(role) && Boolean(name));
+}
+
+function buildCompactSnapshot(root, fallbackText, flags = {}) {
+  const efficient = flags.efficient || flags.mode === "efficient";
+  const snapshotFlags = {
+    ...flags,
+    interactive: flags.interactive || efficient,
+    compact: flags.compact || efficient,
+  };
+  const maxDepth =
+    flags.depth !== undefined
+      ? parsePositiveInteger(flags.depth, "depth")
+      : efficient
+        ? 6
+        : undefined;
+  const maxNodes = parsePositiveInteger(flags.maxNodes ?? flags.limit ?? "500", "max-nodes");
+  const maxChars = parsePositiveInteger(
+    flags.maxChars ?? (flags.verbose ? "40000" : String(DEFAULT_SNAPSHOT_MAX_CHARS)),
+    "max-chars",
+  );
+  if (!root || typeof root !== "object") {
+    const truncated = truncateText(String(fallbackText ?? ""), maxChars);
+    return {
+      text: truncated.text || "(no snapshot)",
+      truncated: truncated.truncated,
+      refs: {},
+      stats: {
+        lines: truncated.text ? truncated.text.split("\n").length : 0,
+        chars: truncated.text.length,
+        refs: 0,
+        interactive: 0,
+      },
+    };
+  }
+
+  const lines = [];
+  const refs = {};
+  let totalRefs = 0;
+  let interactiveRefs = 0;
+  let visited = 0;
+  let stoppedByNodes = false;
+
+  const visit = (node, depth) => {
+    if (stoppedByNodes) {
+      return;
+    }
+    if (maxDepth !== undefined && depth > maxDepth) {
+      return;
+    }
+    const role = normalizeRole(node);
+    const name = normalizeOptionalString(node.name);
+    const value = normalizeOptionalString(node.value);
+    const description = normalizeOptionalString(node.description);
+    const uid = normalizeOptionalString(node.id);
+    const includeNode = shouldIncludeSnapshotNode({
+      role,
+      name,
+      value,
+      description,
+      flags: snapshotFlags,
+    });
+    if (includeNode) {
+      if (visited >= maxNodes) {
+        stoppedByNodes = true;
+        return;
+      }
+      visited += 1;
+      let line = `${"  ".repeat(Math.min(depth, 20))}- ${role}`;
+      if (name) line += ` "${escapeQuoted(name)}"`;
+      if (uid && shouldCountSnapshotRef(role, name)) {
+        refs[uid] = { role, name: name ?? "" };
+        totalRefs += 1;
+        if (INTERACTIVE_ROLES.has(role)) {
+          interactiveRefs += 1;
+        }
+        line += ` [uid=${uid}]`;
+      }
+      if (value) line += ` value="${escapeQuoted(value)}"`;
+      if (description) line += ` description="${escapeQuoted(description)}"`;
+      lines.push(line);
+    }
+    for (const child of node.children ?? []) {
+      visit(child, depth + 1);
+      if (stoppedByNodes) {
+        return;
+      }
+    }
+  };
+
+  visit(root, 0);
+  let text = lines.join("\n") || "(no matching snapshot nodes)";
+  const truncated = truncateText(text, maxChars);
+  text = truncated.text;
+  const isTruncated = truncated.truncated || stoppedByNodes;
+  if (stoppedByNodes && !text.includes("[...TRUNCATED")) {
+    text = `${text}\n\n[...TRUNCATED - max nodes reached]`;
+  }
+  return {
+    text,
+    truncated: isTruncated,
+    refs,
+    stats: {
+      lines: text ? text.split("\n").length : 0,
+      chars: text.length,
+      refs: totalRefs,
+      interactive: interactiveRefs,
+    },
+  };
+}
+
+async function formatReadResult(command, result, flags = {}) {
+  const value = extractJsonFromToolText(result.text);
+  const rawValue = value ?? result.text ?? "";
+  const limit = parsePositiveInteger(flags.limit ?? defaultLimitForReadCommand(command), "limit");
+  const maxChars = parsePositiveInteger(
+    flags.maxChars ?? (flags.verbose ? "40000" : String(DEFAULT_READ_MAX_CHARS)),
+    "max-chars",
+  );
+  let fullText;
+  let displayedValue = rawValue;
+  if (Array.isArray(rawValue)) {
+    displayedValue = rawValue.slice(0, limit);
+    fullText = formatValue(displayedValue);
+  } else if (rawValue && typeof rawValue === "object") {
+    fullText = formatValue(rawValue);
+  } else {
+    fullText = String(rawValue ?? "");
+  }
+  const outPath = flags.out ?? flags.output;
+  if (outPath) {
+    await writeTextFile(outPath, `${Array.isArray(rawValue) || typeof rawValue === "object" ? formatValue(rawValue) : String(rawValue)}\n`);
+  }
+  const truncated = truncateText(fullText, maxChars);
+  const suffix = [];
+  if (Array.isArray(rawValue) && rawValue.length > limit) {
+    suffix.push(`[...${rawValue.length - limit} more items - use --limit or --out]`);
+  }
+  if (truncated.truncated) {
+    suffix.push(`[...TRUNCATED - use --max-chars or --out]`);
+  }
+  if (outPath) {
+    suffix.push(`out: ${outPath}`);
+  }
+  return {
+    text: [truncated.text, ...suffix].filter(Boolean).join("\n"),
+    structuredContent: {
+      command,
+      count: Array.isArray(rawValue) ? rawValue.length : undefined,
+      shown: Array.isArray(displayedValue) ? displayedValue.length : undefined,
+      truncated: truncated.truncated || (Array.isArray(rawValue) && rawValue.length > limit),
+      ...(outPath ? { out: outPath } : {}),
+    },
+  };
+}
+
+function defaultLimitForReadCommand(command) {
+  switch (command) {
+    case "links":
+      return "100";
+    case "forms":
+      return "20";
+    default:
+      return String(DEFAULT_LINE_LIMIT);
+  }
+}
+
+function compactTextResult(result, flags = {}, defaultMaxChars = DEFAULT_READ_MAX_CHARS) {
+  const maxChars = parsePositiveInteger(flags.maxChars ?? String(defaultMaxChars), "max-chars");
+  const truncated = truncateText(result.text ?? "", maxChars);
+  return {
+    text: truncated.text,
+    structuredContent: {
+      truncated: truncated.truncated,
+      chars: truncated.text.length,
+    },
+  };
+}
+
+function compactLineResult(result, options) {
+  if (options.flags.raw) {
+    return result;
+  }
+  const limit = parsePositiveInteger(options.flags.limit ?? String(options.lineLimit), "limit");
+  const filter = normalizeOptionalString(options.flags.filter)?.toLowerCase();
+  const rawLines = String(result.text ?? "")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter(Boolean);
+  let lines = rawLines.filter((line) => !options.hiddenSet?.has(line));
+  if (filter) {
+    lines = lines.filter((line) => line.toLowerCase().includes(filter));
+  }
+  if (options.linePredicate) {
+    lines = lines.filter(options.linePredicate);
+  }
+  const total = lines.length;
+  const shown = lines.slice(Math.max(0, total - limit));
+  if (options.flags.clear && options.hiddenSet) {
+    for (const line of rawLines) {
+      options.hiddenSet.add(line);
+    }
+  }
+  const text =
+    shown.length > 0
+      ? shown.join("\n")
+      : options.emptyText;
+  const suffix = [];
+  if (total > shown.length) {
+    suffix.push(`[...${total - shown.length} earlier lines hidden - use --limit]`);
+  }
+  if (options.flags.clear) {
+    suffix.push(`[cleared ${rawLines.length} buffered lines for this daemon]`);
+  }
+  return {
+    text: [text, ...suffix].filter(Boolean).join("\n"),
+    structuredContent: {
+      total,
+      shown: shown.length,
+      hidden: Math.max(0, total - shown.length),
+      cleared: Boolean(options.flags.clear),
+    },
+  };
+}
+
+function isFailedNetworkLine(line) {
+  if (/\bfail(?:ed|ure)?\b/i.test(line)) {
+    return true;
+  }
+  const status = line.match(/\b([45]\d\d)\b/);
+  return Boolean(status);
+}
+
+function formatValue(value) {
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function truncateText(text, maxChars) {
+  const value = String(text ?? "");
+  if (!maxChars || value.length <= maxChars) {
+    return { text: value, truncated: false };
+  }
+  return {
+    text: `${value.slice(0, maxChars)}\n\n[...TRUNCATED ${value.length - maxChars} chars]`,
+    truncated: true,
+  };
+}
+
+async function writeTextFile(filePath, text) {
+  const resolved = path.resolve(filePath);
+  await fsp.mkdir(path.dirname(resolved), { recursive: true });
+  await fsp.writeFile(resolved, text, "utf8");
+}
+
+function formatObservedElement(element) {
+  const parts = [];
+  if (element.role) parts.push(`[${element.role}]`);
+  if (element.tag) parts.push(element.tag);
+  if (element.text) parts.push(`"${element.text}"`);
+  if (element.name) parts.push(`name=${element.name}`);
+  if (element.id) parts.push(`#${element.id}`);
+  if (element.href) parts.push(`-> ${element.href}`);
+  return `- ${parts.join(" ") || "(element)"}`;
+}
+
+function observePageFunction({ limit, maxChars, selector }) {
+  return `() => {
+    const root = ${selector ? `document.querySelector(${JSON.stringify(selector)})` : "document.body || document.documentElement"};
+    if (!root) throw new Error(${JSON.stringify(`Element not found: ${selector}`)});
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const cleanText = (value, max = 120) => String(value || "").replace(/\\s+/g, " ").trim().slice(0, max);
+    const describe = (el) => ({
+      tag: el.tagName.toLowerCase(),
+      role: el.getAttribute("role") || (
+        el.matches("a[href]") ? "link" :
+        el.matches("button,[type=button],[type=submit],[type=reset]") ? "button" :
+        el.matches("input,textarea") ? "textbox" :
+        el.matches("select") ? "combobox" : undefined
+      ),
+      text: cleanText(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title")),
+      name: el.getAttribute("name") || undefined,
+      id: el.id || undefined,
+      href: el.href || undefined,
+      type: el.getAttribute("type") || undefined,
+      placeholder: el.getAttribute("placeholder") || undefined,
+      required: el.hasAttribute("required") || undefined,
+    });
+    const interactiveSelector = [
+      "a[href]",
+      "button",
+      "input",
+      "select",
+      "textarea",
+      "[role=button]",
+      "[role=link]",
+      "[role=menuitem]",
+      "[role=tab]",
+      "[role=checkbox]",
+      "[role=radio]",
+      "[onclick]",
+      "[tabindex]"
+    ].join(",");
+    const fields = [...root.querySelectorAll("input, select, textarea")]
+      .filter(visible)
+      .slice(0, ${limit})
+      .map(describe);
+    const interactive = [...root.querySelectorAll(interactiveSelector)]
+      .filter(visible)
+      .slice(0, ${limit})
+      .map(describe);
+    const headings = [...root.querySelectorAll("h1,h2,h3,h4,h5,h6")]
+      .filter(visible)
+      .slice(0, 12)
+      .map((el) => ({ level: Number(el.tagName.slice(1)), text: cleanText(el.innerText || el.textContent, 180) }));
+    const clone = root.cloneNode(true);
+    clone.querySelectorAll("script,style,noscript,svg").forEach((el) => el.remove());
+    const textSample = cleanText(clone.innerText || clone.textContent, ${maxChars});
+    return {
+      url: location.href,
+      title: document.title,
+      readyState: document.readyState,
+      viewport: { width: innerWidth, height: innerHeight, scrollX, scrollY },
+      headings,
+      interactive,
+      fields,
+      textSample,
+    };
+  }`;
 }
 
 function parseJsonArg(raw, label) {
@@ -2371,6 +3152,63 @@ function sendJson(res, status, value) {
     "content-length": Buffer.byteLength(body),
   });
   res.end(body);
+}
+
+function runSelfTest() {
+  const sampleSnapshot = {
+    role: "RootWebArea",
+    name: "Demo",
+    id: "1_1",
+    children: [
+      { role: "heading", name: "Inbox", id: "1_2" },
+      { role: "generic", children: [{ role: "button", name: "Compose", id: "1_3" }] },
+      { role: "paragraph", name: "Welcome to the inbox", id: "1_4" },
+    ],
+  };
+  const efficient = buildCompactSnapshot(sampleSnapshot, "", {
+    efficient: true,
+    maxChars: "1000",
+    maxNodes: "10",
+  });
+  assertSelfTest(efficient.text.includes("[uid=1_3]"), "efficient snapshot keeps interactive refs");
+  assertSelfTest(!efficient.text.includes("RootWebArea"), "efficient snapshot compacts structural root");
+  assertSelfTest(efficient.stats.refs === 1, "efficient snapshot stats count interactive refs");
+
+  const truncated = truncateText("abcdef", 3);
+  assertSelfTest(truncated.truncated && truncated.text.includes("abc"), "truncateText truncates");
+
+  const hidden = new Set();
+  const first = compactLineResult(
+    { text: "200 GET /ok\n500 GET /bad\n400 POST /also-bad" },
+    { flags: { failed: true, limit: "1", clear: true }, hiddenSet: hidden, emptyText: "(empty)", lineLimit: 50, linePredicate: isFailedNetworkLine },
+  );
+  assertSelfTest(first.text.includes("400 POST /also-bad"), "line compact returns latest failed request");
+  const second = compactLineResult(
+    { text: "200 GET /ok\n500 GET /bad\n400 POST /also-bad" },
+    { flags: {}, hiddenSet: hidden, emptyText: "(empty)", lineLimit: 50 },
+  );
+  assertSelfTest(second.text.includes("(empty)"), "line clear hides previous lines");
+
+  const windowsPath = String.raw`C:\Users\Tuyen Hx\Pictures\screen shot.png`;
+  const parsedWindowsPath = parseArgv(["screenshot", windowsPath, "--format", "png"]);
+  assertSelfTest(parsedWindowsPath.command === "screenshot", "parser keeps command before Windows path");
+  assertSelfTest(parsedWindowsPath.args[0] === windowsPath, "parser preserves Windows path with spaces");
+  assertSelfTest(parsedWindowsPath.flags.format === "png", "parser handles flags after Windows path");
+
+  const parsedLiteralFlag = parseArgv(["type", "--", "--raw", "literal text"]);
+  assertSelfTest(parsedLiteralFlag.command === "type", "parser handles command before -- sentinel");
+  assertSelfTest(parsedLiteralFlag.args.join(" ") === "--raw literal text", "parser preserves literal flag-like arguments after --");
+  assertSelfTest(parsedLiteralFlag.flags.raw !== true, "parser does not parse flags after --");
+
+  const parsedJson = parseArgv(["chain", '[["type","hello world"],["press","Enter"]]']);
+  assertSelfTest(parsedJson.args[0].includes("hello world"), "parser preserves JSON arguments with spaces");
+  console.log("self-test ok");
+}
+
+function assertSelfTest(condition, message) {
+  if (!condition) {
+    throw new Error(`self-test failed: ${message}`);
+  }
 }
 
 runCli().catch((error) => {
