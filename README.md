@@ -15,7 +15,7 @@ The default Codex browser automation path is useful, but it is not enough for we
   DevTools HTTP where possible and one persistent CDP socket per daemon when a
   WebSocket is needed.
 - A dedicated profile fallback at `~/.realbrowser/profile`.
-- Short tab targets for daemon sessions, tab listing/selection, navigation, compact observations, efficient snapshots, clicks, typing, forms, JavaScript evaluation, capped console and network inspection, OpenClaw-style normalized screenshots, annotated labels, pre-armed dialog handling, user-agent emulation, and download interception.
+- Short tab targets for daemon sessions, tab listing/selection, navigation, compact observations, visible text blocks, efficient snapshots, clicks, typing, forms, JavaScript evaluation, capped console and network inspection, OpenClaw-style normalized screenshots, annotated labels, pre-armed dialog handling, user-agent emulation, and download interception.
 
 ## Why Not Just Playwright?
 
@@ -126,6 +126,13 @@ Chrome may show an "Allow remote debugging?" dialog because this grants an exter
 
 To reduce prompts, keep the daemon warm and avoid restarting it during normal browser work. If you need a pre-opened debug endpoint, launch Chrome with a localhost-only DevTools port and use `REALBROWSER_BROWSER_URL=http://127.0.0.1:9222`, but do that only on a trusted machine because a DevTools port can control the browser.
 
+Chrome may expose a profile's browser WebSocket while returning 404 for
+`/json/list`; realbrowser handles that through the approved persistent daemon
+by falling back to `Target.getTargets` over the daemon's CDP socket. It should
+not create transient WebSocket probes in polling loops because those can show
+the approval dialog repeatedly. Keep the approved daemon alive instead of
+repeatedly reattaching.
+
 ## Chrome Controlled Banner
 
 Chrome may also show "Chrome is being controlled by automated test software" while realbrowser or Chrome DevTools MCP is attached, or while Chrome remote debugging remains enabled. This is expected for a real signed-in profile. Realbrowser should not try to hide or suppress this banner because it is Chrome's safety signal that another local process can inspect or control the browser.
@@ -155,6 +162,9 @@ Stopping or detaching realbrowser closes its daemon/MCP connection. If Chrome st
 Realbrowser is designed to keep Codex token use low:
 
 - Use `observe` for the first page read.
+- Use `blocks --limit <n>` for social feeds, search results, and dashboards
+  where full-page text is too noisy.
+- Use `wait <text>` or readiness waits instead of shell sleeps.
 - Use profile/endpoint sessions when possible; cheap operations use one
   persistent direct-CDP socket before MCP. Reuse the endpoint-scoped session for
   a real signed-in browser; pass `--force` only when intentionally creating a
@@ -168,7 +178,13 @@ Realbrowser is designed to keep Codex token use low:
   paths for parallel Codex tabs. Existing handle files are not overwritten
   unless `--force` is passed.
 - Use `errors` and `requests` if you want OpenClaw-style aliases.
-- Use `chain --return summary --trace ~/.realbrowser/trace.json` for multi-step flows.
+- Use `chain --return final` for navigate/wait/read flows and
+  `chain --return summary --trace ~/.realbrowser/trace.json` when intermediate
+  step evidence matters. `chain` records per-step and total durations for speed
+  review.
+- If a running daemon predates the edited skill and a command needs a new
+  capability, reload it explicitly with `--restart-daemon`; for a real Chrome
+  profile this can show one fresh approval prompt.
 - Use `--raw`, `--verbose`, `--max-chars`, or `--out <path>` only when the compact result is not enough.
 
 The implementation intentionally copies the proven shape of OpenClaw's efficient browser snapshots and gstack's compact localhost command loop while keeping the backend attached to the user's real Chrome session when possible.

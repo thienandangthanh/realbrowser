@@ -28,6 +28,23 @@ On Windows PowerShell, prefer `scripts\realbrowser.ps1 ...`. On `cmd.exe`, use `
 
 The CLI starts a persistent loopback daemon on demand. The daemon stores its port and bearer token in `~/.realbrowser/state.json`. When a concrete CDP endpoint is known from `--profile`, `--browser-url`, or `REALBROWSER_BROWSER_URL`, cheap operations such as `tabs`, `open`, `select`, `goto`, `reload`, `url`, `text`, `links`, and `js` use DevTools HTTP where possible and one persistent direct-CDP socket inside the daemon when WebSocket control is needed. Do not start another session for the same real-browser endpoint unless the user explicitly passes `--force`; duplicate endpoint sessions can trigger another Chrome remote-debugging approval. Chrome DevTools MCP remains the fallback and the high-level path for snapshots, screenshots, clickable `uid` actions, console/network buffers, emulation, and labels.
 
+For authenticated browsing in the user's real Chrome profile, optimize for one
+approved connection and one compact command stream. Search/reuse the existing
+session or tab first; if a new tab is required, open it through
+`open --profile <id> <url> --select --no-fallback`. Then use `chain` with
+`goto`, `wait`, and `blocks`/`text` instead of shell `sleep` plus broad
+`tabs --json` dumps. Profile CDP discovery tries HTTP first and falls back to
+the profile's browser WebSocket only through the persistent daemon when
+Chrome's `/json/*` endpoints are not available. Do not create transient raw
+WebSocket probes in polling loops; that can trigger repeated Chrome approval
+dialogs.
+
+The daemon reports its script hash and capabilities. If a running daemon is
+older than the edited skill and a command needs a new capability, realbrowser
+fails with a reload instruction instead of sending an unsupported command. Use
+`--restart-daemon` only when explicitly accepting that a real Chrome profile may
+show one fresh remote-debugging approval prompt.
+
 `status` is side-effect-light by default and should be used to check whether realbrowser is already controlling Chrome. It may inspect default-local-Chrome remote-debugging metadata when that file is available, without attaching to the browser backend; treat that metadata as a hint, not proof for every backend. Use `status --deep`, `tabs`, or any page command only when you intentionally want to attach to the browser backend.
 
 Use `--session <name>` whenever multiple browser contexts may exist. A named session has its own state file under `~/.realbrowser/sessions/`, so `tom-anon`, `default-anon`, and the default session do not overwrite each other.
@@ -92,6 +109,10 @@ For tasks that require the user's logged-in Chrome profile, fallback is not acce
 
 Chrome's "Chrome is being controlled by automated test software" banner is expected while Chrome DevTools MCP has an active debugging session. Report it as a safety indicator and run `realbrowser status` to identify whether realbrowser is connected. Do not detach real signed-in profile sessions as routine cleanup; keeping the session alive avoids repeated remote-debugging approval prompts and preserves the selected browser context for the next command. Plain detach should not turn off Chrome remote debugging and should not touch browser UI; it only closes realbrowser's session. If the user explicitly asks to hide the banner, use `realbrowser detach --dismiss-banner` for a best-effort click on the visible banner `X` on supported desktop platforms. This only hides browser UI and does not disable remote-debugging/CDP. On platforms where browser-UI clicking is not automated, detach must still succeed and print a manual banner-X instruction. If the task should also turn off the user's Chrome remote-debugging setting, use `realbrowser detach --cleanup-remote-debugging` while the daemon is still running. If the daemon is already stopped, `realbrowser cleanup-remote-debugging` will not create a fresh debugging session unless `--allow-attach` is passed.
 
+Do not try to suppress Chrome's controlled-by-automation banner during normal
+work. The correct fix for repeated prompts is session reuse, not closing and
+reattaching. The banner can remain visible while the connection is alive.
+
 Keep this portable. The official portable boundary is Chrome DevTools MCP/CDP plus Chrome's own remote-debugging UI. OS browser-UI automation is best-effort only and must not be required for the core attach/detach flow.
 
 ## Browser Profiles
@@ -99,16 +120,17 @@ Keep this portable. The official portable boundary is Chrome DevTools MCP/CDP pl
 When a task depends on a specific logged-in Chrome profile, list and select profiles explicitly instead of relying on whichever profile Chrome DevTools MCP auto-connect chooses:
 
 ```bash
+"$REALBROWSER_CLI" profiles --active
 "$REALBROWSER_CLI" profiles
 "$REALBROWSER_CLI" open --profile "chrome:Profile 4" https://example.com
 "$REALBROWSER_CLI" --profile "chrome:Profile 4" tabs --no-fallback
 ```
 
-`profiles` discovers Chromium-family profiles on macOS, Linux, and Windows from common Chrome, Chrome Beta, Chrome for Testing, Chromium, Brave, Edge, and Vivaldi user-data roots. It prints stable ids such as `chrome:Default` or `chrome:Profile 4`, plus display/account names when Chrome stores them.
+`profiles` discovers Chromium-family profiles on macOS, Linux, and Windows from common Chrome, Chrome Beta, Chrome for Testing, Chromium, Brave, Edge, and Vivaldi user-data roots. It prints stable ids such as `chrome:Default` or `chrome:Profile 4`, display/account names when Chrome stores them, and Chrome's local `last-used` / `last-active` profile hints. Use `profiles --active` to narrow to profiles Chrome reports as currently or recently active.
 
 Use `--browser <key>` to disambiguate matching profiles. Use `--json` when you need exact `userDataDir`, `profilePath`, `devtoolsScope`, or detected DevTools endpoint fields.
 
-`open --profile <id> <url>` uses the OS browser launcher with Chrome's `--profile-directory=<dir>` flag. This is the right layer for opening a tab in a specific UI profile. After that, page automation still needs a debuggable backend: enable remote debugging in that profile and use `--profile <id> --no-fallback`, or pass `--browser-url <cdp-url>` when you already know the endpoint. Chrome may expose one browser-level DevTools endpoint for several profiles under the same user-data root; in that case, attach to the endpoint, then verify/select the intended tab by URL/title before taking action. If `profiles` shows no debug endpoint for the selected profile, do not continue in the dedicated fallback when login state matters.
+`open --profile <id> <url>` is the script-owned profile-open primitive; do not call OS launchers directly from an agent. Internally the script reuses an existing approved endpoint session when the requested profile is safe to open through that endpoint. For a browser-level endpoint shared by several Chrome profiles, CDP can only reliably create a new normal tab in Chrome's `last-used` profile; for other profiles the script uses the OS browser launcher with Chrome's `--profile-directory=<dir>` flag, then attaches through the debuggable endpoint. After that, page automation still needs a debuggable backend: enable remote debugging in that profile and use `--profile <id> --no-fallback`, or pass `--browser-url <cdp-url>` when you already know the endpoint. Chrome may expose one browser-level DevTools endpoint for several profiles under the same user-data root; in that case, attach to the endpoint, then verify/select the intended tab by URL/title before taking action. If `profiles` shows no debug endpoint for the selected profile, do not continue in the dedicated fallback when login state matters.
 
 For requests like "go to staging.ninzap.com on Tom's browser profile, check inbox, take screenshot", use a profile-targeted open and select in one step:
 
@@ -120,6 +142,21 @@ For requests like "go to staging.ninzap.com on Tom's browser profile, check inbo
 "$REALBROWSER_CLI" snapshot --efficient
 "$REALBROWSER_CLI" screenshot staging-ninzap-inbox.png --full
 ```
+
+For authenticated social or feed-reading tasks where the goal is "what is the
+first visible post/content?", prefer compact DOM reads over screenshots or full
+snapshots:
+
+```bash
+"$REALBROWSER_CLI" profiles "Tuyen" --browser chrome
+"$REALBROWSER_CLI" open --profile "chrome:Default" "https://www.facebook.com/" --select --no-fallback --timeout 15000 --quiet
+"$REALBROWSER_CLI" chain '[["goto","https://www.facebook.com/groups/852586990732832/"],["wait","OpenClaw VN","--timeout","15000"],["blocks","--limit","8","--max-chars","6000"]]' --return final
+```
+
+Use `blocks` first for feeds because it returns visible content blocks in
+screen order. Fall back to targeted `js` only when the page's DOM structure
+needs custom extraction. `chain` includes per-step durations in JSON/trace and
+summary output; use that instead of shell-level timing when analyzing speed.
 
 Use the stable profile id when a human name is ambiguous. For example, `Tom` may match more than one account; `chrome:Profile 4`, `tuyenhx.tanker`, or the account email is safer. `--select` opens the tab with Chrome's profile selector, waits for a matching debuggable tab, attaches to the endpoint, and selects the page. If `--select` reports no endpoint, stop and ask the user to enable Chrome remote debugging for that profile instead of falling back to the dedicated profile.
 
@@ -325,6 +362,7 @@ REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dis
 - `dialog arm accept|dismiss [text]`, `dialog --accept|--dismiss [text]`, `dialog-accept [text]`, `dialog-dismiss`: pre-arm the next alert/confirm/prompt in the current page. Use `dialog list` to read captured dialog records, or `dialog current accept|dismiss` to handle a dialog that is already open.
 - `eval <js>` / `js <js> [--page <id>]`: run JavaScript in the page. Expressions are wrapped automatically. Output is capped unless `--raw` is passed.
 - `text`, `html`, `links`, `forms`, `cookies`, `storage`, `perf`, `url`: fast read helpers backed by page JavaScript. Use `--limit`, `--max-chars`, and `--out <path>` for large pages. `cookies` and `storage` redact values unless `--values` is passed.
+- `blocks [selector] [--limit <n>] [--max-chars <n>] [--out <path>]`: fast read helper for compact visible text blocks sorted top-to-bottom. Use it for social feeds, dashboards, search results, and pages where full `text` is too noisy. Pass a selector such as `[role=article]` when the page has a known content container.
 - `css <selector|uid> <property>`, `attrs <selector|uid>`, `is <state> <selector|uid>`: inspect elements by CSS selector or snapshot uid.
 - `console [get <msgid>] [--errors] [--filter <text>] [--limit <n>] [--clear] [--preserve]`: list capped console messages, or fetch one message by id. `--clear` hides already-seen lines for the current daemon. Use `capture-console --out` when the user needs logs copied into a durable artifact for debugging.
 - `network [get <reqid>] [--failed] [--filter <text>] [--limit <n>] [--clear] [--preserve] [--request-file path] [--response-file path]`: list capped network requests, or fetch one request by id. Use files for large request/response bodies.
@@ -339,7 +377,7 @@ REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dis
 - `trace start|stop`, `trace analyze <insightSetId> <insightName>`: run Chrome performance tracing.
 - `tools`: list available Chrome DevTools MCP tools.
 - `tool <mcpToolName> [jsonArgs]`: call a raw MCP tool for features not wrapped yet.
-- `chain '[["observe"],["snapshot","--efficient"],["console","--errors"]]' [--return summary|final|all] [--trace <path>]`: run multiple commands in one daemon RPC for speed. Default output is a compact summary; full traces should go to disk.
+- `chain '[["observe"],["snapshot","--efficient"],["console","--errors"]]' [--return summary|final|all] [--trace <path>]`: run multiple commands in one daemon RPC for speed. Default output is a compact summary with per-step durations; use `--return final` when the last command is the only result the user needs, and write full timed traces to disk.
 
 Passing `--page <id-or-target>` targets a tab directly without focusing Chrome, so background screenshots and snapshots do not cover the terminal. With direct CDP fast paths this can be a short target such as `t1`; for MCP-only commands, use the numeric MCP page id from `tabs --mcp`. Opening pages should also stay background by default; use `--front` or `focus` only for explicit handoff.
 
@@ -366,6 +404,7 @@ Global flags:
 - `--anonymous`: use Chrome DevTools MCP isolated browser state. This is clean browser state, not network anonymity.
 - `--keep-anonymous`: keep the temporary anonymous profile directory after detach for debugging.
 - `--force`: only for commands that explicitly document it. For handle-writing commands, it intentionally replaces an existing handle file; for `use-session`, it remembers a session name before that daemon starts.
+- `--restart-daemon` / `--reload-daemon`: explicitly stop and reload the selected daemon with the current skill code. For real signed-in Chrome sessions this may show one fresh remote-debugging approval prompt, so use it only when accepting that tradeoff.
 - `--reload`: reload the selected page for commands such as `capture-network`.
 - `--duration <ms>`: capture or wait duration for commands such as `capture-network`.
 - `--har <path>`: write a local HAR-style network artifact for `capture-network`.
@@ -385,11 +424,11 @@ Global flags:
 5. If the user asks for console logs, JavaScript errors, or "what is the render problem", use `capture-console <url> --anonymous --out <file>` for clean-state checks or `select-tab`/`--profile` plus `capture-console --reload --out <file>` for authenticated checks. Feed the JSON artifact back into analysis.
 6. If a specific signed-in profile matters and no suitable tab is open, run `profiles`, choose a stable id, and open the target URL with `open --profile <id> <url> --select --no-fallback --timeout 15000`. Stop if no DevTools endpoint is available; do not fall back to the dedicated profile when cookies/login state are required.
 7. Use `tabs` before opening new pages if prior attempts may have left tabs around.
-8. Use `observe` first for page state; use `snapshot --efficient` only when you need clickable `uid` refs.
+8. Use `observe` first for page state; use `blocks` first for feed/search-result content; use `snapshot --efficient` only when you need clickable `uid` refs.
 9. Act only on current snapshot `uid` refs.
 10. After navigation, modal changes, or form submission, run `observe` or `snapshot --efficient` again before the next action.
 11. If a `uid` is stale, snapshot once and retry with the new ref.
-12. For workflows with several actions, prefer `chain --return summary --trace ~/.realbrowser/trace.json`.
+12. For workflows with several actions, prefer `chain --return summary --trace ~/.realbrowser/trace.json`; the trace includes per-step and total durations for speed review.
 13. Do not restart or detach real signed-in profile sessions during normal browser work; starting a fresh CDP session can trigger Chrome's remote-debugging approval dialog again. Use `active-session`/`sessions` to reuse the existing approved connection.
 14. Ask for explicit user approval before submitting sensitive data, making purchases, deleting data, changing account/security settings, granting permissions, or taking any action that is hard to undo.
 15. Stop and report manual blockers such as login, 2FA, captcha, camera/microphone permission, or Chrome remote debugging approval.
@@ -397,6 +436,9 @@ Global flags:
 ## Token And Speed Rules
 
 - Prefer `observe`, `snapshot --efficient`, `console --errors --limit 20`, and `network --failed --limit 30`.
+- Prefer `chain --return final` for "navigate, wait, read" flows; it avoids extra process round trips, keeps only the useful final result in context, and records durations for speed review.
+- Prefer `wait <text>` or readiness waits over shell `sleep`. `wait <text>` polls in the page through the fast CDP path when a CDP endpoint is available.
+- Prefer `blocks --limit <n>` over full-page `text` for feeds and search results.
 - Prefer direct CDP-backed endpoint/profile sessions for cheap reads and navigation. Use `--mcp` only when you need to compare against Chrome DevTools MCP behavior.
 - Do not call raw/full snapshot by default. If the user asks for verbose or full output, use `--verbose`, `--raw`, `REALBROWSER_OUTPUT=verbose`, `REALBROWSER_OUTPUT=raw`, or `--out <path>`.
 - On Windows PowerShell, set full-output mode with `$env:REALBROWSER_OUTPUT = "raw"` before running `scripts\realbrowser.ps1`, then remove it with `Remove-Item Env:\REALBROWSER_OUTPUT`.

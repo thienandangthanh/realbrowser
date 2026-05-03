@@ -25,6 +25,14 @@ const START_TIMEOUT_MS = Number.parseInt(process.env.REALBROWSER_START_TIMEOUT_M
 const MCP_START_TIMEOUT_MS = Number.parseInt(process.env.REALBROWSER_MCP_TIMEOUT_MS ?? "30000", 10);
 const PACKAGE_SPEC = process.env.REALBROWSER_MCP_PACKAGE ?? "chrome-devtools-mcp@latest";
 const CLI_VERSION = "0.1.0";
+const SCRIPT_HASH = crypto.createHash("sha256").update(fs.readFileSync(SCRIPT_PATH)).digest("hex").slice(0, 16);
+const DAEMON_CAPABILITIES = Object.freeze([
+  "chain-step-durations",
+  "endpoint-session-manager",
+  "page-local-wait",
+  "persistent-cdp-ws-target-list",
+  "visible-blocks",
+]);
 const AUTO_MODE = "auto";
 const DEDICATED_MODE = "dedicated";
 const ANONYMOUS_MODE = "anonymous";
@@ -270,7 +278,7 @@ const CLI_COMMAND_GROUPS = [
     title: "Sessions and profiles",
     commands: [
       { name: "doctor", usage: "realbrowser doctor [--deep] [--json]", summary: "Check runtime dependencies and browser attach readiness." },
-      { name: "profiles", aliases: ["profile-list", "list-profiles"], usage: "realbrowser profiles [query] [--browser <key>] [--json]", summary: "List local Chromium-family profiles." },
+      { name: "profiles", aliases: ["profile-list", "list-profiles"], usage: "realbrowser profiles [query] [--browser <key>] [--active] [--json]", summary: "List local Chromium-family profiles." },
       { name: "sessions", aliases: ["session-list", "list-sessions"], usage: "realbrowser sessions [--json]", summary: "List running realbrowser sessions." },
       { name: "active-session", aliases: ["current-session", "session-current"], usage: "realbrowser active-session [--json]", summary: "Show the active session pointer." },
       { name: "use-session", aliases: ["session-use"], usage: "realbrowser use-session <name> [--force] [--json]", summary: "Set the active session pointer.", minArgs: 1 },
@@ -315,6 +323,7 @@ const CLI_COMMAND_GROUPS = [
     commands: [
       { name: "eval", aliases: ["js"], usage: "realbrowser eval <js> [--page <id>] [--json]", summary: "Run JavaScript in the page.", handle: true, minArgs: 1 },
       { name: "text", usage: "realbrowser text [selector|uid] [--page <id>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read text.", handle: true },
+      { name: "blocks", aliases: ["visible-blocks"], usage: "realbrowser blocks [selector] [--page <id>] [--limit <n>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read compact visible text blocks.", handle: true },
       { name: "html", usage: "realbrowser html [selector|uid] [--page <id>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read HTML.", handle: true },
       { name: "links", usage: "realbrowser links [selector|uid] [--page <id>] [--limit <n>] [--json]", summary: "Read links.", handle: true },
       { name: "forms", usage: "realbrowser forms [selector|uid] [--page <id>] [--json]", summary: "Read forms.", handle: true },
@@ -391,6 +400,8 @@ const CLI_GLOBAL_FLAGS = [
   "--anonymous",
   "--keep-anonymous",
   "--force",
+  "--restart-daemon",
+  "--reload-daemon",
   "--reload",
   "--duration <ms>",
   "--har <path>",
@@ -545,6 +556,7 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "-i",
   "-q",
   "--activate-session",
+  "--active",
   "--all-browser-sessions",
   "--all-session",
   "--all-sessions",
@@ -594,6 +606,8 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--raw",
   "--raw-size",
   "--reload",
+  "--reload-daemon",
+  "--restart-daemon",
   "--screenshot",
   "--select",
   "--summary",
@@ -870,10 +884,14 @@ function parseArgv(argv) {
       flags.activateSession = false;
     } else if (arg === "--activate-session") {
       flags.activateSession = true;
+    } else if (arg === "--active") {
+      flags.active = true;
     } else if (arg === "--all-sessions" || arg === "--all-session" || arg === "--all-browser-sessions") {
       flags.allSessions = true;
     } else if (arg === "--front" || arg === "--bring-to-front") {
       flags.front = true;
+    } else if (arg === "--restart-daemon" || arg === "--reload-daemon") {
+      flags.restartDaemon = true;
     } else if (arg === "--select") {
       flags.select = true;
     } else if (arg === "--no-select") {
@@ -1424,6 +1442,9 @@ async function health(state) {
   if (state?.pid && body?.pid !== state.pid) {
     throw new Error(`daemon health pid mismatch: expected ${state.pid}, got ${body?.pid ?? "unknown"}`);
   }
+  if (state && body && typeof body === "object") {
+    state.__health = body;
+  }
   return body;
 }
 
@@ -1508,6 +1529,9 @@ async function anonymousProfileDirForStart(flags = {}) {
 }
 
 function shouldReplaceExistingDaemon(state, expectedModeKey, flags = {}, explicitSelection = false) {
+  if (state && flags.restartDaemon) {
+    return true;
+  }
   if (!state || state.modeKey === expectedModeKey) {
     return false;
   }
@@ -1530,6 +1554,37 @@ function shouldReplaceExistingDaemon(state, expectedModeKey, flags = {}, explici
     return false;
   }
   return true;
+}
+
+function applyRestartDaemonInheritance(flags = {}, state = null) {
+  if (!flags.restartDaemon || !state?.modeKey || hasExplicitBrowserTargetSelection(flags)) {
+    return flags;
+  }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(state.modeKey);
+  } catch {
+    return flags;
+  }
+  if (parsed.browserUrl) {
+    flags.browserUrl = String(parsed.browserUrl);
+  }
+  if (parsed.mode === ANONYMOUS_MODE) {
+    flags.anonymous = true;
+    flags.dedicated = false;
+  } else if (parsed.mode === DEDICATED_MODE) {
+    flags.dedicated = true;
+  }
+  if (parsed.profileDir) {
+    flags.profileDir = String(parsed.profileDir);
+  }
+  if (parsed.keepAnonymous === true) {
+    flags.keepAnonymous = true;
+  }
+  if (parsed.noFallback === true) {
+    flags.noFallback = true;
+  }
+  return flags;
 }
 
 async function stopState(state) {
@@ -1603,6 +1658,9 @@ async function listKnownSessions(flags = {}) {
       mode: healthBody.mode ?? modeFromState(state) ?? "unknown",
       noFallback: healthBody.noFallback ?? noFallbackFromState(state),
       mcpConnected: Boolean(healthBody.mcpConnected),
+      version: healthBody.version ?? state.version ?? null,
+      scriptHash: healthBody.scriptHash ?? state.scriptHash ?? null,
+      capabilities: Array.isArray(healthBody.capabilities) ? healthBody.capabilities : (state.capabilities ?? []),
       active: active.active && name === active.name && active.running,
       state,
     });
@@ -1676,9 +1734,78 @@ function browserEndpointEquivalent(left, right) {
   return normalizeCdpHttpUrl(a) !== null && normalizeCdpHttpUrl(a) === normalizeCdpHttpUrl(b);
 }
 
+function normalizeBrowserEndpoint(endpointOrUrl) {
+  if (!endpointOrUrl) {
+    return null;
+  }
+  if (typeof endpointOrUrl === "string") {
+    return browserTabEndpoints([], { browserUrl: endpointOrUrl })[0] ?? null;
+  }
+  const httpUrl = normalizeCdpHttpUrl(endpointOrUrl.httpUrl ?? endpointOrUrl.browserUrl ?? endpointOrUrl.wsEndpoint);
+  const wsEndpoint = normalizeCdpWsEndpoint(endpointOrUrl.wsEndpoint ?? endpointOrUrl.browserUrl);
+  if (!httpUrl && !wsEndpoint) {
+    return null;
+  }
+  return {
+    ...endpointOrUrl,
+    httpUrl,
+    wsEndpoint,
+  };
+}
+
+async function ensureEndpointSession(endpointOrUrl, flags = {}, options = {}) {
+  const endpoint = normalizeBrowserEndpoint(endpointOrUrl);
+  if (!endpoint || flags.stateFile || flags.handle) {
+    return null;
+  }
+  const existing = await runningEndpointSession(endpoint);
+  if (existing) {
+    if (options.mutateFlags !== false) {
+      flags.session = existing.name;
+      flags.reusedRealProfileSession = existing.name;
+    }
+    return { ...existing, endpoint, started: false };
+  }
+  if (options.start === false) {
+    return null;
+  }
+  const browserUrl = endpoint.wsEndpoint ?? endpoint.httpUrl;
+  const attachFlags = {
+    ...flags,
+    browserUrl,
+    noFallback: true,
+  };
+  if (!sessionNameFromFlags(attachFlags) && !attachFlags.stateFile) {
+    attachFlags.session = autoSessionNameForBrowserTab({ browserUrl });
+  }
+  const state = await ensureDaemon(attachFlags);
+  const name = sessionNameForState(state, attachFlags);
+  if (options.mutateFlags !== false) {
+    flags.session = name;
+    flags.reusedRealProfileSession = name;
+  }
+  const healthBody = state.__health ?? await health(state).catch(() => null);
+  return {
+    name,
+    stateFile: stateFileFromFlags({ ...attachFlags, session: name }),
+    pid: state.pid,
+    startedAt: state.startedAt,
+    mode: healthBody?.mode ?? modeFromState(state) ?? "browserUrl",
+    noFallback: healthBody?.noFallback ?? noFallbackFromState(state),
+    mcpConnected: Boolean(healthBody?.mcpConnected),
+    version: healthBody?.version ?? state.version ?? null,
+    scriptHash: healthBody?.scriptHash ?? state.scriptHash ?? null,
+    capabilities: Array.isArray(healthBody?.capabilities) ? healthBody.capabilities : (state.capabilities ?? []),
+    active: false,
+    state,
+    endpoint,
+    started: true,
+  };
+}
+
 async function reuseExistingEndpointSession(flags = {}) {
   const endpoint = realProfileEndpointFromFlags(flags);
-  if (!endpoint || flags.force || flags.stateFile || flags.handle) {
+  if (!endpoint || flags.force || flags.restartDaemon || flags.stateFile || flags.handle) {
     return null;
   }
   const sessions = await listKnownSessions({ noActiveSession: true });
@@ -1726,7 +1853,28 @@ function applyEndpointScopedRealProfileSession(flags = {}) {
   flags.session = autoSessionNameForBrowserTab({ browserUrl: endpoint });
 }
 
+async function prepareRealProfileSessionFlags(flags = {}) {
+  if (desiredMode(flags) !== AUTO_MODE) {
+    return null;
+  }
+  const endpoint = realProfileEndpointFromFlags(flags);
+  if (endpoint && !flags.stateFile && !flags.handle) {
+    if (!flags.force && !flags.restartDaemon) {
+      const reusable = await ensureEndpointSession(endpoint, flags, { start: false });
+      if (reusable) {
+        return reusable;
+      }
+    }
+    applyEndpointScopedRealProfileSession(flags);
+    return null;
+  }
+  return await reuseExistingRealProfileSession(flags);
+}
+
 async function reuseExistingRealProfileSession(flags = {}) {
+  if (flags.restartDaemon) {
+    return null;
+  }
   if (!shouldReuseExistingRealProfileSession(flags)) {
     return null;
   }
@@ -1779,6 +1927,7 @@ async function ensureDaemon(flags = {}) {
 async function ensureDaemonUnlocked(flags = {}) {
   const stateFile = stateFileFromFlags(flags);
   const existing = await readJson(stateFile);
+  applyRestartDaemonInheritance(flags, existing);
   const expectedModeKey = modeKey(flags);
   const explicitSelection = hasExplicitDaemonSelection(flags);
   if (shouldReplaceExistingDaemon(existing, expectedModeKey, flags, explicitSelection)) {
@@ -1795,7 +1944,10 @@ async function ensureDaemonUnlocked(flags = {}) {
   const release = await acquireLock(`${stateFile}.lock`);
   try {
     const afterLock = await readJson(stateFile);
-    if (shouldReplaceExistingDaemon(afterLock, expectedModeKey, flags, explicitSelection)) {
+    applyRestartDaemonInheritance(flags, afterLock);
+    const afterExpectedModeKey = modeKey(flags);
+    const afterExplicitSelection = hasExplicitDaemonSelection(flags);
+    if (shouldReplaceExistingDaemon(afterLock, afterExpectedModeKey, flags, afterExplicitSelection)) {
       await stopState(afterLock);
     } else if (afterLock && isProcessAlive(afterLock.pid)) {
       try {
@@ -1849,6 +2001,7 @@ async function ensureDaemonUnlocked(flags = {}) {
 }
 
 async function daemonRpc(state, payload) {
+  assertDaemonSupportsPayload(state, payload);
   return await fetchJson(`http://127.0.0.1:${state.port}/rpc`, {
     method: "POST",
     headers: {
@@ -1860,6 +2013,68 @@ async function daemonRpc(state, payload) {
       Number.parseInt(process.env.REALBROWSER_RPC_TIMEOUT_MS ?? "120000", 10),
     ),
   });
+}
+
+function daemonCapabilitiesFrom(value) {
+  const capabilities = value?.__health?.capabilities ?? value?.capabilities;
+  return new Set(Array.isArray(capabilities) ? capabilities.map((entry) => String(entry)) : []);
+}
+
+function daemonSupports(state, capability) {
+  return daemonCapabilitiesFrom(state).has(capability);
+}
+
+function requiredCapabilitiesForCommand(command, args = []) {
+  switch (command) {
+    case "blocks":
+    case "visible-blocks":
+      return new Set(["visible-blocks"]);
+    default:
+      return new Set();
+  }
+}
+
+function requiredCapabilitiesForPayload(payload) {
+  const command = payload?.command;
+  const required = requiredCapabilitiesForCommand(command, payload?.args ?? []);
+  if (command !== "chain") {
+    return required;
+  }
+  const rawSteps = Array.isArray(payload?.args) ? payload.args.join(" ") : "";
+  try {
+    const steps = JSON.parse(rawSteps);
+    if (Array.isArray(steps)) {
+      for (const step of steps) {
+        if (Array.isArray(step) && step.length > 0) {
+          for (const capability of requiredCapabilitiesForCommand(String(step[0]), step.slice(1))) {
+            required.add(capability);
+          }
+        }
+      }
+    }
+  } catch {
+    // Let the daemon report malformed chain JSON.
+  }
+  return required;
+}
+
+function assertDaemonSupportsPayload(state, payload) {
+  const required = requiredCapabilitiesForPayload(payload);
+  if (required.size === 0) {
+    return;
+  }
+  const missing = [...required].filter((capability) => !daemonSupports(state, capability));
+  if (missing.length === 0) {
+    return;
+  }
+  const session = state?.session ?? sessionNameFromStateFile(state?.stateFile ?? "");
+  const command = payload?.command ?? "command";
+  const detachCommand = session ? `realbrowser detach --session "${session}"` : "realbrowser detach";
+  throw new Error([
+    `Running realbrowser daemon pid ${state?.pid ?? "unknown"} does not support ${missing.join(", ")} needed by ${command}.`,
+    "It was started by an older copy of this skill, so sending the command would fail or trigger noisy fallbacks.",
+    `Reload it explicitly with \`--restart-daemon\`, or run \`${detachCommand}\` and then rerun the command.`,
+  ].join(" "));
 }
 
 function printResult(value, flagsOrJson = false) {
@@ -1935,7 +2150,7 @@ async function runCli() {
   validateCommandArgs(command, args);
 
   if (command === "profiles" || command === "profile-list" || command === "list-profiles") {
-    const profiles = await listBrowserProfiles({ query: args[0], browser: flags.browser });
+    const profiles = await listBrowserProfiles({ query: args[0], browser: flags.browser, active: flags.active });
     printResult({
       text: formatProfileListText(profiles),
       profiles: profiles.map(publicProfileInfo),
@@ -2180,8 +2395,7 @@ async function runCli() {
 
   await applyHandleToFlags(command, flags);
   await resolveProfileForAutomation(flags);
-  applyEndpointScopedRealProfileSession(flags);
-  await reuseExistingRealProfileSession(flags);
+  await prepareRealProfileSessionFlags(flags);
 
   const state = await ensureDaemon(flags);
   const response = await daemonRpc(state, daemonPayloadForCommand(command, args, flags, state));
@@ -2206,7 +2420,7 @@ function daemonPayloadForCommand(command, args, flags = {}, state = null) {
 async function resolveProfileForAutomation(flags = {}) {
   if (flags.profile && !flags.browserUrl) {
     const profile = await resolveBrowserProfileSelection(flags.profile, flags);
-    if (!profile.devtoolsHttpUrl) {
+    if (!profile.devtoolsHttpUrl && !profile.devtoolsWsEndpoint) {
       throw new Error(`Profile ${profile.id} is not exposing a DevTools endpoint. Open it with \`realbrowser open --profile "${profile.id}" <url>\`, enable Chrome remote debugging in that profile, then retry with \`--no-fallback\`.`);
     }
     flags.browserUrl = profile.devtoolsWsEndpoint ?? profile.devtoolsHttpUrl;
@@ -2294,8 +2508,7 @@ function formatClaimText(handle) {
 async function claimPageHandle(args, flags = {}) {
   const targetUrl = args[0] ?? "";
   await resolveProfileForAutomation(flags);
-  applyEndpointScopedRealProfileSession(flags);
-  await reuseExistingRealProfileSession(flags);
+  await prepareRealProfileSessionFlags(flags);
   const state = await ensureDaemon(flags);
   if (targetUrl) {
     const openFlags = { ...flags, select: true };
@@ -2406,8 +2619,7 @@ async function mobileScreenshot(args, flags = {}) {
   const viewport = parseViewportSize(flags.viewport ?? "390x844");
   await applyHandleToFlags("mobile-screenshot", flags);
   await resolveProfileForAutomation(flags);
-  applyEndpointScopedRealProfileSession(flags);
-  await reuseExistingRealProfileSession(flags);
+  await prepareRealProfileSessionFlags(flags);
   const state = await ensureDaemon(flags);
 
   let page = null;
@@ -2515,6 +2727,9 @@ async function localStatus(flags = {}) {
     stateFile,
     session: running ? (state.session ?? sessionNameFromStateFile(stateFile)) : null,
     startedAt: running ? (state.startedAt ?? null) : null,
+    version: running ? (healthBody?.version ?? state.version ?? null) : null,
+    scriptHash: running ? (healthBody?.scriptHash ?? state.scriptHash ?? null) : null,
+    currentScriptHash: SCRIPT_HASH,
     mode,
     noFallback: Object.prototype.hasOwnProperty.call(healthBody ?? {}, "noFallback")
       ? Boolean(healthBody.noFallback)
@@ -2740,6 +2955,7 @@ async function listBrowserProfiles(options = {}) {
     for (const profileDirectory of profileDirs) {
       const profilePath = path.join(source.userDataDir, profileDirectory);
       const preferences = await readJson(path.join(profilePath, "Preferences"));
+      const activity = browserProfileActivityInfo(profileDirectory, localState);
       const info = browserProfileDisplayInfo(profileDirectory, preferences, localState);
       const devtools = await readDevToolsActivePort(source.userDataDir, profilePath);
       profiles.push({
@@ -2750,6 +2966,10 @@ async function listBrowserProfiles(options = {}) {
         displayName: info.displayName,
         email: info.email,
         accountName: info.accountName,
+        lastUsed: activity.lastUsed,
+        lastActive: activity.lastActive,
+        activeTime: activity.activeTime,
+        activeRank: activity.activeRank,
         userDataDir: source.userDataDir,
         profilePath,
         devtoolsPortFile: devtools?.portFile ?? null,
@@ -2767,9 +2987,19 @@ async function listBrowserProfiles(options = {}) {
     a.displayName.localeCompare(b.displayName)
   ));
   if (!options.query) {
+    return filterProfilesByActivity(profiles, options);
+  }
+  return filterProfilesByActivity(
+    profiles.filter((profile) => browserProfileMatchesQuery(profile, options.query)),
+    options,
+  );
+}
+
+function filterProfilesByActivity(profiles, options = {}) {
+  if (!options.active) {
     return profiles;
   }
-  return profiles.filter((profile) => browserProfileMatchesQuery(profile, options.query));
+  return profiles.filter((profile) => profile.lastUsed || profile.lastActive);
 }
 
 async function browserProfileDirectories(userDataDir) {
@@ -2807,6 +3037,26 @@ function browserProfileDisplayInfo(profileDirectory, preferences, localState) {
     profileDirectory
   );
   return { displayName, email, accountName };
+}
+
+function browserProfileActivityInfo(profileDirectory, localState) {
+  const profileState = localState?.profile ?? {};
+  const lastUsed = profileState.last_used === profileDirectory;
+  const lastActiveProfiles = Array.isArray(profileState.last_active_profiles)
+    ? profileState.last_active_profiles
+    : [];
+  const activeRank = lastActiveProfiles.indexOf(profileDirectory);
+  const localInfo = profileState.info_cache?.[profileDirectory] ?? {};
+  return {
+    lastUsed,
+    lastActive: activeRank !== -1,
+    activeRank: activeRank === -1 ? null : activeRank,
+    activeTime: numberOrNull(localInfo.active_time),
+  };
+}
+
+function numberOrNull(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function stringOrNull(value) {
@@ -2925,6 +3175,7 @@ function formatProfileListText(profiles) {
     browser: profile.browserName,
     profile: profile.profileDirectory,
     name: [profile.displayName, profile.email ? `<${profile.email}>` : ""].filter(Boolean).join(" "),
+    activity: formatProfileActivity(profile),
     debug: profile.devtoolsHttpUrl ? `${profile.devtoolsHttpUrl}${profile.devtoolsScope === "browser" ? " (browser)" : ""}` : "-",
   }));
   const widths = {
@@ -2932,22 +3183,35 @@ function formatProfileListText(profiles) {
     browser: Math.max("Browser".length, ...rows.map((row) => row.browser.length)),
     profile: Math.max("Profile".length, ...rows.map((row) => row.profile.length)),
     name: Math.max("Name / account".length, ...rows.map((row) => row.name.length)),
+    activity: Math.max("Activity".length, ...rows.map((row) => row.activity.length)),
   };
   const line = (row) => [
     row.id.padEnd(widths.id),
     row.browser.padEnd(widths.browser),
     row.profile.padEnd(widths.profile),
     row.name.padEnd(widths.name),
+    row.activity.padEnd(widths.activity),
     row.debug,
   ].join("  ");
   return [
-    line({ id: "ID", browser: "Browser", profile: "Profile", name: "Name / account", debug: "Debug endpoint" }),
-    line({ id: "-".repeat(widths.id), browser: "-".repeat(widths.browser), profile: "-".repeat(widths.profile), name: "-".repeat(widths.name), debug: "--------------" }),
+    line({ id: "ID", browser: "Browser", profile: "Profile", name: "Name / account", activity: "Activity", debug: "Debug endpoint" }),
+    line({ id: "-".repeat(widths.id), browser: "-".repeat(widths.browser), profile: "-".repeat(widths.profile), name: "-".repeat(widths.name), activity: "-".repeat(widths.activity), debug: "--------------" }),
     ...rows.map(line),
     "",
     'Use: realbrowser open --profile "<id>" <url>',
     'Attach to a detected debugging endpoint with: realbrowser --profile "<id>" tabs',
   ].join("\n");
+}
+
+function formatProfileActivity(profile) {
+  const labels = [];
+  if (profile.lastUsed) {
+    labels.push("last-used");
+  }
+  if (profile.lastActive) {
+    labels.push(profile.activeRank === 0 ? "active#1" : `active#${Number(profile.activeRank) + 1}`);
+  }
+  return labels.join(",") || "-";
 }
 
 function formatProfileCandidates(profiles) {
@@ -2966,6 +3230,7 @@ function formatSessionListText(sessions, activeSession = null) {
     mode: session.mode,
     pid: String(session.pid ?? ""),
     mcp: session.mcpConnected ? "yes" : "no",
+    script: session.scriptHash ? (session.scriptHash === SCRIPT_HASH ? "current" : `old:${session.scriptHash}`) : "old",
     state: session.stateFile,
   }));
   const widths = {
@@ -2974,6 +3239,7 @@ function formatSessionListText(sessions, activeSession = null) {
     mode: Math.max("Mode".length, ...rows.map((row) => row.mode.length)),
     pid: Math.max("PID".length, ...rows.map((row) => row.pid.length)),
     mcp: Math.max("MCP".length, ...rows.map((row) => row.mcp.length)),
+    script: Math.max("Script".length, ...rows.map((row) => row.script.length)),
   };
   const line = (row) => [
     row.active.padEnd(widths.active),
@@ -2981,11 +3247,12 @@ function formatSessionListText(sessions, activeSession = null) {
     row.mode.padEnd(widths.mode),
     row.pid.padEnd(widths.pid),
     row.mcp.padEnd(widths.mcp),
+    row.script.padEnd(widths.script),
     row.state,
   ].join("  ");
   return [
-    line({ active: "", name: "Session", mode: "Mode", pid: "PID", mcp: "MCP", state: "State file" }),
-    line({ active: "-", name: "-".repeat(widths.name), mode: "-".repeat(widths.mode), pid: "-".repeat(widths.pid), mcp: "-".repeat(widths.mcp), state: "----------" }),
+    line({ active: "", name: "Session", mode: "Mode", pid: "PID", mcp: "MCP", script: "Script", state: "State file" }),
+    line({ active: "-", name: "-".repeat(widths.name), mode: "-".repeat(widths.mode), pid: "-".repeat(widths.pid), mcp: "-".repeat(widths.mcp), script: "-".repeat(widths.script), state: "----------" }),
     ...rows.map(line),
     "",
     '* marks the active session used by commands without --session.',
@@ -3019,6 +3286,9 @@ function publicSessionInfo(session) {
     mode: session.mode,
     noFallback: session.noFallback,
     mcpConnected: session.mcpConnected,
+    version: session.version,
+    scriptHash: session.scriptHash,
+    capabilities: session.capabilities,
     active: Boolean(session.active),
   };
 }
@@ -3038,9 +3308,9 @@ async function openUrlInBrowserProfile(url, profileQuery, flags = {}) {
   if (flags.select && !profile.devtoolsHttpUrl && !profile.devtoolsWsEndpoint) {
     throw new Error(`Profile ${profile.id} is not exposing a DevTools endpoint, so realbrowser cannot auto-select the new tab. Enable Chrome remote debugging in that profile, or run without --select to only open the tab.`);
   }
-  const existingSessionOpen = await openUrlInRunningProfileSession(profile, url, flags);
-  if (existingSessionOpen) {
-    return existingSessionOpen;
+  const endpointOpen = await openUrlInProfileEndpointSession(profile, url, flags);
+  if (endpointOpen) {
+    return endpointOpen;
   }
   const launch = await launchBrowserProfile(profile, url, flags);
   const selected = flags.select
@@ -3107,13 +3377,12 @@ function openedPageCandidate(beforePages, afterPages, requestedUrl) {
   return newestPage(matchingPages);
 }
 
-async function openUrlInRunningProfileSession(profile, url, flags = {}) {
-  const endpoint = endpointForBrowserProfile(profile);
-  if (!endpoint) {
+async function openUrlViaEndpointSession(endpointSession, profile, url, flags = {}) {
+  if (!endpointSession?.state) {
     return null;
   }
-  const endpointSession = await runningEndpointSession(endpoint);
-  if (!endpointSession) {
+  const sessionName = endpointSession.name;
+  if (!canOpenProfileUrlViaEndpoint(profile)) {
     return null;
   }
   const beforePages = parseListPagesResult(await daemonRpc(endpointSession.state, {
@@ -3136,7 +3405,7 @@ async function openUrlInRunningProfileSession(profile, url, flags = {}) {
     args: [],
     flags: {},
   }));
-  const page = openedPageCandidate(beforePages, afterPages, url);
+  const page = opened?.page ?? openedPageCandidate(beforePages, afterPages, url);
   const selected = flags.select && page
     ? await daemonRpc(endpointSession.state, {
       command: "select",
@@ -3145,14 +3414,14 @@ async function openUrlInRunningProfileSession(profile, url, flags = {}) {
     })
     : null;
   if (flags.select && shouldActivateSession(flags)) {
-    await writeActiveSessionName(endpointSession.name);
+    await writeActiveSessionName(sessionName);
   }
   return {
     text: [
-      `Opened ${url} in running realbrowser session ${endpointSession.name} for ${profile.browserName} profile ${profile.profileDirectory} (${profile.displayName}).`,
+      `Opened ${url} through realbrowser session ${sessionName} for ${profile.browserName} profile ${profile.profileDirectory} (${profile.displayName}).`,
       page ? `Page: ${page.id} ${page.url}` : "Opened page, but could not identify the new page id. Run `realbrowser tabs` to select it manually.",
       selected?.text,
-      flags.select ? `Activated session: ${endpointSession.name}` : "",
+      flags.select ? `Activated session: ${sessionName}` : "",
       profile.devtoolsHttpUrl
         ? `Debug endpoint reused: ${profile.devtoolsHttpUrl}${profile.devtoolsScope === "browser" ? " (browser-level)" : ""}.`
         : "",
@@ -3163,20 +3432,43 @@ async function openUrlInRunningProfileSession(profile, url, flags = {}) {
       command: "realbrowser-session",
       args: ["open", url],
       fastPath: "cdp-or-mcp",
-      session: endpointSession.name,
+      session: sessionName,
       pid: endpointSession.pid,
     },
     opened,
     page,
     selected,
-    session: endpointSession.name,
+    session: sessionName,
   };
+}
+
+async function openUrlInProfileEndpointSession(profile, url, flags = {}) {
+  if (!canOpenProfileUrlViaEndpoint(profile)) {
+    return null;
+  }
+  const endpoint = endpointForBrowserProfile(profile);
+  if (!endpoint) {
+    return null;
+  }
+  const endpointSession = await ensureEndpointSession(endpoint, flags);
+  return await openUrlViaEndpointSession(endpointSession, profile, url, flags);
+}
+
+function canOpenProfileUrlViaEndpoint(profile) {
+  if (!profile?.devtoolsHttpUrl && !profile?.devtoolsWsEndpoint) {
+    return false;
+  }
+  if (profile.devtoolsScope !== "browser") {
+    return true;
+  }
+  return profile.lastUsed === true;
 }
 
 async function waitAndSelectBrowserTab(query, flags = {}) {
   const timeoutMs = parsePositiveInteger(flags.timeout ?? "10000", "timeout");
   const startedAt = Date.now();
   let lastTabs = [];
+  await prepareEndpointSessionForTabPolling(flags);
   while (Date.now() - startedAt <= timeoutMs) {
     lastTabs = await findBrowserTabs({
       query,
@@ -3187,9 +3479,21 @@ async function waitAndSelectBrowserTab(query, flags = {}) {
     if (lastTabs.length > 0) {
       return await selectBrowserTabForAutomation(query, flags);
     }
-    await sleep(250);
+    await sleep(1000);
   }
   throw new Error(`Opened the URL but no debuggable matching tab appeared within ${timeoutMs}ms.\n${formatBrowserTabListText(lastTabs)}`);
+}
+
+async function prepareEndpointSessionForTabPolling(flags = {}) {
+  const browserUrl = flags.browserUrl ?? flags.cdpUrl;
+  if (!browserUrl || flags.stateFile || flags.handle) {
+    return null;
+  }
+  const endpoint = browserTabEndpoints([], { browserUrl })[0] ?? null;
+  if (!endpoint) {
+    return null;
+  }
+  return await ensureEndpointSession(endpoint, flags);
 }
 
 async function findBrowserTabs(options = {}) {
@@ -3204,7 +3508,7 @@ async function findBrowserTabs(options = {}) {
       tabs.push(...await tabsForKnownSession(endpointSession, { endpoint }));
       continue;
     }
-    const targets = await fetchCdpTargetList(endpoint).catch(() => []);
+    const targets = await fetchCdpTargetList(endpoint, { allowWs: false }).catch(() => []);
     for (const target of targets) {
       if (target?.type && target.type !== "page") {
         continue;
@@ -3258,6 +3562,9 @@ async function runningSessionByName(name) {
     mode: healthBody.mode ?? modeFromState(state) ?? "unknown",
     noFallback: healthBody.noFallback ?? noFallbackFromState(state),
     mcpConnected: Boolean(healthBody.mcpConnected),
+    version: healthBody.version ?? state.version ?? null,
+    scriptHash: healthBody.scriptHash ?? state.scriptHash ?? null,
+    capabilities: Array.isArray(healthBody.capabilities) ? healthBody.capabilities : (state.capabilities ?? []),
     active: false,
     state,
   };
@@ -3269,9 +3576,18 @@ async function runningEndpointSession(endpoint) {
   });
   const session = await runningSessionByName(sessionName);
   if (!session || !isRealProfileSessionMode(session.mode)) {
-    return null;
+    const sessions = await listKnownSessions({ noActiveSession: true });
+    return sessions.find((candidate) => sessionMatchesBrowserEndpoint(candidate, endpoint)) ?? null;
   }
   return session;
+}
+
+function sessionMatchesBrowserEndpoint(session, endpoint) {
+  return isRealProfileSessionMode(session?.mode) &&
+    browserEndpointEquivalent(
+      browserUrlFromState(session.state),
+      endpoint?.wsEndpoint ?? endpoint?.httpUrl,
+    );
 }
 
 async function tabsForKnownSession(session, context = {}) {
@@ -3382,10 +3698,7 @@ function browserTabEndpoints(profiles, options = {}) {
   const endpoints = [];
   const byUrl = new Map();
   const addEndpoint = (httpUrl, profile = null, wsEndpoint = null) => {
-    if (!httpUrl) {
-      return;
-    }
-    const normalized = normalizeCdpHttpUrl(httpUrl);
+    const normalized = normalizeCdpHttpUrl(httpUrl ?? wsEndpoint);
     if (!normalized) {
       return;
     }
@@ -3456,27 +3769,47 @@ function normalizeCdpWsEndpoint(value) {
     if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
       return null;
     }
+    if (!/\/devtools\/(?:browser|page|worker|shared_worker|service_worker)\/[^/]/iu.test(parsed.pathname)) {
+      return null;
+    }
     return parsed.toString();
   } catch {
     return null;
   }
 }
 
-async function fetchCdpTargetList(endpoint) {
+async function fetchCdpTargetList(endpoint, options = {}) {
   if (endpoint.httpUrl) {
-    const response = await fetch(`${endpoint.httpUrl.replace(/\/$/u, "")}/json/list`, {
-      signal: AbortSignal.timeout(2000),
-    });
-    if (!response.ok) {
-      throw new Error(`CDP target list failed for ${endpoint.httpUrl}: HTTP ${response.status}`);
+    try {
+      return await fetchCdpTargetListFromHttp(endpoint.httpUrl);
+    } catch (error) {
+      if (!endpoint.wsEndpoint) {
+        throw error;
+      }
     }
-    const body = await response.json();
-    return Array.isArray(body) ? body : [];
   }
   if (!endpoint.wsEndpoint) {
     return [];
   }
-  const client = new CdpClient(endpoint.wsEndpoint);
+  if (options.allowWs !== true) {
+    return [];
+  }
+  return await fetchCdpTargetListFromWs(endpoint.wsEndpoint);
+}
+
+async function fetchCdpTargetListFromHttp(httpUrl) {
+  const response = await fetch(`${httpUrl.replace(/\/$/u, "")}/json/list`, {
+    signal: AbortSignal.timeout(2000),
+  });
+  if (!response.ok) {
+    throw new Error(`CDP target list failed for ${httpUrl}: HTTP ${response.status}`);
+  }
+  const body = await response.json();
+  return Array.isArray(body) ? body : [];
+}
+
+async function fetchCdpTargetListFromWs(wsEndpoint) {
+  const client = new CdpClient(wsEndpoint);
   await client.connect();
   try {
     const result = await client.request("Target.getTargets", {});
@@ -3927,6 +4260,10 @@ function publicProfileInfo(profile) {
     displayName: profile.displayName,
     email: profile.email,
     accountName: profile.accountName,
+    lastUsed: Boolean(profile.lastUsed),
+    lastActive: Boolean(profile.lastActive),
+    activeRank: profile.activeRank,
+    activeTime: profile.activeTime,
     userDataDir: profile.userDataDir,
     profilePath: profile.profilePath,
     devtoolsScope: profile.devtoolsScope,
@@ -4180,6 +4517,7 @@ function formatLocalStatusText(daemon, browserControl, chromeRemoteDebugging = n
   return [
     `realbrowser daemon: running pid ${daemon.pid} mode ${daemon.mode}`,
     daemon.session ? `Session: ${daemon.session}` : "",
+    daemon.scriptHash ? `Daemon script: ${daemon.scriptHash}${daemon.scriptHash !== daemon.currentScriptHash ? ` (current ${daemon.currentScriptHash}; reload needed for new skill code)` : ""}` : "",
     `Chrome DevTools MCP connected: ${formatMaybeBoolean(daemon.mcpConnected)}`,
     `Dedicated fallback disabled: ${formatMaybeBoolean(daemon.noFallback)}`,
     metadataLine,
@@ -4441,10 +4779,11 @@ function withTimeout(promise, timeoutMs, label) {
 function buildMcpArgs(config) {
   const args = ["-y", PACKAGE_SPEC];
   if (config.browserUrl) {
-    if (/^wss?:/iu.test(config.browserUrl)) {
-      args.push(`--wsEndpoint=${config.browserUrl}`);
+    const directWsEndpoint = normalizeCdpWsEndpoint(config.browserUrl);
+    if (directWsEndpoint) {
+      args.push(`--wsEndpoint=${directWsEndpoint}`);
     } else {
-      args.push(`--browserUrl=${config.browserUrl}`);
+      args.push(`--browserUrl=${normalizeCdpHttpUrl(config.browserUrl) ?? config.browserUrl}`);
     }
   } else if (config.mode === AUTO_MODE) {
     args.push("--autoConnect");
@@ -4620,9 +4959,7 @@ class BrowserDaemon {
 
   cdpEndpoint() {
     const rawBrowserUrl = this.browserUrl.trim();
-    const httpUrl = /^https?:\/\//iu.test(rawBrowserUrl)
-      ? normalizeCdpHttpUrl(rawBrowserUrl)
-      : null;
+    const httpUrl = normalizeCdpHttpUrl(rawBrowserUrl);
     const wsEndpoint = normalizeCdpWsEndpoint(rawBrowserUrl);
     if (!httpUrl && !wsEndpoint) {
       return null;
@@ -4693,13 +5030,22 @@ class BrowserDaemon {
     if (!endpoint) {
       return [];
     }
-    if (endpoint.wsEndpoint && !endpoint.httpUrl) {
+    if (endpoint.httpUrl) {
+      try {
+        const targets = await fetchCdpTargetListFromHttp(endpoint.httpUrl);
+        return targets.filter((target) => !target?.type || target.type === "page");
+      } catch (error) {
+        if (!endpoint.wsEndpoint) {
+          throw error;
+        }
+      }
+    }
+    if (endpoint.wsEndpoint) {
       const result = await this.cdpBrowserRequest("Target.getTargets", {});
       const targets = Array.isArray(result?.targetInfos) ? result.targetInfos : [];
       return targets.filter((target) => !target?.type || target.type === "page");
     }
-    const targets = await fetchCdpTargetList(endpoint);
-    return targets.filter((target) => !target?.type || target.type === "page");
+    return [];
   }
 
   async cdpPages() {
@@ -5189,6 +5535,8 @@ class BrowserDaemon {
         return await this.handleEval(args, flags);
       case "url":
       case "text":
+      case "blocks":
+      case "visible-blocks":
       case "html":
       case "links":
       case "forms":
@@ -5443,18 +5791,21 @@ class BrowserDaemon {
     const returnMode = normalizeReturnMode(flags.return ?? (flags.summary ? "summary" : "summary"));
     const stepMaxChars = parsePositiveInteger(flags.maxChars ?? String(DEFAULT_CHAIN_STEP_MAX_CHARS), "max-chars");
     const results = [];
+    const chainStartedAt = Date.now();
     for (const [index, step] of steps.entries()) {
       if (!Array.isArray(step) || step.length === 0) {
-        results.push({ index, ok: false, error: "step must be a non-empty command array" });
+        results.push({ index, ok: false, durationMs: 0, error: "step must be a non-empty command array" });
         continue;
       }
       const parsed = parseArgv(step.map((value) => String(value)));
+      const stepStartedAt = Date.now();
       try {
         const result = await this.handle(parsed.command, parsed.args, { ...flags, ...parsed.flags });
         results.push({
           index,
           command: parsed.command,
           ok: true,
+          durationMs: Date.now() - stepStartedAt,
           result,
           summary: summarizeResult(parsed.command, result, stepMaxChars),
         });
@@ -5463,25 +5814,28 @@ class BrowserDaemon {
           index,
           command: parsed.command,
           ok: false,
+          durationMs: Date.now() - stepStartedAt,
           error: error instanceof Error ? error.message : String(error),
         });
       }
     }
+    const totalDurationMs = Date.now() - chainStartedAt;
     if (flags.trace) {
-      await writeTextFile(flags.trace, `${JSON.stringify(results, null, 2)}\n`);
+      await writeTextFile(flags.trace, `${JSON.stringify({ totalDurationMs, results }, null, 2)}\n`);
     }
     if (flags.json) {
       if (flags.raw || returnMode === "all") {
-        return { results, trace: flags.trace };
+        return { totalDurationMs, results, trace: flags.trace };
       }
       return {
         ok: results.every((entry) => entry.ok),
         returnMode,
+        totalDurationMs,
         trace: flags.trace,
         results: results.map((entry) =>
           entry.ok
-            ? { index: entry.index, command: entry.command, ok: true, summary: entry.summary }
-            : { index: entry.index, command: entry.command, ok: false, error: entry.error },
+            ? { index: entry.index, command: entry.command, ok: true, durationMs: entry.durationMs, summary: entry.summary }
+            : { index: entry.index, command: entry.command, ok: false, durationMs: entry.durationMs, error: entry.error },
         ),
       };
     }
@@ -5489,7 +5843,7 @@ class BrowserDaemon {
     if (returnMode === "final" && final) {
       return {
         text: resultText(final.result, stepMaxChars),
-        chain: { ok: results.every((entry) => entry.ok), trace: flags.trace },
+        chain: { ok: results.every((entry) => entry.ok), totalDurationMs, results: results.map(chainStepTiming), trace: flags.trace },
       };
     }
     if (returnMode === "all") {
@@ -5497,10 +5851,11 @@ class BrowserDaemon {
         text: results
           .map((entry) => {
             if (!entry.ok) {
-              return `[${entry.index}] ${entry.command ?? "?"}: ERROR ${entry.error}`;
+              return `[${entry.index}] ${entry.command ?? "?"} (${formatMs(entry.durationMs)}): ERROR ${entry.error}`;
             }
-            return `[${entry.index}] ${entry.command}: ${resultText(entry.result, stepMaxChars)}`;
+            return `[${entry.index}] ${entry.command} (${formatMs(entry.durationMs)}): ${resultText(entry.result, stepMaxChars)}`;
           })
+          .concat(`total: ${formatMs(totalDurationMs)}`)
           .join("\n\n"),
       };
     }
@@ -5508,10 +5863,11 @@ class BrowserDaemon {
       text: results
         .map((entry) => {
           if (!entry.ok) {
-            return `[${entry.index}] ${entry.command ?? "?"}: ERROR ${entry.error}`;
+            return `[${entry.index}] ${entry.command ?? "?"} (${formatMs(entry.durationMs)}): ERROR ${entry.error}`;
           }
-          return `[${entry.index}] ${entry.command}: ${entry.summary}`;
+          return `[${entry.index}] ${entry.command} (${formatMs(entry.durationMs)}): ${entry.summary}`;
         })
+        .concat(`total: ${formatMs(totalDurationMs)}`)
         .concat(flags.trace ? [`trace: ${flags.trace}`] : [])
         .join("\n"),
     };
@@ -6145,6 +6501,12 @@ class BrowserDaemon {
               }`,
           target,
         );
+      case "blocks":
+      case "visible-blocks":
+        return await rawResult(
+          visibleBlocksFunction(target),
+          target,
+        );
       case "html":
         return await rawResult(
           target ? selectorOrUidFunction(target, "(el) => el.innerHTML") : "() => document.documentElement.outerHTML",
@@ -6395,11 +6757,10 @@ class BrowserDaemon {
         flags,
       );
     }
-    return await this.callTool("wait_for", {
-      ...this.pageArgs(flags),
-      text: [args.join(" ")],
-      timeout,
-    });
+    return await this.evaluateFunction(
+      waitForTextFunction(args.join(" "), timeout),
+      flags,
+    );
   }
 
   async handleViewport(size, flags = {}) {
@@ -7455,6 +7816,15 @@ function formatMs(value) {
   return `${Math.round(positiveNumber(value))}ms`;
 }
 
+function chainStepTiming(entry) {
+  return {
+    index: entry.index,
+    command: entry.command,
+    ok: entry.ok,
+    durationMs: entry.durationMs,
+  };
+}
+
 function normalizeReturnMode(value) {
   if (value === "final" || value === "all" || value === "summary") {
     return value;
@@ -7635,7 +8005,10 @@ async function formatReadResult(command, result, flags = {}) {
   );
   let fullText;
   let displayedValue = rawValue;
-  if (Array.isArray(rawValue)) {
+  if ((command === "blocks" || command === "visible-blocks") && Array.isArray(rawValue)) {
+    displayedValue = rawValue.slice(0, limit);
+    fullText = displayedValue.map(formatVisibleBlock).join("\n\n");
+  } else if (Array.isArray(rawValue)) {
     displayedValue = rawValue.slice(0, limit);
     fullText = formatValue(displayedValue);
   } else if (rawValue && typeof rawValue === "object") {
@@ -7670,12 +8043,27 @@ async function formatReadResult(command, result, flags = {}) {
   };
 }
 
+function formatVisibleBlock(block, index) {
+  const label = block?.role || block?.tag || "block";
+  const geometry = [
+    Number.isFinite(block?.top) ? `top=${Math.round(block.top)}` : "",
+    Number.isFinite(block?.height) ? `h=${Math.round(block.height)}` : "",
+  ].filter(Boolean).join(" ");
+  const source = block?.source ? ` source=${block.source}` : "";
+  const selector = block?.selector ? ` ${block.selector}` : "";
+  const header = `[${index + 1}] ${label}${geometry ? ` ${geometry}` : ""}${source}${selector}`;
+  return `${header}\n${String(block?.text ?? "").trim()}`.trim();
+}
+
 function defaultLimitForReadCommand(command) {
   switch (command) {
     case "links":
       return "100";
     case "forms":
       return "20";
+    case "blocks":
+    case "visible-blocks":
+      return "12";
     default:
       return String(DEFAULT_LINE_LIMIT);
   }
@@ -7845,6 +8233,144 @@ function observePageFunction({ limit, maxChars, selector }) {
       fields,
       textSample,
     };
+  }`;
+}
+
+function visibleBlocksFunction(selector = undefined) {
+  return `() => {
+    const explicitSelector = ${selector ? JSON.stringify(selector) : "null"};
+    const visible = (el) => {
+      if (!(el instanceof Element)) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 40 || rect.height < 16 || rect.bottom < -20 || rect.top > innerHeight * 3) return false;
+      const style = getComputedStyle(el);
+      return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || "1") > 0;
+    };
+    const cleanLines = (value, max = 1200) => {
+      const seen = new Set();
+      const lines = String(value || "")
+        .split("\\n")
+        .map((line) => line.replace(/\\s+/g, " ").trim())
+        .filter((line) => line.length > 1)
+        .filter((line) => {
+          const key = line.toLowerCase();
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      return lines.join("\\n").slice(0, max).trim();
+    };
+    const cssPath = (el) => {
+      if (!(el instanceof Element)) return "";
+      const tag = el.tagName.toLowerCase();
+      if (el.id) return tag + "#" + CSS.escape(el.id);
+      const role = el.getAttribute("role");
+      const dataPagelet = el.getAttribute("data-pagelet");
+      if (dataPagelet) return tag + '[data-pagelet="' + dataPagelet + '"]';
+      if (role) return tag + '[role="' + role + '"]';
+      const parent = el.parentElement;
+      if (!parent) return tag;
+      const siblings = [...parent.children].filter((child) => child.tagName === el.tagName);
+      const index = siblings.indexOf(el) + 1;
+      return tag + (siblings.length > 1 ? ":nth-of-type(" + index + ")" : "");
+    };
+    const queryAll = (query) => {
+      try {
+        return [...document.querySelectorAll(query)];
+      } catch {
+        return [];
+      }
+    };
+    const pushCandidates = (items, source) => {
+      for (const item of items) {
+        if (item instanceof Element) {
+          candidates.push({ el: item, source });
+        }
+      }
+    };
+    const candidates = [];
+    if (explicitSelector) {
+      pushCandidates(queryAll(explicitSelector), "explicit");
+    } else {
+      pushCandidates(queryAll('[role="main"] [role="article"], [role="article"], article'), "article");
+      pushCandidates(queryAll('[data-pagelet*="FeedUnit"], [data-pagelet*="feed_unit"], [aria-posinset], div[data-ad-preview="message"]'), "feed");
+      if (candidates.length < 4) {
+        pushCandidates(queryAll('[role="feed"] > *, main [data-pagelet], main section, [role="main"] > div, main > div'), "main-child");
+      }
+      if (candidates.length < 4) {
+        const roots = queryAll('[role="main"], main').length ? queryAll('[role="main"], main') : [document.body].filter(Boolean);
+        for (const root of roots) {
+          const blocks = [...root.querySelectorAll('article, section, [role="article"], [role="group"], div')]
+            .filter((el) => {
+              if (!visible(el)) return false;
+              const text = cleanLines(el.innerText || el.textContent || "", 1600);
+              if (text.length < 40 || text.length > 5000) return false;
+              const parentText = el.parentElement ? cleanLines(el.parentElement.innerText || el.parentElement.textContent || "", 5200) : "";
+              if (parentText && parentText === text && el.parentElement !== root) return false;
+              return true;
+            })
+            .slice(0, 80);
+          pushCandidates(blocks, "visible-dom");
+        }
+      }
+    }
+    const unique = [];
+    const seenElements = new Set();
+    for (const candidate of candidates) {
+      if (seenElements.has(candidate.el)) continue;
+      seenElements.add(candidate.el);
+      unique.push(candidate);
+    }
+    const entries = unique
+      .filter((candidate) => visible(candidate.el))
+      .map((candidate) => {
+        const el = candidate.el;
+        const rect = el.getBoundingClientRect();
+        const text = cleanLines(el.innerText || el.textContent || el.getAttribute("aria-label") || "");
+        return {
+          tag: el.tagName.toLowerCase(),
+          role: el.getAttribute("role") || undefined,
+          source: candidate.source,
+          selector: cssPath(el),
+          top: Math.round(rect.top + scrollY),
+          left: Math.round(rect.left + scrollX),
+          height: Math.round(rect.height),
+          text,
+        };
+      })
+      .filter((entry) => entry.text.length >= 20)
+      .sort((a, b) => a.top - b.top || a.left - b.left || b.text.length - a.text.length);
+    const out = [];
+    for (const entry of entries) {
+      const normalized = entry.text.toLowerCase();
+      const duplicate = out.some((previous) => {
+        const previousText = previous.text.toLowerCase();
+        return previousText === normalized ||
+          (normalized.length > 80 && previousText.includes(normalized)) ||
+          (previousText.length > 80 && normalized.includes(previousText));
+      });
+      if (!duplicate) {
+        out.push(entry);
+      }
+      if (out.length >= 50) break;
+    }
+    if (out.length === 0) {
+      const root = explicitSelector ? queryAll(explicitSelector)[0] : document.body;
+      const fallbackText = cleanLines(root?.innerText || root?.textContent || "", 1200);
+      if (fallbackText) {
+        out.push({
+          tag: root?.tagName?.toLowerCase?.() || "body",
+          role: root?.getAttribute?.("role") || "document",
+          source: "fallback-text",
+          selector: explicitSelector || "body",
+          top: 0,
+          left: 0,
+          height: 0,
+          text: fallbackText,
+        });
+      }
+    }
+    return out;
   }`;
 }
 
@@ -8439,6 +8965,25 @@ function waitForReadyStateFunction(targetState, timeoutMs) {
   }`;
 }
 
+function waitForTextFunction(text, timeoutMs) {
+  return `async () => {
+    const needle = ${JSON.stringify(String(text ?? ""))};
+    const deadline = Date.now() + ${timeoutMs};
+    const readText = () => {
+      const root = document.body || document.documentElement;
+      return String(root?.innerText || root?.textContent || "");
+    };
+    while (Date.now() <= deadline) {
+      const haystack = readText();
+      if (haystack.includes(needle)) {
+        return { matched: needle, readyState: document.readyState, url: location.href };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("Timed out waiting for text: " + needle);
+  }`;
+}
+
 function waitForNetworkIdleFunction(timeoutMs) {
   return `async () => {
     const deadline = Date.now() + ${timeoutMs};
@@ -8526,6 +9071,10 @@ async function runDaemon() {
         sendJson(res, 200, {
           ok: true,
           pid: process.pid,
+          version: CLI_VERSION,
+          script: SCRIPT_PATH,
+          scriptHash: SCRIPT_HASH,
+          capabilities: DAEMON_CAPABILITIES,
           mode: daemon.currentMode(),
           noFallback: daemon.noFallback,
           mcpConnected: Boolean(daemon.mcp),
@@ -8557,6 +9106,9 @@ async function runDaemon() {
     port,
     token,
     startedAt: new Date().toISOString(),
+    version: CLI_VERSION,
+    scriptHash: SCRIPT_HASH,
+    capabilities: DAEMON_CAPABILITIES,
     script: SCRIPT_PATH,
     stateFile,
     session: process.env.REALBROWSER_SESSION || undefined,
@@ -8765,6 +9317,24 @@ async function runSelfTest() {
     explicitSessionEndpointFlags.session === "manual",
     "endpoint-scoped sessions respect explicit sessions",
   );
+  const restartEndpointFlags = { browserUrl: "http://127.0.0.1:9222", restartDaemon: true };
+  await prepareRealProfileSessionFlags(restartEndpointFlags);
+  assertSelfTest(
+    restartEndpointFlags.session === "cdp-127-0-0-1-9222",
+    "endpoint-scoped sessions are still selected when explicitly restarting the daemon",
+  );
+  const inheritedRestartFlags = { restartDaemon: true };
+  applyRestartDaemonInheritance(inheritedRestartFlags, {
+    modeKey: JSON.stringify({
+      mode: AUTO_MODE,
+      browserUrl: "http://127.0.0.1:9222",
+      noFallback: true,
+    }),
+  });
+  assertSelfTest(
+    inheritedRestartFlags.browserUrl === "http://127.0.0.1:9222" && inheritedRestartFlags.noFallback === true,
+    "daemon restart preserves the previous browser endpoint when no new target is specified",
+  );
   const dedupedBrowserTabs = dedupeBrowserTabs([
     {
       id: "1:abc",
@@ -8824,11 +9394,21 @@ async function runSelfTest() {
   );
   assertSelfTest(desiredMode({ anonymous: true }) === ANONYMOUS_MODE, "anonymous flag selects anonymous mode");
   const mockProfiles = [
-    { id: "chrome:Default", browserName: "Google Chrome", profileDirectory: "Default", displayName: "Person 1", email: "one@example.com" },
-    { id: "chrome:Profile 4", browserName: "Google Chrome", profileDirectory: "Profile 4", displayName: "Tom", email: "tom@example.com" },
+    { id: "chrome:Default", browserName: "Google Chrome", profileDirectory: "Default", displayName: "Person 1", email: "one@example.com", lastUsed: true, lastActive: true, activeRank: 0 },
+    { id: "chrome:Profile 4", browserName: "Google Chrome", profileDirectory: "Profile 4", displayName: "Tom", email: "tom@example.com", lastUsed: false, lastActive: true, activeRank: 1 },
   ];
   assertSelfTest(selectBrowserProfile(mockProfiles, "chrome:Profile 4")?.displayName === "Tom", "profile selection supports stable id");
   assertSelfTest(selectBrowserProfile(mockProfiles, "tom@example.com")?.profileDirectory === "Profile 4", "profile selection supports account email");
+  assertSelfTest(filterProfilesByActivity(mockProfiles, { active: true }).length === 2, "active profile filter uses Chrome activity hints");
+  assertSelfTest(formatProfileActivity(mockProfiles[0]) === "last-used,active#1", "profile activity formatter marks last-used profile");
+  assertSelfTest(
+    canOpenProfileUrlViaEndpoint({ devtoolsScope: "browser", devtoolsHttpUrl: "http://127.0.0.1:9222", lastUsed: true }),
+    "browser-level endpoint can open URL for Chrome last-used profile",
+  );
+  assertSelfTest(
+    !canOpenProfileUrlViaEndpoint({ devtoolsScope: "browser", devtoolsHttpUrl: "http://127.0.0.1:9222", lastUsed: false }),
+    "browser-level endpoint does not pretend to choose a non-last-used Chrome profile",
+  );
   const macBackgroundLaunch = macBrowserProfileLaunchCommand(
     { source: { appName: "Google Chrome" } },
     ["--profile-directory=Default", "--new-tab", "https://example.com"],
@@ -8860,13 +9440,30 @@ async function runSelfTest() {
       mockProfileEndpoint.wsEndpoint === "ws://127.0.0.1:9222/devtools/browser/mock",
     "profile endpoint is normalized for running-session reuse",
   );
+  const wsOnlyProfileEndpoint = endpointForBrowserProfile({
+    id: "chrome:Default",
+    browserName: "Google Chrome",
+    profileDirectory: "Default",
+    displayName: "Person 1",
+    devtoolsWsEndpoint: "ws://127.0.0.1:9223/devtools/browser/mock",
+  });
+  assertSelfTest(
+    wsOnlyProfileEndpoint?.httpUrl === "http://127.0.0.1:9223" &&
+      wsOnlyProfileEndpoint.wsEndpoint === "ws://127.0.0.1:9223/devtools/browser/mock",
+    "profile endpoint accepts direct WS metadata without separate HTTP metadata",
+  );
   const wsOnlyDaemon = new BrowserDaemon(path.join(os.tmpdir(), "realbrowser-ws-only-self-test.json"));
   wsOnlyDaemon.browserUrl = "ws://127.0.0.1:9222/devtools/browser/mock";
   const wsOnlyEndpoint = wsOnlyDaemon.cdpEndpoint();
   assertSelfTest(
-    wsOnlyEndpoint?.httpUrl === null &&
+    wsOnlyEndpoint?.httpUrl === "http://127.0.0.1:9222" &&
       wsOnlyEndpoint.wsEndpoint === "ws://127.0.0.1:9222/devtools/browser/mock",
-    "daemon CDP endpoint does not invent HTTP for a WS-only backend",
+    "daemon CDP endpoint derives an HTTP discovery root from direct WS endpoints",
+  );
+  assertSelfTest(
+    normalizeCdpWsEndpoint("ws://127.0.0.1:9222") === null &&
+      buildMcpArgs({ browserUrl: "ws://127.0.0.1:9222" }).includes("--browserUrl=http://127.0.0.1:9222"),
+    "bare WS roots are treated as HTTP discovery URLs instead of direct CDP websocket endpoints",
   );
   assertSelfTest(
     browserEndpointEquivalent(
@@ -8874,6 +9471,16 @@ async function runSelfTest() {
       "http://127.0.0.1:9222",
     ),
     "endpoint session reuse treats matching CDP HTTP and WS endpoints as equivalent",
+  );
+  assertSelfTest(
+    sessionMatchesBrowserEndpoint(
+      {
+        mode: "browserUrl",
+        state: { modeKey: JSON.stringify({ browserUrl: "ws://127.0.0.1:9222/devtools/browser/approved" }) },
+      },
+      { httpUrl: "http://127.0.0.1:9222", wsEndpoint: "ws://127.0.0.1:9222/devtools/browser/current" },
+    ),
+    "endpoint session reuse matches arbitrary approved session names by CDP endpoint",
   );
   const openedCandidate = openedPageCandidate(
     [{ id: 1, url: "https://example.com/old" }],
@@ -8893,6 +9500,16 @@ async function runSelfTest() {
   assertSelfTest(parsedNoDismissDetach.flags.dismissBanner === false, "parser handles no-dismiss banner flag");
   const parsedAllowAttach = parseArgv(["cleanup-remote-debugging", "--allow-attach"]);
   assertSelfTest(parsedAllowAttach.flags.allowAttach === true, "parser handles cleanup allow attach flag");
+  const parsedRestartDaemon = parseArgv(["tabs", "--restart-daemon"]);
+  assertSelfTest(parsedRestartDaemon.flags.restartDaemon === true, "parser handles daemon restart flag");
+  assertSelfTest(
+    requiredCapabilitiesForPayload({ command: "chain", args: ['[["wait","OpenClaw VN"],["blocks","--limit","5"]]'] }).has("visible-blocks"),
+    "daemon capability check inspects chain steps",
+  );
+  assertSelfTestThrows(
+    () => assertDaemonSupportsPayload({ pid: 1, session: "old" }, { command: "blocks", args: [] }),
+    "daemon capability check rejects unsupported old-daemon commands",
+  );
   const backgroundPayload = daemonPayloadForCommand(parsedBackgroundOpen.command, parsedBackgroundOpen.args, parsedBackgroundOpen.flags);
   assertSelfTest(backgroundPayload.command === "open", "open is handled by the daemon hot path");
   assertSelfTest(backgroundPayload.args[0] === "https://example.com", "open payload preserves URL");
@@ -8952,6 +9569,12 @@ async function runSelfTest() {
   assertSelfTestThrows(() => parseArgv(["claim", "--session"]), "missing flag values fail before daemon startup");
   const parsedWaitNetworkIdle = parseArgv(["wait", "--networkidle"]);
   assertSelfTest(parsedWaitNetworkIdle.args[0] === "--networkidle", "parser preserves wait readiness tokens");
+  assertSelfTest(waitForTextFunction("OpenClaw VN", 1000).includes("OpenClaw VN"), "wait text uses page-local polling function");
+  new Function(`return (${waitForTextFunction("OpenClaw VN", 1000)})`);
+  const parsedBlocks = parseArgv(["blocks", "[role=article]", "--limit", "5"]);
+  assertSelfTest(parsedBlocks.command === "blocks" && parsedBlocks.flags.limit === "5", "parser handles visible blocks command");
+  assertSelfTest(visibleBlocksFunction("[role=article]").includes("querySelectorAll"), "visible blocks builds a DOM query function");
+  new Function(`return (${visibleBlocksFunction("[role=article]")})`);
   const parsedDialogAccept = parseArgv(["dialog", "--accept", "ok"]);
   assertSelfTest(parsedDialogAccept.args.join(" ") === "--accept ok", "parser preserves dialog action tokens");
   const parsedEmulateNetwork = parseArgv(["emulate", "--network", "Offline"]);
