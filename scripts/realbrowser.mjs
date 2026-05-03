@@ -331,7 +331,7 @@ const CLI_COMMAND_GROUPS = [
       { name: "eval", aliases: ["js"], usage: "realbrowser eval <js> [--page <id>] [--max-chars <n>] [--out <path>] [--raw] [--json]", summary: "Run JavaScript in the page.", handle: true, minArgs: 1 },
       { name: "text", usage: "realbrowser text [selector|uid] [--page <id>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read text.", handle: true },
       { name: "blocks", aliases: ["visible-blocks"], usage: "realbrowser blocks [selector] [--page <id>] [--limit <n>] [--max-chars <n>] [--fallback-text] [--out <path>] [--raw]", summary: "Read compact visible text blocks.", handle: true },
-      { name: "posts", aliases: ["feed", "content-blocks"], usage: "realbrowser posts [selector] [--page <id>] [--limit <n>] [--max-chars <n>] [--out <path>] [--json]", summary: "Read compact visible feed/content posts.", handle: true },
+      { name: "posts", aliases: ["feed", "content-blocks"], usage: "realbrowser posts [selector] [--page <id>] [--limit <n>] [--max-chars <n>] [--out <path>] [--json]", summary: "Read compact visible repeated content cards.", handle: true },
       { name: "html", usage: "realbrowser html [selector|uid] [--page <id>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read HTML.", handle: true },
       { name: "links", usage: "realbrowser links [selector|uid] [--page <id>] [--limit <n>] [--filter <text>] [--text-filter <text>] [--href-filter <text>] [--visible] [--json]", summary: "Read links.", handle: true },
       { name: "forms", usage: "realbrowser forms [selector|uid] [--page <id>] [--json]", summary: "Read forms.", handle: true },
@@ -368,7 +368,7 @@ const CLI_COMMAND_GROUPS = [
       { name: "trace", usage: "realbrowser trace start|stop|analyze <insightSetId> <insightName> [--page <id>]", summary: "Use DevTools trace tools.", handle: true, minArgs: 1 },
       { name: "tool", usage: "realbrowser tool <mcpToolName> [jsonArgs]", summary: "Call a raw MCP tool.", minArgs: 1 },
       { name: "tools", usage: "realbrowser tools [--json]", summary: "List MCP tools." },
-      { name: "chain", usage: "realbrowser chain '[[\"snapshot\",\"--page\",\"1\"],[\"console\",\"--errors\",\"--page\",\"1\"]]' [--return summary|final|all] [--trace <path>] [--json]", summary: "Run several realbrowser commands in one daemon RPC.", minArgs: 1 },
+      { name: "chain", usage: "realbrowser chain '[[\"snapshot\",\"--page\",\"1\"],[\"console\",\"--errors\",\"--page\",\"1\"]]' [--return summary|final|all] [--trace <path>] [--json]", summary: "Run several realbrowser commands in one daemon RPC.", handle: true, minArgs: 1 },
       { name: "restart", usage: "realbrowser restart [--json]", summary: "Restart the MCP backend." },
     ],
   },
@@ -2608,7 +2608,7 @@ function publicHandle(handle) {
   };
 }
 
-async function writePageHandle({ state, flags, page, handlePath }) {
+async function writePageHandle({ state, flags, page, handlePath, overwrite = false }) {
   const now = new Date().toISOString();
   const session = sessionNameForState(state, flags);
   const resolvedPath = handlePath ?? handleOutputPathFromFlags(flags);
@@ -2623,7 +2623,7 @@ async function writePageHandle({ state, flags, page, handlePath }) {
     updatedAt: now,
   };
   try {
-    await writeJson(resolvedPath, handle, 0o600, { overwrite: flags.force === true });
+    await writeJson(resolvedPath, handle, 0o600, { overwrite: flags.force === true || overwrite });
   } catch (error) {
     if (error?.code === "EEXIST") {
       throw usageError(`Handle already exists: ${resolvedPath}. Use --force to replace it, or choose a project-specific --handle-out path.`);
@@ -2655,6 +2655,19 @@ function pickClaimedPage(pages, targetUrl = "") {
   return pages.find((page) => page.selected) ?? pages[0] ?? null;
 }
 
+async function readHandleFileIfPresent(filePath) {
+  try {
+    await fsp.access(filePath);
+  } catch {
+    return null;
+  }
+  try {
+    return await readHandleFile(filePath);
+  } catch {
+    return null;
+  }
+}
+
 function formatClaimText(handle) {
   return [
     `Handle: ${handle.path}`,
@@ -2668,15 +2681,34 @@ function formatClaimText(handle) {
 
 async function claimPageHandle(args, flags = {}) {
   const targetUrl = args[0] ?? "";
+  const handlePath = handleOutputPathFromFlags(flags);
+  const explicitHandlePath = Boolean(flags.handleOut || flags.handleName);
+  const existingHandle = explicitHandlePath ? await readHandleFileIfPresent(handlePath) : null;
   await resolveProfileForAutomation(flags);
   await prepareRealProfileSessionFlags(flags);
   const state = await ensureDaemon(flags);
+
+  let page = null;
+  const beforePagesResult = await daemonRpc(state, { command: "tabs", args: [], flags: {} });
+  const beforePages = parseListPagesResult(beforePagesResult);
+
   if (targetUrl) {
-    const openFlags = { ...flags, select: true };
-    await daemonRpc(state, daemonPayloadForCommand("open", [targetUrl], openFlags, state));
+    page = [...beforePages].reverse().find((entry) => sameDocumentUrl(entry.url, targetUrl)) ?? null;
+    if (!page && existingHandle) {
+      page = beforePages.find((entry) => entry.id === existingHandle.pageId && sameDocumentUrl(entry.url, targetUrl)) ?? null;
+    }
+    if (!page) {
+      const openFlags = { ...flags, select: true };
+      await daemonRpc(state, daemonPayloadForCommand("open", [targetUrl], openFlags, state));
+    }
+  } else if (existingHandle) {
+    page = beforePages.find((entry) => entry.id === existingHandle.pageId) ?? null;
   }
-  const pagesResult = await daemonRpc(state, { command: "tabs", args: [], flags: {} });
-  const page = pickClaimedPage(parseListPagesResult(pagesResult), targetUrl);
+
+  if (!page) {
+    const pagesResult = await daemonRpc(state, { command: "tabs", args: [], flags: {} });
+    page = pickClaimedPage(parseListPagesResult(pagesResult), targetUrl);
+  }
   if (!page) {
     throw new Error("Could not find a page to claim.");
   }
@@ -2684,7 +2716,8 @@ async function claimPageHandle(args, flags = {}) {
     state,
     flags,
     page,
-    handlePath: handleOutputPathFromFlags(flags),
+    handlePath,
+    overwrite: explicitHandlePath && Boolean(targetUrl),
   });
   const explicitSessionName = sessionNameFromFlags(flags);
   if (explicitSessionName) {
@@ -8200,7 +8233,7 @@ async function formatReadResult(command, result, flags = {}) {
     fullText = displayedValue.length ? displayedValue.map(formatVisibleBlock).join("\n\n") : "(no visible blocks)";
   } else if ((command === "posts" || command === "feed" || command === "content-blocks") && Array.isArray(rawValue)) {
     displayedValue = rawValue.slice(0, limit);
-    fullText = displayedValue.length ? displayedValue.map(formatVisiblePost).join("\n\n") : "(no visible content posts)";
+    fullText = displayedValue.length ? displayedValue.map(formatVisiblePost).join("\n\n") : "(no visible content cards)";
   } else if (Array.isArray(rawValue)) {
     displayedValue = rawValue.slice(0, limit);
     fullText = formatValue(displayedValue);
@@ -8630,11 +8663,28 @@ function visibleContentPostsFunction(selector = undefined) {
       const style = getComputedStyle(el);
       return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || "1") > 0;
     };
+    const pageBrandLabels = (() => {
+      const out = new Set();
+      const add = (value) => {
+        const normalized = String(value || "").replace(/\\s+/g, " ").trim().toLowerCase();
+        if (normalized.length >= 2 && normalized.length <= 50) out.add(normalized);
+      };
+      const hostParts = String(location.hostname || "").replace(/^www\\./i, "").split(".").filter(Boolean);
+      if (hostParts.length) add(hostParts[0]);
+      for (const part of String(document.title || "").split(/\\s+[|·•-]\\s+/)) {
+        add(part);
+      }
+      return out;
+    })();
     const isBoilerplateLine = (line) => {
       const value = String(line || "").trim();
       if (!value) return true;
       if (value.length > 220) return false;
-      return /^(like|comment|share|reply|send|save|follow|following|more|see more|view more|show more|hide|report|translate|copy link|not now|join|joined|visit|subscribe|notifications?|write a comment|add a comment|log in|sign up)$/i.test(value) ||
+      if (pageBrandLabels.has(value.toLowerCase())) return true;
+      return /^(like|comment|share|reply|send|save|follow|following|more|see more|view more|show more|load more|hide|report|translate|copy link|not now|join|joined|visit|subscribe|notifications?|write a comment|add a comment|comment as .+|top contributor|add friend|message|log in|sign up)$/i.test(value) ||
+        /^(?:view|show|load)\\s+(?:\\d+\\s+)?(?:more\\s+)?(?:comments?|replies?|items?|results?|responses?)$/i.test(value) ||
+        /^(?:like|comment|share|reply|send|save)\\s*\\d+(?:[.,]\\d+)?\\s*[kmb]?$/i.test(value) ||
+        /^\\d+(?:[.,]\\d+)?\\s*[kmb]?$/i.test(value) ||
         /^\\d+\\s*(likes?|comments?|shares?|replies?|views?)$/i.test(value) ||
         /^[·•⋯…]+$/.test(value);
     };
@@ -8710,13 +8760,26 @@ function visibleContentPostsFunction(selector = undefined) {
     if (explicitSelector) {
       pushCandidates(queryAll(explicitSelector), "explicit");
     } else {
-      pushCandidates(queryAll('[role="main"] [role="article"], main [role="article"], [role="article"], article'), "article");
-      pushCandidates(queryAll('[role="feed"] > *, [aria-posinset], [data-pagelet*="FeedUnit"], [data-pagelet*="feed_unit"]'), "feed");
-      pushCandidates(queryAll('main [data-testid*="post"], main [data-testid*="feed"], [role="main"] [data-testid*="post"], [role="main"] [data-testid*="feed"]'), "testid");
-      if (candidates.length < 4) {
+      const feedChildren = queryAll('[role="feed"] > *')
+        .filter((el) => {
+          if (!visible(el)) return false;
+          const text = cleanLines(el.innerText || el.textContent || "", 2600);
+          if (text.length < 40 || text.length > 8000) return false;
+          const lines = text.split("\\n").filter((line) => !isBoilerplateLine(line));
+          return lines.length >= 2 || text.length >= 120;
+        });
+      const usingFeedChildren = feedChildren.length > 0;
+      if (usingFeedChildren) {
+        pushCandidates(feedChildren, "feed");
+      } else {
+        pushCandidates(queryAll('[role="main"] [role="article"], main [role="article"], [role="article"], article'), "article");
+        pushCandidates(queryAll('[aria-posinset], [data-pagelet*="FeedUnit"], [data-pagelet*="feed_unit"]'), "feed");
+        pushCandidates(queryAll('main [data-testid*="post"], main [data-testid*="feed"], [role="main"] [data-testid*="post"], [role="main"] [data-testid*="feed"]'), "testid");
+      }
+      if (!usingFeedChildren && candidates.length < 4) {
         pushCandidates(queryAll('main section, [role="main"] section, main [role="group"], [role="main"] [role="group"], main > div, [role="main"] > div'), "main-child");
       }
-      if (candidates.length < 4) {
+      if (!usingFeedChildren && candidates.length < 4) {
         const roots = queryAll('main, [role="main"]').length ? queryAll('main, [role="main"]') : [document.body].filter(Boolean);
         for (const root of roots) {
           const blocks = [...root.querySelectorAll('article, section, [role="article"], [role="group"], [aria-posinset], div')]
@@ -9734,7 +9797,12 @@ async function runSelfTest() {
     visibleBlocksFunction(undefined, { fallbackText: true }).includes("allowFallbackText = true"),
     "visible blocks can opt into fallback text",
   );
-  new Function(`return ${visibleContentPostsFunction()}`)();
+  const visiblePostsScript = visibleContentPostsFunction();
+  new Function(`return ${visiblePostsScript}`)();
+  assertSelfTest(visiblePostsScript.includes("pageBrandLabels"), "content cards use generic page-brand filtering");
+  assertSelfTest(!visiblePostsScript.includes("facebook.com"), "content cards avoid site-specific host checks");
+  assertSelfTest(!visiblePostsScript.includes("isCommentBoundaryLine"), "content cards avoid page-specific boundary trimming");
+  assertSelfTest(!visiblePostsScript.includes("topLevelFeed"), "content cards rely on repeated container boundaries");
   new Function(`return ${linksReadFunction({ filter: "docs", limit: "3", visible: true })}`)();
   new Function(`return ${linkReadBodyFunction({ textFilter: "docs", hrefFilter: "guide" })}`)();
   new Function(`return ${waitForSelectorFunction("main", 1000, { visible: true })}`)();
@@ -9848,6 +9916,14 @@ async function runSelfTest() {
       handlePath: selfTestHandlePath,
     });
     assertSelfTest(readJsonSync(selfTestHandlePath)?.pageId === 2, "handle writes allow explicit force replacement");
+    await writePageHandle({
+      state: selfTestState,
+      flags: { stateFile: selfTestStateFile },
+      page: { ...selfTestPage, id: 3 },
+      handlePath: selfTestHandlePath,
+      overwrite: true,
+    });
+    assertSelfTest(readJsonSync(selfTestHandlePath)?.pageId === 3, "handle writes allow explicit stale-claim replacement");
   } finally {
     fs.rmSync(handleTempDir, { recursive: true, force: true });
   }
@@ -10185,6 +10261,7 @@ async function runSelfTest() {
   assertSelfTestThrows(() => validateCommandArgs("click", []), "missing positional args fail before daemon startup");
   validateCommandArgs("click", ["uid-1"]);
   assertSelfTest(handleAwareCommands().has("goto"), "handle-aware command metadata includes aliases");
+  assertSelfTest(handleAwareCommands().has("chain"), "chain can run against a pinned handle");
   assertSelfTest(!handleAwareCommands().has("select"), "page-selection commands do not implicitly consume handles");
 
   const autoControl = browserControlStatus({ running: true, mode: AUTO_MODE, mcpConnected: true });

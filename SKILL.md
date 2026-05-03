@@ -31,13 +31,16 @@ The CLI starts a persistent loopback daemon on demand. The daemon stores its por
 For authenticated browsing in the user's real Chrome profile, optimize for one
 approved connection and one compact command stream. Search/reuse the existing
 session or tab first; if a new tab is required, open it through
-`open --profile <id> <url> --select --no-fallback`. Then use `chain` with
-`goto`, `wait`, and `posts`/`blocks`/`text` instead of shell `sleep` plus broad
-`tabs --json` dumps. Profile CDP discovery tries HTTP first and falls back to
-the profile's browser WebSocket only through the persistent daemon when
-Chrome's `/json/*` endpoints are not available. Do not create transient raw
-WebSocket probes in polling loops; that can trigger repeated Chrome approval
-dialogs.
+`claim <url> --profile <id> --handle-name <task> --no-fallback` or
+`open --profile <id> <url> --select --no-fallback`. Prefer `claim` when the
+task may span multiple commands or turns: it writes a tab handle, reuses an
+existing matching tab, and replaces the handle when the old tab was closed.
+Then use `chain` with `--handle <task>` plus `goto`, `wait`, and
+`posts`/`blocks`/`text` instead of shell `sleep` plus broad `tabs --json`
+dumps. Profile CDP discovery tries HTTP first and falls back to the profile's
+browser WebSocket only through the persistent daemon when Chrome's `/json/*`
+endpoints are not available. Do not create transient raw WebSocket probes in
+polling loops; that can trigger repeated Chrome approval dialogs.
 
 The daemon reports its script hash and capabilities. If a running daemon is
 older than the edited skill and a command needs a new capability, realbrowser
@@ -143,22 +146,64 @@ For requests like "go to staging.example.com on a work browser profile, check in
 "$REALBROWSER_CLI" screenshot staging-app-inbox.png --full
 ```
 
-For authenticated social or feed-reading tasks where the goal is "what is the
-first visible post/content?", prefer compact DOM reads over screenshots or full
-snapshots:
+For authenticated content-reading tasks, choose the read mode based on the
+question instead of treating screenshots or HTML as fallbacks:
+
+- Use `posts` when you need compact repeated content cards in screen order.
+  It should follow visible container boundaries, such as direct children of a
+  feed/list/grid, instead of inferring item order from nested descendants.
+- Use `screenshot` when the task is visual, when the visible card boundary is
+  clearer on screen than in DOM text, or when content is rendered inside an
+  image/canvas/card.
+- Use `html` when you need selectors, DOM attributes, or to debug why
+  extraction is wrong. Keep stdout bounded with `--max-chars`; when the HTML is
+  large, write it to an artifact path with `--out <path>` and inspect that file
+  with the platform-native search/viewer instead of pasting large HTML into
+  context.
+- Use `snapshot` when you need clickable/accessible refs for interaction or an
+  accessibility-tree view of the page structure.
+- Use `blocks` for generic dashboards, search results, documents, and pages
+  that are not repeated-card shaped.
+
+Typical compact repeated-content read:
 
 ```bash
 "$REALBROWSER_CLI" profiles "work@example.com" --browser chrome
-"$REALBROWSER_CLI" open --profile "chrome:Default" "https://social.example.com/" --select --no-fallback --timeout 15000 --quiet
-"$REALBROWSER_CLI" chain '[["goto","https://social.example.com/groups/example-group"],["wait","Example Group","--visible","--timeout","15000"],["posts","--limit","1","--max-chars","2000"]]' --return final
+"$REALBROWSER_CLI" claim "https://example.com/items" --profile "chrome:Default" --handle-name content-read --no-fallback --timeout 15000 --quiet
+"$REALBROWSER_CLI" --handle content-read chain '[["wait","Items","--visible","--timeout","15000"],["posts","--limit","1","--max-chars","2000"]]' --return final
 ```
 
-Use `posts` first for feed-like pages because it returns compact visible
-content cards in screen order. Use `blocks` for generic dashboards, search
-results, and pages that are not feed-shaped. Fall back to targeted `js` only
-when the page's DOM structure needs custom extraction. `chain` includes per-step
-durations in JSON/trace and summary output; use that instead of shell-level
-timing when analyzing speed.
+Typical visual read:
+
+```text
+realbrowser --handle content-read screenshot <artifact-path> --raw-size
+```
+
+Typical DOM inspection:
+
+```text
+realbrowser --handle content-read html --max-chars 4000
+realbrowser --handle content-read html <selector> --out <artifact-path> --max-chars 2000
+```
+
+Use targeted `js` when the built-in read modes do not expose the structure you
+need. `chain` includes per-step durations in JSON/trace and summary output; use
+that instead of shell-level timing when analyzing speed.
+
+For repeated-content pages, do not infer the first or second item from nested
+descendants alone. Prefer the page's repeated container boundaries, then read
+those containers in screen order. If `posts` exposes too few top-level items,
+scroll or wait for more containers; if the boundary is still ambiguous, switch
+read mode deliberately (`screenshot`, `snapshot`, `html`, or targeted `js`)
+instead of forcing a semantic answer from the compact extractor. Screenshots
+are often the fastest verification for "what is visible on the page"; DOM/HTML
+reads are better for exact copyable text and selector debugging. Use both when
+precision matters.
+
+If the user closes the tab between turns, run the same `claim <url>
+--handle-name <task>` command again. A URL claim is idempotent: it reuses a live
+matching tab when present and refreshes the handle when the previous page id is
+stale. Avoid carrying raw `--page <id>` values across user turns.
 
 Use the stable profile id when a human name is ambiguous. For example, a first name may match more than one account; `chrome:Profile 4`, the account email, or another stable profile identifier is safer. `--select` opens the tab with Chrome's profile selector, waits for a matching debuggable tab, attaches to the endpoint, and selects the page. If `--select` reports no endpoint, stop and ask the user to enable Chrome remote debugging for that profile instead of falling back to the dedicated profile.
 
@@ -429,7 +474,7 @@ Global flags:
 5. If the user asks for console logs, JavaScript errors, or "what is the render problem", use `capture-console <url> --anonymous --out <file>` for clean-state checks or `select-tab`/`--profile` plus `capture-console --reload --out <file>` for authenticated checks. Feed the JSON artifact back into analysis.
 6. If a specific signed-in profile matters and no suitable tab is open, run `profiles`, choose a stable id, and open the target URL with `open --profile <id> <url> --select --no-fallback --timeout 15000`. Stop if no DevTools endpoint is available; do not fall back to the dedicated profile when cookies/login state are required.
 7. Use `tabs` before opening new pages if prior attempts may have left tabs around.
-8. Use `observe` first for page state; use `posts` first for feed-like content, `blocks` for search results or dashboards, and `snapshot --efficient` only when you need clickable `uid` refs.
+8. Use `observe` first for page state; use `posts` first for repeated-card content, `blocks` for search results or dashboards, and `snapshot --efficient` only when you need clickable `uid` refs.
 9. Act only on current snapshot `uid` refs.
 10. After navigation, modal changes, or form submission, run `observe` or `snapshot --efficient` again before the next action.
 11. If a `uid` is stale, snapshot once and retry with the new ref.
@@ -443,7 +488,7 @@ Global flags:
 - Prefer `observe`, `snapshot --efficient`, `console --errors --limit 20`, and `network --failed --limit 30`.
 - Prefer `chain --return final` for "navigate, wait, read" flows; it avoids extra process round trips, keeps only the useful final result in context, and records durations for speed review.
 - Prefer `wait <text>` or readiness waits over shell `sleep`. `wait <text>` polls in the page through the fast CDP path when a CDP endpoint is available.
-- Prefer `posts --limit <n>` for feed-like content and `blocks --limit <n>` for search results or dashboards over full-page `text`.
+- Prefer `posts --limit <n>` for repeated-card content and `blocks --limit <n>` for search results or dashboards over full-page `text`.
 - Prefer direct CDP-backed endpoint/profile sessions for cheap reads and navigation. Use `--mcp` only when you need to compare against Chrome DevTools MCP behavior.
 - Do not call raw/full snapshot by default. If the user asks for verbose or full output, use `--verbose`, `--raw`, `REALBROWSER_OUTPUT=verbose`, `REALBROWSER_OUTPUT=raw`, or `--out <path>`.
 - On Windows PowerShell, set full-output mode with `$env:REALBROWSER_OUTPUT = "raw"` before running `scripts\realbrowser.ps1`, then remove it with `Remove-Item Env:\REALBROWSER_OUTPUT`.
