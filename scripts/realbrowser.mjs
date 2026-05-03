@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DEFAULT_STATE_FILE = path.join(os.homedir(), ".realbrowser", "state.json");
+const DEFAULT_SESSION_DIR = path.join(os.homedir(), ".realbrowser", "sessions");
 const DEFAULT_PROFILE_DIR = path.join(os.homedir(), ".realbrowser", "profile");
 const DEFAULT_SCREENSHOT_DIR = path.join(os.homedir(), ".realbrowser", "screenshots");
 const DEFAULT_DOWNLOAD_DIR = path.join(os.homedir(), ".realbrowser", "downloads");
@@ -254,8 +255,9 @@ Usage:
   realbrowser doctor [--deep] [--json]
   realbrowser status [--deep] [--json]
   realbrowser profiles [query] [--browser <key>] [--json]
-  realbrowser find-tab|tabs-all [query] [--browser <key>] [--json]
-  realbrowser select-tab <query> [--browser <key>] [--front] [--json]
+  realbrowser sessions [--json]
+  realbrowser find-tab|tabs-all [query] [--browser <key>] [--all-sessions] [--json]
+  realbrowser select-tab <query> [--browser <key>] [--all-sessions] [--front] [--json]
   realbrowser open-profile <profile-query> <url> [--browser <key>] [--select] [--front] [--json]
   realbrowser capture-network [url] [--anonymous|--profile <profile-query>|--browser-url <url>] [--reload] [--duration <ms>] [--har <path>] [--json]
   realbrowser capture-console [url] [--anonymous|--profile <profile-query>|--reload] [--duration <ms>] [--out <path>] [--errors] [--json]
@@ -321,6 +323,8 @@ Global flags:
   --verbose
   --raw
   --mode compact|normal|verbose|raw
+  --session <name>
+  --all-sessions
   --state-file <path>
   --backend real|dev
   --browser-url <url>
@@ -444,6 +448,12 @@ function parseArgv(argv) {
       flags.maxLabels = argv[++index];
     } else if (arg?.startsWith("--max-labels=")) {
       flags.maxLabels = arg.slice("--max-labels=".length);
+    } else if (arg === "--session") {
+      flags.session = argv[++index];
+    } else if (arg?.startsWith("--session=")) {
+      flags.session = arg.slice("--session=".length);
+    } else if (arg === "--all-sessions" || arg === "--all-session" || arg === "--all-browser-sessions") {
+      flags.allSessions = true;
     } else if (arg === "--front" || arg === "--bring-to-front") {
       flags.front = true;
     } else if (arg === "--select") {
@@ -609,13 +619,45 @@ function parseArgv(argv) {
 }
 
 function stateFileFromFlags(flags = {}) {
+  if (flags.stateFile || process.env.REALBROWSER_STATE_FILE) {
+    return path.resolve(flags.stateFile ?? process.env.REALBROWSER_STATE_FILE);
+  }
+  const sessionName = sessionNameFromFlags(flags);
+  if (sessionName) {
+    return sessionStateFile(sessionName);
+  }
   return path.resolve(
-    flags.stateFile ?? process.env.REALBROWSER_STATE_FILE ?? DEFAULT_STATE_FILE,
+    DEFAULT_STATE_FILE,
   );
 }
 
 function stateDir(stateFile) {
   return path.dirname(stateFile);
+}
+
+function sessionNameFromFlags(flags = {}) {
+  const name = flags.session ?? process.env.REALBROWSER_SESSION;
+  const normalized = String(name ?? "").trim();
+  return normalized || "";
+}
+
+function sessionStateFile(name) {
+  return path.join(DEFAULT_SESSION_DIR, `${encodeURIComponent(String(name).trim())}.json`);
+}
+
+function sessionNameFromStateFile(filePath) {
+  const resolved = path.resolve(filePath);
+  if (resolved === path.resolve(DEFAULT_STATE_FILE)) {
+    return "default";
+  }
+  if (path.dirname(resolved) !== path.resolve(DEFAULT_SESSION_DIR)) {
+    return path.basename(resolved, path.extname(resolved)) || "custom";
+  }
+  try {
+    return decodeURIComponent(path.basename(resolved, ".json"));
+  } catch {
+    return path.basename(resolved, ".json");
+  }
 }
 
 async function readJson(file) {
@@ -819,6 +861,57 @@ async function stopState(state) {
   }
 }
 
+async function listKnownSessions(flags = {}) {
+  const candidates = new Map();
+  const addCandidate = (filePath, fallbackName) => {
+    if (!filePath) {
+      return;
+    }
+    candidates.set(path.resolve(filePath), fallbackName);
+  };
+  addCandidate(DEFAULT_STATE_FILE, "default");
+  const sessionFiles = await fsp.readdir(DEFAULT_SESSION_DIR).catch(() => []);
+  for (const fileName of sessionFiles) {
+    if (fileName.endsWith(".json")) {
+      const filePath = path.join(DEFAULT_SESSION_DIR, fileName);
+      addCandidate(filePath, sessionNameFromStateFile(filePath));
+    }
+  }
+  if (flags.stateFile) {
+    addCandidate(stateFileFromFlags(flags), sessionNameFromStateFile(stateFileFromFlags(flags)));
+  }
+  if (flags.session) {
+    addCandidate(sessionStateFile(flags.session), String(flags.session));
+  }
+
+  const sessions = [];
+  for (const [stateFile, fallbackName] of candidates) {
+    const state = await readJson(stateFile);
+    if (!state || !isProcessAlive(state.pid)) {
+      continue;
+    }
+    const healthBody = await health(state).catch(() => null);
+    if (!healthBody?.ok) {
+      continue;
+    }
+    const name = state.session ?? fallbackName;
+    sessions.push({
+      name,
+      stateFile,
+      pid: state.pid,
+      startedAt: state.startedAt,
+      mode: healthBody.mode ?? modeFromState(state) ?? "unknown",
+      noFallback: healthBody.noFallback ?? noFallbackFromState(state),
+      mcpConnected: Boolean(healthBody.mcpConnected),
+      state,
+    });
+  }
+  return sessions.sort((a, b) => (
+    a.name.localeCompare(b.name) ||
+    a.stateFile.localeCompare(b.stateFile)
+  ));
+}
+
 async function ensureDaemon(flags = {}) {
   const stateFile = stateFileFromFlags(flags);
   const existing = await readJson(stateFile);
@@ -861,6 +954,7 @@ async function ensureDaemon(flags = {}) {
       REALBROWSER_STATE_FILE: stateFile,
       REALBROWSER_MODE: startMode,
       REALBROWSER_PROFILE_DIR: startProfileDir,
+      ...(sessionNameFromFlags(flags) ? { REALBROWSER_SESSION: sessionNameFromFlags(flags) } : {}),
       ...(flags.browserUrl ? { REALBROWSER_BROWSER_URL: flags.browserUrl } : {}),
       ...(flags.noFallback ? { REALBROWSER_NO_FALLBACK: "1" } : {}),
       ...(keepAnonymous ? { REALBROWSER_KEEP_ANONYMOUS: "1" } : {}),
@@ -952,8 +1046,23 @@ async function runCli() {
     return;
   }
 
+  if (command === "sessions" || command === "session-list" || command === "list-sessions") {
+    const sessions = await listKnownSessions(flags);
+    printResult({
+      text: formatSessionListText(sessions),
+      sessions: sessions.map(publicSessionInfo),
+    }, flags);
+    return;
+  }
+
   if (command === "find-tab" || command === "tabs-all" || command === "search-tabs") {
-    const tabs = await findBrowserTabs({ query: args.join(" "), browser: flags.browser });
+    const tabs = await findBrowserTabs({
+      query: args.join(" "),
+      browser: flags.browser,
+      allSessions: flags.allSessions || command === "tabs-all",
+      session: flags.session,
+      stateFile: flags.stateFile,
+    });
     printResult({
       text: formatBrowserTabListText(tabs),
       tabs: tabs.map(publicBrowserTabInfo),
@@ -974,6 +1083,16 @@ async function runCli() {
   }
 
   if (command === "stop" || command === "detach") {
+    if (flags.allSessions) {
+      const sessions = await listKnownSessions(flags);
+      for (const session of sessions) {
+        await stopState(session.state).catch(() => {});
+      }
+      console.log(sessions.length > 0
+        ? `stopped ${sessions.length} realbrowser session${sessions.length === 1 ? "" : "s"}`
+        : "No running realbrowser sessions found.");
+      return;
+    }
     const state = await readJson(stateFileFromFlags(flags));
     if (!state || !isProcessAlive(state.pid)) {
       const bannerDismissal = flags.dismissBanner === true && !flags.cleanupRemoteDebugging
@@ -1584,6 +1703,52 @@ function formatProfileCandidates(profiles) {
   return profiles.map((profile) => `- ${profile.id} (${profile.browserName}, ${profile.displayName}${profile.email ? `, ${profile.email}` : ""})`).join("\n");
 }
 
+function formatSessionListText(sessions) {
+  if (sessions.length === 0) {
+    return "No running realbrowser sessions found.";
+  }
+  const rows = sessions.map((session) => ({
+    name: session.name,
+    mode: session.mode,
+    pid: String(session.pid ?? ""),
+    mcp: session.mcpConnected ? "yes" : "no",
+    state: session.stateFile,
+  }));
+  const widths = {
+    name: Math.max("Session".length, ...rows.map((row) => row.name.length)),
+    mode: Math.max("Mode".length, ...rows.map((row) => row.mode.length)),
+    pid: Math.max("PID".length, ...rows.map((row) => row.pid.length)),
+    mcp: Math.max("MCP".length, ...rows.map((row) => row.mcp.length)),
+  };
+  const line = (row) => [
+    row.name.padEnd(widths.name),
+    row.mode.padEnd(widths.mode),
+    row.pid.padEnd(widths.pid),
+    row.mcp.padEnd(widths.mcp),
+    row.state,
+  ].join("  ");
+  return [
+    line({ name: "Session", mode: "Mode", pid: "PID", mcp: "MCP", state: "State file" }),
+    line({ name: "-".repeat(widths.name), mode: "-".repeat(widths.mode), pid: "-".repeat(widths.pid), mcp: "-".repeat(widths.mcp), state: "----------" }),
+    ...rows.map(line),
+    "",
+    'Use: realbrowser --session "<name>" <command>',
+    'Search named sessions with: realbrowser find-tab <query> --all-sessions',
+  ].join("\n");
+}
+
+function publicSessionInfo(session) {
+  return {
+    name: session.name,
+    stateFile: session.stateFile,
+    pid: session.pid,
+    startedAt: session.startedAt,
+    mode: session.mode,
+    noFallback: session.noFallback,
+    mcpConnected: session.mcpConnected,
+  };
+}
+
 function isBrowserProfileLaunchSupported(source) {
   if (process.platform === "darwin") {
     return Boolean(source.appName);
@@ -1665,11 +1830,46 @@ async function findBrowserTabs(options = {}) {
       });
     }
   }
+  if (options.allSessions || options.session || options.stateFile) {
+    tabs.push(...await findSessionTabs(options));
+  }
   const filtered = options.query ? tabs.filter((tab) => browserTabMatchesQuery(tab, options.query)) : tabs;
   return filtered.sort((a, b) => (
+    (a.sessionName || "").localeCompare(b.sessionName || "") ||
     (a.url || "").localeCompare(b.url || "") ||
     (a.title || "").localeCompare(b.title || "")
   ));
+}
+
+async function findSessionTabs(options = {}) {
+  const sessions = await listKnownSessions(options);
+  const tabs = [];
+  for (const session of sessions) {
+    const pagesResult = await daemonRpc(session.state, { command: "tabs", args: [], flags: {} }).catch(() => null);
+    if (!pagesResult) {
+      continue;
+    }
+    const pages = parseListPagesResult(pagesResult);
+    for (const page of pages) {
+      tabs.push({
+        id: `${session.name}:${page.id}`,
+        targetId: String(page.id),
+        browserUrl: `session:${session.name}`,
+        browserWsEndpoint: null,
+        webSocketDebuggerUrl: null,
+        url: page.url,
+        title: page.selected ? "(selected)" : "",
+        source: "session",
+        sessionName: session.name,
+        stateFile: session.stateFile,
+        mode: session.mode,
+        browserNames: [],
+        profileIds: [],
+        profileNames: [`session:${session.name}`, session.mode].filter(Boolean),
+      });
+    }
+  }
+  return tabs;
 }
 
 function browserTabEndpoints(profiles, options = {}) {
@@ -1788,6 +1988,9 @@ function browserTabMatchesQuery(tab, query) {
     tab.url,
     tab.title,
     tab.browserUrl,
+    tab.source,
+    tab.sessionName,
+    tab.mode,
     ...(tab.browserNames ?? []),
     ...(tab.profileIds ?? []),
     ...(tab.profileNames ?? []),
@@ -1819,10 +2022,21 @@ function selectBrowserTabCandidate(tabs, query) {
 }
 
 async function selectBrowserTabForAutomation(query, flags = {}) {
-  const tabs = await findBrowserTabs({ query, browser: flags.browser, browserUrl: flags.browserUrl, cdpUrl: flags.cdpUrl });
+  const tabs = await findBrowserTabs({
+    query,
+    browser: flags.browser,
+    browserUrl: flags.browserUrl,
+    cdpUrl: flags.cdpUrl,
+    allSessions: flags.allSessions,
+    session: flags.session,
+    stateFile: flags.stateFile,
+  });
   const tab = selectBrowserTabCandidate(tabs, query);
   if (!tab) {
-    throw new Error(`No debuggable tab matched "${query}". Run \`realbrowser find-tab "${query}"\`; if nothing appears, open the URL with \`realbrowser open --profile <id> <url>\` and enable remote debugging for that profile.`);
+    throw new Error(`No debuggable tab matched "${query}". Run \`realbrowser find-tab "${query}" --all-sessions\`; if nothing appears, open the URL with \`realbrowser open --profile <id> <url>\` and enable remote debugging for that profile.`);
+  }
+  if (tab.source === "session") {
+    return await selectSessionTabForAutomation(tab, query, flags);
   }
   const attachFlags = { ...flags, browserUrl: tab.browserWsEndpoint ?? tab.browserUrl, noFallback: true };
   const state = await ensureDaemon(attachFlags);
@@ -1860,38 +2074,84 @@ async function selectBrowserTabForAutomation(query, flags = {}) {
   };
 }
 
+async function selectSessionTabForAutomation(tab, query, flags = {}) {
+  const state = await readJson(tab.stateFile);
+  if (!state || !isProcessAlive(state.pid)) {
+    throw new Error(`Session ${tab.sessionName} is no longer running.`);
+  }
+  await health(state);
+  const pagesResult = await daemonRpc(state, { command: "tabs", args: [], flags: {} });
+  const pages = parseListPagesResult(pagesResult);
+  const candidates = pages.filter((page) =>
+    String(page.id) === String(tab.targetId) ||
+    page.url === tab.url ||
+    page.url.includes(query) ||
+    tab.url.includes(page.url)
+  );
+  if (candidates.length !== 1) {
+    return {
+      text: [
+        `Attached to session ${tab.sessionName}, but could not map the tab to a single page.`,
+        `Matched tab: ${tab.title || "(untitled)"} ${tab.url}`,
+        `Run \`realbrowser --session "${tab.sessionName}" tabs\`, then \`realbrowser --session "${tab.sessionName}" select <pageId>\`.`,
+      ].join("\n"),
+      tab: publicBrowserTabInfo(tab),
+      pages,
+      selected: null,
+    };
+  }
+  const selected = await daemonRpc(state, {
+    command: "select",
+    args: [String(candidates[0].id)],
+    flags: { front: Boolean(flags.front) },
+  });
+  return {
+    text: [
+      `Selected tab ${candidates[0].id} in session ${tab.sessionName}.`,
+      tab.url,
+      `Continue with: realbrowser --session "${tab.sessionName}" observe`,
+    ].join("\n"),
+    quiet: `--session ${tab.sessionName}`,
+    tab: publicBrowserTabInfo(tab),
+    page: candidates[0],
+    selected,
+    session: tab.sessionName,
+  };
+}
+
 function formatBrowserTabListText(tabs) {
   if (tabs.length === 0) {
-    return "No debuggable tabs found. Enable remote debugging in the target browser/profile, or open a URL with `realbrowser open --profile <id> <url>` first.";
+    return "No debuggable tabs found. Enable remote debugging in the target browser/profile, search named sessions with `--all-sessions`, or open a URL with `realbrowser open --profile <id> <url>` first.";
   }
   const rows = tabs.map((tab) => ({
     id: tab.id,
-    profiles: compactList(tab.profileNames, 32) || "-",
+    context: tab.sessionName ? `session:${tab.sessionName}` : compactList(tab.profileNames, 32) || "-",
     title: truncateOneLine(tab.title || "(untitled)", 42),
     url: tab.url || "-",
   }));
   const widths = {
     id: Math.max("ID".length, ...rows.map((row) => row.id.length)),
-    profiles: Math.max("Possible profiles".length, ...rows.map((row) => row.profiles.length)),
+    context: Math.max("Context".length, ...rows.map((row) => row.context.length)),
     title: Math.max("Title".length, ...rows.map((row) => row.title.length)),
   };
   const line = (row) => [
     row.id.padEnd(widths.id),
-    row.profiles.padEnd(widths.profiles),
+    row.context.padEnd(widths.context),
     row.title.padEnd(widths.title),
     row.url,
   ].join("  ");
   return [
-    line({ id: "ID", profiles: "Possible profiles", title: "Title", url: "URL" }),
-    line({ id: "-".repeat(widths.id), profiles: "-".repeat(widths.profiles), title: "-".repeat(widths.title), url: "---" }),
+    line({ id: "ID", context: "Context", title: "Title", url: "URL" }),
+    line({ id: "-".repeat(widths.id), context: "-".repeat(widths.context), title: "-".repeat(widths.title), url: "---" }),
     ...rows.map(line),
     "",
     'Use: realbrowser select-tab "<url-or-title-fragment>"',
+    'For named anonymous sessions: realbrowser select-tab "<query>" --all-sessions, then continue with the reported --session.',
   ].join("\n");
 }
 
 function formatBrowserTabCandidates(tabs) {
-  return tabs.map((tab) => `- ${tab.id} ${tab.title || "(untitled)"} ${tab.url}`).join("\n");
+  return tabs.map((tab) => `- ${tab.id} ${tab.sessionName ? `[session:${tab.sessionName}] ` : ""}${tab.title || "(untitled)"} ${tab.url}`).join("\n");
 }
 
 function publicBrowserTabInfo(tab) {
@@ -1903,6 +2163,10 @@ function publicBrowserTabInfo(tab) {
     webSocketDebuggerUrl: tab.webSocketDebuggerUrl,
     title: tab.title,
     url: tab.url,
+    source: tab.source,
+    sessionName: tab.sessionName,
+    stateFile: tab.stateFile,
+    mode: tab.mode,
     browserNames: tab.browserNames,
     profileIds: tab.profileIds,
     profileNames: tab.profileNames,
@@ -1927,13 +2191,13 @@ function truncateOneLine(value, maxChars) {
 
 async function launchBrowserProfile(profile, url, flags = {}) {
   const profileArg = `--profile-directory=${profile.profileDirectory}`;
-  const newTabArg = "--new-tab";
+  const modeArgs = flags.anonymous ? ["--incognito"] : ["--new-tab"];
   if (process.platform === "darwin") {
     const executable = await firstExistingPath(macBrowserExecutableCandidates(profile.source));
     if (executable) {
-      return await spawnDetached(executable, [profileArg, newTabArg, url]);
+      return await spawnDetached(executable, [profileArg, ...modeArgs, url]);
     }
-    return await spawnDetached("open", ["-a", profile.source.appName, "--args", profileArg, newTabArg, url]);
+    return await spawnDetached("open", ["-a", profile.source.appName, "--args", profileArg, ...modeArgs, url]);
   }
   if (process.platform === "win32") {
     const executable = await firstExistingPath(windowsBrowserExecutableCandidates(profile.source)) ??
@@ -1941,19 +2205,19 @@ async function launchBrowserProfile(profile, url, flags = {}) {
     if (!executable) {
       throw new Error(`Cannot find an executable for ${profile.browserName}. Open the browser manually with ${profileArg}, or pass --browser-url after enabling remote debugging.`);
     }
-    return await spawnDetached(executable, [profileArg, newTabArg, url]);
+    return await spawnDetached(executable, [profileArg, ...modeArgs, url]);
   }
   if (profile.source.appId) {
     const flatpak = findCommandOnPath(["flatpak"]);
     if (flatpak) {
-      return await spawnDetached(flatpak, ["run", profile.source.appId, profileArg, newTabArg, url]);
+      return await spawnDetached(flatpak, ["run", profile.source.appId, profileArg, ...modeArgs, url]);
     }
   }
   const command = findCommandOnPath(profile.source.commands ?? []);
   if (!command) {
     throw new Error(`Cannot find a launcher for ${profile.browserName}. Open the browser manually with ${profileArg}, or pass --browser-url after enabling remote debugging.`);
   }
-  return await spawnDetached(command, [profileArg, newTabArg, url]);
+  return await spawnDetached(command, [profileArg, ...modeArgs, url]);
 }
 
 function publicProfileInfo(profile) {
@@ -6135,6 +6399,7 @@ async function runDaemon() {
     startedAt: new Date().toISOString(),
     script: SCRIPT_PATH,
     stateFile,
+    session: process.env.REALBROWSER_SESSION || undefined,
     modeKey: modeKey({
       anonymous: process.env.REALBROWSER_MODE === ANONYMOUS_MODE,
       dedicated: process.env.REALBROWSER_MODE === DEDICATED_MODE,
@@ -6234,6 +6499,11 @@ function runSelfTest() {
   const parsedAnonymousOpen = parseArgv(["open", "https://example.com", "--anonymous", "--select"]);
   assertSelfTest(parsedAnonymousOpen.flags.anonymous === true, "parser handles anonymous flag");
   assertSelfTest(parsedAnonymousOpen.flags.select === true, "parser handles anonymous select flag");
+  const parsedSessionOpen = parseArgv(["open", "https://example.com", "--anonymous", "--session", "tom-anon"]);
+  assertSelfTest(parsedSessionOpen.flags.session === "tom-anon", "parser handles session flag");
+  assertSelfTest(path.basename(sessionStateFile("tom anon")) === "tom%20anon.json", "session names map to encoded state files");
+  const parsedAllSessions = parseArgv(["find-tab", "ninzap.dev", "--all-sessions"]);
+  assertSelfTest(parsedAllSessions.flags.allSessions === true, "parser handles all-sessions flag");
   const parsedNetworkCapture = parseArgv(["capture-network", "https://example.com", "--anonymous", "--duration", "15000", "--har", "example.har", "--reload"]);
   assertSelfTest(parsedNetworkCapture.command === "capture-network", "parser handles capture-network command");
   assertSelfTest(parsedNetworkCapture.flags.duration === "15000", "parser handles capture duration");
