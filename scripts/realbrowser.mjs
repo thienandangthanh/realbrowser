@@ -33,6 +33,8 @@ const DEFAULT_SCREENSHOT_JPEG_QUALITY = 85;
 const SCREENSHOT_QUALITY_STEPS = [85, 75, 65, 55, 45, 35];
 const SCREENSHOT_SCALE_STEPS = [1, 0.82, 0.67, 0.55];
 const NPX_COMMAND = process.platform === "win32" ? "npx.cmd" : "npx";
+const CONTROLLED_BANNER_TEXT = "Chrome is being controlled by automated test software";
+const REMOTE_DEBUGGING_SETTINGS_URL = "chrome://inspect/#remote-debugging";
 
 const INTERACTIVE_ROLES = new Set([
   "button",
@@ -90,7 +92,7 @@ function usage() {
 
 Usage:
   realbrowser doctor [--deep] [--json]
-  realbrowser status [--json]
+  realbrowser status [--deep] [--json]
   realbrowser restart [--json]
   realbrowser tabs [--json]
   realbrowser open|newtab <url> [--front] [--json]
@@ -144,7 +146,7 @@ Usage:
   realbrowser tool <mcpToolName> [jsonArgs]
   realbrowser tools [--json]
   realbrowser chain '[["snapshot","--page","1"],["console","--errors","--page","1"]]' [--return summary|final|all] [--trace <path>] [--json]
-  realbrowser stop
+  realbrowser stop|detach
 
 Global flags:
   --json
@@ -633,14 +635,25 @@ async function runCli() {
     return;
   }
 
-  if (command === "stop") {
+  if (command === "stop" || command === "detach") {
     const state = await readJson(stateFileFromFlags(flags));
     if (!state || !isProcessAlive(state.pid)) {
-      console.log("realbrowser daemon is not running");
+      console.log([
+        "realbrowser daemon is not running",
+        `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", turn off Chrome remote debugging from the banner or ${REMOTE_DEBUGGING_SETTINGS_URL}.`,
+      ].join("\n"));
       return;
     }
     await daemonRpc(state, { command: "stop" }).catch(() => null);
-    console.log(`stopped daemon pid ${state.pid}`);
+    console.log([
+      `stopped daemon pid ${state.pid}`,
+      `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", turn off Chrome remote debugging from the banner or ${REMOTE_DEBUGGING_SETTINGS_URL}.`,
+    ].join("\n"));
+    return;
+  }
+
+  if (command === "status" && !flags.deep) {
+    printResult(await localStatus(flags), flags);
     return;
   }
 
@@ -666,6 +679,98 @@ function daemonPayloadForCommand(command, args, flags = {}) {
     };
   }
   return { command, args, flags };
+}
+
+async function localStatus(flags = {}) {
+  const stateFile = stateFileFromFlags(flags);
+  const state = await readJson(stateFile);
+  const alive = Boolean(state?.pid && isProcessAlive(state.pid));
+  let healthBody = null;
+  if (alive) {
+    healthBody = await health(state).catch(() => null);
+  }
+  const running = Boolean(alive && healthBody?.ok);
+  const mode = healthBody?.mode ?? modeFromState(state) ?? desiredMode(flags);
+  const daemon = {
+    running,
+    pid: running ? state.pid : null,
+    stateFile,
+    startedAt: running ? (state.startedAt ?? null) : null,
+    mode,
+    mcpConnected: Object.prototype.hasOwnProperty.call(healthBody ?? {}, "mcpConnected")
+      ? Boolean(healthBody.mcpConnected)
+      : null,
+  };
+  const browserControl = browserControlStatus(daemon);
+  return {
+    text: formatLocalStatusText(daemon, browserControl),
+    daemon,
+    browserControl,
+  };
+}
+
+function modeFromState(state) {
+  if (!state?.modeKey) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(state.modeKey);
+    if (parsed.browserUrl) {
+      return "browserUrl";
+    }
+    return parsed.mode ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function browserControlStatus(daemon) {
+  const mode = daemon?.mode ?? AUTO_MODE;
+  const realProfile = mode === AUTO_MODE || mode === "browserUrl";
+  const mcpKnown = typeof daemon?.mcpConnected === "boolean";
+  const mcpConnected = daemon?.mcpConnected === true;
+  const running = Boolean(daemon?.running);
+  return {
+    chromeBannerText: CONTROLLED_BANNER_TEXT,
+    chromeBannerExpectedNow: mcpKnown ? mcpConnected : null,
+    mayAppearOnNextBrowserCommand: running && (!mcpKnown || !mcpConnected),
+    realSignedInProfileMayBeControlled: realProfile && (running || mcpConnected),
+    realbrowserMcpConnected: mcpKnown ? mcpConnected : null,
+    canSafelySuppressBanner: false,
+    reason: !running
+      ? "No running realbrowser daemon was detected."
+      : mcpKnown
+        ? mcpConnected
+          ? "realbrowser is connected to Chrome through Chrome DevTools MCP."
+          : "realbrowser daemon is warm; page-inspection commands may attach through Chrome DevTools MCP."
+        : "realbrowser daemon is running, but this daemon version did not report whether Chrome DevTools MCP is connected.",
+    stopRealbrowserCommand: "realbrowser stop",
+    turnOffChromeRemoteDebugging: REMOTE_DEBUGGING_SETTINGS_URL,
+    note: "The Chrome banner is a browser safety indicator. realbrowser should report it and provide a detach path, not hide it on a signed-in profile.",
+  };
+}
+
+function formatLocalStatusText(daemon, browserControl) {
+  if (!daemon.running) {
+    return [
+      "realbrowser daemon: not running",
+      "Chrome banner: not currently attributable to a running realbrowser daemon. If it remains visible, Chrome remote debugging may still be enabled or another tool may be attached.",
+      `Cleanup: use the banner's "Turn off in settings" button or open ${browserControl.turnOffChromeRemoteDebugging}.`,
+    ].join("\n");
+  }
+  return [
+    `realbrowser daemon: running pid ${daemon.pid} mode ${daemon.mode}`,
+    `Chrome DevTools MCP connected: ${formatMaybeBoolean(daemon.mcpConnected)}`,
+    `Chrome banner: ${browserControl.chromeBannerExpectedNow === true ? "expected now" : browserControl.chromeBannerExpectedNow === false ? "may appear when the next browser command attaches" : "unknown; this daemon predates banner status reporting"}`,
+    `Real signed-in profile may be controlled: ${browserControl.realSignedInProfileMayBeControlled ? "yes" : "no"}`,
+    `Cleanup: run \`${browserControl.stopRealbrowserCommand}\`; if the banner remains, turn off Chrome remote debugging from the banner or ${browserControl.turnOffChromeRemoteDebugging}.`,
+  ].join("\n");
+}
+
+function formatMaybeBoolean(value) {
+  if (value === true) return "yes";
+  if (value === false) return "no";
+  return "unknown";
 }
 
 function backgroundNewPageArgs(url, flags = {}) {
@@ -1006,6 +1111,18 @@ class BrowserDaemon {
     return client;
   }
 
+  currentMode() {
+    return this.activeMode ?? (this.browserUrl ? "browserUrl" : this.mode);
+  }
+
+  browserControlStatus() {
+    return browserControlStatus({
+      running: true,
+      mode: this.currentMode(),
+      mcpConnected: Boolean(this.mcp),
+    });
+  }
+
   async restartDedicated() {
     if (this.mcp) {
       await this.mcp.close().catch(() => {});
@@ -1253,8 +1370,9 @@ class BrowserDaemon {
       daemon: {
         pid: process.pid,
         stateFile: this.stateFile,
-        mode: this.activeMode ?? (this.browserUrl ? "browserUrl" : this.mode),
+        mode: this.currentMode(),
       },
+      browserControl: this.browserControlStatus(),
       runtime: {
         node: process.version,
         npx: await commandVersion(NPX_COMMAND, ["--version"]),
@@ -1276,8 +1394,9 @@ class BrowserDaemon {
       daemon: {
         pid: process.pid,
         stateFile: this.stateFile,
-        mode: this.activeMode ?? (this.browserUrl ? "browserUrl" : this.mode),
+        mode: this.currentMode(),
       },
+      browserControl: this.browserControlStatus(),
       tabs: pages.length,
       selected,
     };
@@ -3454,7 +3573,12 @@ async function runDaemon() {
   const server = http.createServer(async (req, res) => {
     try {
       if (req.method === "GET" && req.url === "/health") {
-        sendJson(res, 200, { ok: true, pid: process.pid });
+        sendJson(res, 200, {
+          ok: true,
+          pid: process.pid,
+          mode: daemon.currentMode(),
+          mcpConnected: Boolean(daemon.mcp),
+        });
         return;
       }
       if (req.method !== "POST" || req.url !== "/rpc") {
@@ -3597,6 +3721,28 @@ function runSelfTest() {
 
   const parsedJson = parseArgv(["chain", '[["type","hello world"],["press","Enter"]]']);
   assertSelfTest(parsedJson.args[0].includes("hello world"), "parser preserves JSON arguments with spaces");
+
+  const autoControl = browserControlStatus({ running: true, mode: AUTO_MODE, mcpConnected: true });
+  assertSelfTest(autoControl.chromeBannerExpectedNow === true, "browser control reports active Chrome banner");
+  assertSelfTest(autoControl.canSafelySuppressBanner === false, "browser control does not suppress Chrome safety banner");
+  assertSelfTest(autoControl.realSignedInProfileMayBeControlled === true, "auto mode reports real profile control risk");
+  const dedicatedControl = browserControlStatus({ running: true, mode: DEDICATED_MODE, mcpConnected: false });
+  assertSelfTest(dedicatedControl.mayAppearOnNextBrowserCommand === true, "warm daemon reports possible later banner");
+  assertSelfTest(dedicatedControl.realSignedInProfileMayBeControlled === false, "dedicated mode does not report real profile control");
+  assertSelfTest(
+    modeFromState({ modeKey: JSON.stringify({ mode: DEDICATED_MODE, browserUrl: "" }) }) === DEDICATED_MODE,
+    "modeFromState reads dedicated mode",
+  );
+  assertSelfTest(
+    modeFromState({ modeKey: JSON.stringify({ mode: AUTO_MODE, browserUrl: "http://127.0.0.1:9222" }) }) === "browserUrl",
+    "modeFromState detects browserUrl mode",
+  );
+  const detachedControl = browserControlStatus({ running: false, mode: AUTO_MODE, mcpConnected: null });
+  assertSelfTest(detachedControl.realSignedInProfileMayBeControlled === false, "detached status reports no realbrowser control");
+  assertSelfTest(
+    detachedControl.reason.includes("No running realbrowser daemon"),
+    "detached status reports realbrowser daemon absence",
+  );
   console.log("self-test ok");
 }
 

@@ -86,6 +86,30 @@ Chrome may show an "Allow remote debugging?" dialog because this grants an exter
 
 To reduce prompts, keep the daemon warm and avoid restarting it during normal browser work. If you need a pre-opened debug endpoint, launch Chrome with a localhost-only DevTools port and use `REALBROWSER_BROWSER_URL=http://127.0.0.1:9222`, but do that only on a trusted machine because a DevTools port can control the browser.
 
+## Chrome Controlled Banner
+
+Chrome may also show "Chrome is being controlled by automated test software" while realbrowser or Chrome DevTools MCP is attached, or while Chrome remote debugging remains enabled. This is expected for a real signed-in profile. Realbrowser should not try to hide or suppress this banner because it is Chrome's safety signal that another local process can inspect or control the browser.
+
+Use `realbrowser status` for a side-effect-light control check. It does not start the browser backend by default. Use `realbrowser status --deep`, `realbrowser tabs`, or any page command only when you intentionally want to attach.
+
+Per Chrome's remote debugging flow, the banner can remain visible when Chrome still has remote debugging enabled or another debugging client is attached. Realbrowser can close its own daemon/MCP connection, but it should not use OS-specific process/port probing or hidden browser mutations to clear Chrome's UI. The portable cleanup path is the Chrome UI: use the banner's button or `chrome://inspect/#remote-debugging`.
+
+Relevant official references:
+
+- Chrome DevTools MCP active-session flow: <https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session>
+- Chrome DevTools Protocol HTTP/WebSocket endpoints: <https://chromedevtools.github.io/devtools-protocol/>
+- Chrome DevTools MCP troubleshooting: <https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/troubleshooting.md>
+
+To detach realbrowser:
+
+```bash
+./scripts/realbrowser stop
+# same behavior:
+./scripts/realbrowser detach
+```
+
+Stopping or detaching realbrowser closes its daemon/MCP connection. If Chrome still shows the banner afterward, Chrome remote debugging is still enabled or another tool is attached. Use the banner's "Turn off in settings" button, or open `chrome://inspect/#remote-debugging` and turn off remote debugging.
+
 ## Fast Agent Defaults
 
 Realbrowser is designed to keep Codex token use low:

@@ -23,6 +23,8 @@ On Windows PowerShell, prefer `scripts\realbrowser.ps1 ...`. On `cmd.exe`, use `
 
 The CLI starts a persistent loopback daemon on demand. The daemon stores its port and bearer token in `~/.realbrowser/state.json` and talks to `chrome-devtools-mcp` over stdio.
 
+`status` is side-effect-light by default and should be used to check whether realbrowser is already controlling Chrome. Use `status --deep`, `tabs`, or any page command only when you intentionally want to attach to the browser backend.
+
 ## Browser Choice
 
 Default behavior:
@@ -31,6 +33,10 @@ Default behavior:
 2. If auto-connect cannot attach, fall back to a dedicated profile at `~/.realbrowser/profile`.
 
 Chrome's "Allow remote debugging?" dialog is expected when a new Chrome DevTools MCP auto-connect session attaches to the real signed-in profile. `Allow` should be treated as permission for the current debugging connection, not a permanent approval for every future daemon process. Reuse the persistent daemon and avoid `stop`/`restart` unless needed.
+
+Chrome's "Chrome is being controlled by automated test software" banner is also expected while Chrome DevTools MCP is attached or Chrome remote debugging remains enabled. Do not try to hide it on the real signed-in profile. Report it as a safety indicator, run `realbrowser status` to identify whether the realbrowser daemon is connected, and use `realbrowser stop` or `realbrowser detach` to detach realbrowser. If the banner remains after detaching, tell the user to turn off remote debugging from the banner or `chrome://inspect/#remote-debugging`.
+
+Keep this portable. Do not add OS-specific process/port probes just to explain or clear Chrome's banner. The official portable boundary is Chrome DevTools MCP/CDP plus Chrome's own remote-debugging UI.
 
 Useful overrides:
 
@@ -46,7 +52,8 @@ REALBROWSER_STATE_FILE=/tmp/realbrowser.json "$REALBROWSER_CLI" doctor
 ## Commands
 
 - `doctor [--deep]`: check Node, npm/npx, daemon, MCP tools, and optionally live tabs.
-- `status`: show daemon mode, tab count, and selected tab.
+- `status [--deep]`: show local daemon/control state without attaching by default. Pass `--deep` to attach and include tab count plus selected tab.
+- `stop` / `detach`: stop the local daemon and close realbrowser's MCP connection. Chrome may still show its controlled banner until remote debugging is turned off in Chrome.
 - `restart`: restart the persistent daemon's MCP/browser connection without changing the daemon token or port.
 - `tabs`: list open pages.
 - `open <url>` / `newtab <url>`: open a URL in a new background page without bringing Chrome to the front. Pass `--front` only when the user explicitly wants Chrome focused.
