@@ -35,6 +35,17 @@ const SCREENSHOT_SCALE_STEPS = [1, 0.82, 0.67, 0.55];
 const NPX_COMMAND = process.platform === "win32" ? "npx.cmd" : "npx";
 const CONTROLLED_BANNER_TEXT = "Chrome is being controlled by automated test software";
 const REMOTE_DEBUGGING_SETTINGS_URL = "chrome://inspect/#remote-debugging";
+const MAC_CONTROLLED_BANNER_DISMISS_RIGHT_OFFSET = 42;
+const MAC_CONTROLLED_BANNER_DISMISS_TOP_OFFSET = 167;
+const MAC_BROWSER_PROCESS_NAMES = [
+  "Google Chrome",
+  "Google Chrome Beta",
+  "Google Chrome for Testing",
+  "Chromium",
+  "Brave Browser",
+  "Microsoft Edge",
+  "Vivaldi",
+];
 
 const INTERACTIVE_ROLES = new Set([
   "button",
@@ -147,7 +158,7 @@ Usage:
   realbrowser tool <mcpToolName> [jsonArgs]
   realbrowser tools [--json]
   realbrowser chain '[["snapshot","--page","1"],["console","--errors","--page","1"]]' [--return summary|final|all] [--trace <path>] [--json]
-  realbrowser stop|detach [--cleanup-remote-debugging]
+  realbrowser stop|detach [--cleanup-remote-debugging] [--no-dismiss-banner]
 
 Global flags:
   --json
@@ -160,7 +171,10 @@ Global flags:
   --browser-url <url>
   --cdp-url <url>
   --dedicated
+  --no-fallback
   --cleanup-remote-debugging
+  --dismiss-banner
+  --no-dismiss-banner
   --allow-attach
 `;
 }
@@ -269,12 +283,18 @@ function parseArgv(argv) {
       flags.maxLabels = arg.slice("--max-labels=".length);
     } else if (arg === "--front" || arg === "--bring-to-front") {
       flags.front = true;
+    } else if (arg === "--no-fallback") {
+      flags.noFallback = true;
     } else if (
       arg === "--cleanup-remote-debugging" ||
       arg === "--turn-off-remote-debugging" ||
       arg === "--disable-remote-debugging"
     ) {
       flags.cleanupRemoteDebugging = true;
+    } else if (arg === "--dismiss-banner") {
+      flags.dismissBanner = true;
+    } else if (arg === "--no-dismiss-banner") {
+      flags.dismissBanner = false;
     } else if (arg === "--allow-attach" || arg === "--attach") {
       flags.allowAttach = true;
     } else if (arg === "--dedicated") {
@@ -501,6 +521,7 @@ function modeKey(flags = {}) {
     browserUrl: flags.browserUrl ?? process.env.REALBROWSER_BROWSER_URL ?? "",
     profileDir: process.env.REALBROWSER_PROFILE_DIR ?? DEFAULT_PROFILE_DIR,
     packageSpec: PACKAGE_SPEC,
+    noFallback: Boolean(flags.noFallback || process.env.REALBROWSER_NO_FALLBACK === "1"),
   });
 }
 
@@ -567,6 +588,7 @@ async function ensureDaemon(flags = {}) {
       REALBROWSER_STATE_FILE: stateFile,
       REALBROWSER_MODE: desiredMode(flags),
       ...(flags.browserUrl ? { REALBROWSER_BROWSER_URL: flags.browserUrl } : {}),
+      ...(flags.noFallback ? { REALBROWSER_NO_FALLBACK: "1" } : {}),
     };
     const logFile = path.join(stateDir(stateFile), "daemon.log");
     const out = fs.openSync(logFile, "a");
@@ -651,7 +673,7 @@ async function runCli() {
     if (!state || !isProcessAlive(state.pid)) {
       const lines = [
         "realbrowser daemon is not running",
-        `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", turn off Chrome remote debugging from the banner or ${REMOTE_DEBUGGING_SETTINGS_URL}.`,
+        `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", click the banner X to hide it; this does not turn off Chrome remote debugging.`,
       ];
       if (flags.cleanupRemoteDebugging) {
         lines.push("No daemon is available for automatic cleanup; use Chrome's settings UI, or run `realbrowser cleanup-remote-debugging --allow-attach` if starting a fresh permission-gated attach is acceptable.");
@@ -659,15 +681,29 @@ async function runCli() {
       console.log(lines.join("\n"));
       return;
     }
+    const healthBody = await health(state).catch(() => null);
+    const mode = healthBody?.mode ?? modeFromState(state) ?? AUTO_MODE;
+    const hadMcpConnection = healthBody?.mcpConnected === true;
     let cleanup = null;
     if (flags.cleanupRemoteDebugging) {
       cleanup = await cleanupRemoteDebuggingViaDaemon(state);
     }
     await daemonRpc(state, { command: "stop" }).catch(() => null);
+    const shouldDismissBanner =
+      !flags.cleanupRemoteDebugging &&
+      flags.dismissBanner !== false &&
+      hadMcpConnection &&
+      mode !== DEDICATED_MODE;
+    const bannerDismissal = shouldDismissBanner
+      ? await dismissChromeControlledBanner()
+      : null;
     const lines = [
       `stopped daemon pid ${state.pid}`,
       cleanup?.text,
-      `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", turn off Chrome remote debugging from the banner or ${REMOTE_DEBUGGING_SETTINGS_URL}.`,
+      bannerDismissal?.text,
+      bannerDismissal?.attempted && !bannerDismissal.dismissed
+        ? `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", click the banner X to hide it; this does not turn off Chrome remote debugging.`
+        : "",
     ].filter(Boolean);
     console.log(lines.join("\n"));
     return;
@@ -782,6 +818,9 @@ async function localStatus(flags = {}) {
     stateFile,
     startedAt: running ? (state.startedAt ?? null) : null,
     mode,
+    noFallback: Object.prototype.hasOwnProperty.call(healthBody ?? {}, "noFallback")
+      ? Boolean(healthBody.noFallback)
+      : noFallbackFromState(state),
     mcpConnected: Object.prototype.hasOwnProperty.call(healthBody ?? {}, "mcpConnected")
       ? Boolean(healthBody.mcpConnected)
       : null,
@@ -877,30 +916,61 @@ function chromeUserDataDirCandidates() {
   if (process.env.REALBROWSER_CHROME_USER_DATA_DIR) {
     candidates.push(process.env.REALBROWSER_CHROME_USER_DATA_DIR);
   }
+  if (process.env.REALBROWSER_BROWSER_USER_DATA_DIR) {
+    candidates.push(process.env.REALBROWSER_BROWSER_USER_DATA_DIR);
+  }
   const home = os.homedir();
   if (process.platform === "darwin") {
-    candidates.push(
-      path.join(home, "Library", "Application Support", "Google", "Chrome"),
-      path.join(home, "Library", "Application Support", "Google", "Chrome Beta"),
-      path.join(home, "Library", "Application Support", "Chromium"),
-    );
+    for (const browserPath of [
+      ["Google", "Chrome"],
+      ["Google", "Chrome Beta"],
+      ["Google", "Chrome for Testing"],
+      ["Chromium"],
+      ["BraveSoftware", "Brave-Browser"],
+      ["Microsoft Edge"],
+      ["Vivaldi"],
+    ]) {
+      candidates.push(path.join(home, "Library", "Application Support", ...browserPath));
+    }
   } else if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA;
     if (localAppData) {
-      candidates.push(
-        path.join(localAppData, "Google", "Chrome", "User Data"),
-        path.join(localAppData, "Google", "Chrome Beta", "User Data"),
-        path.join(localAppData, "Chromium", "User Data"),
-      );
+      for (const browserPath of [
+        ["Google", "Chrome", "User Data"],
+        ["Google", "Chrome Beta", "User Data"],
+        ["Google", "Chrome for Testing", "User Data"],
+        ["Chromium", "User Data"],
+        ["BraveSoftware", "Brave-Browser", "User Data"],
+        ["Microsoft", "Edge", "User Data"],
+        ["Vivaldi", "User Data"],
+      ]) {
+        candidates.push(path.join(localAppData, ...browserPath));
+      }
     }
   } else {
     const configHome = process.env.XDG_CONFIG_HOME || path.join(home, ".config");
-    candidates.push(
-      path.join(configHome, "google-chrome"),
-      path.join(configHome, "google-chrome-beta"),
-      path.join(configHome, "chromium"),
-      path.join(configHome, "chromium-browser"),
-    );
+    for (const browserPath of [
+      ["google-chrome"],
+      ["google-chrome-beta"],
+      ["chrome-for-testing"],
+      ["chromium"],
+      ["chromium-browser"],
+      ["BraveSoftware", "Brave-Browser"],
+      ["microsoft-edge"],
+      ["vivaldi"],
+      ["vivaldi-snapshot"],
+    ]) {
+      candidates.push(path.join(configHome, ...browserPath));
+    }
+    for (const [appId, browserPath] of [
+      ["com.google.Chrome", ["google-chrome"]],
+      ["org.chromium.Chromium", ["chromium"]],
+      ["com.brave.Browser", ["BraveSoftware", "Brave-Browser"]],
+      ["com.microsoft.Edge", ["microsoft-edge"]],
+      ["com.vivaldi.Vivaldi", ["vivaldi"]],
+    ]) {
+      candidates.push(path.join(home, ".var", "app", appId, "config", ...browserPath));
+    }
   }
   return [...new Set(candidates.map((candidate) => path.resolve(candidate)))];
 }
@@ -920,6 +990,106 @@ function modeFromState(state) {
   }
 }
 
+function noFallbackFromState(state) {
+  if (!state?.modeKey) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(state.modeKey);
+    return parsed.noFallback === true;
+  } catch {
+    return false;
+  }
+}
+
+async function dismissChromeControlledBanner() {
+  if (process.platform === "darwin") {
+    return await dismissChromeControlledBannerMac();
+  }
+  return {
+    attempted: false,
+    dismissed: false,
+    platform: process.platform,
+    reason: "unsupported-platform",
+    text: `Banner dismissal is not automated on ${process.platform}; click the banner X to hide it. Remote debugging remains enabled.`,
+  };
+}
+
+async function dismissChromeControlledBannerMac() {
+  const configuredProcess = process.env.REALBROWSER_BROWSER_PROCESS_NAME?.trim();
+  const processNames = configuredProcess
+    ? [configuredProcess, ...MAC_BROWSER_PROCESS_NAMES.filter((name) => name !== configuredProcess)]
+    : MAC_BROWSER_PROCESS_NAMES;
+  const processList = processNames.map((name) => JSON.stringify(name)).join(", ");
+  const script = `
+tell application "System Events"
+  set browserProcessName to missing value
+  repeat with candidateName in {${processList}}
+    if exists process (candidateName as text) then
+      set browserProcessName to (candidateName as text)
+      exit repeat
+    end if
+  end repeat
+  if browserProcessName is missing value then return "not-running"
+  tell process browserProcessName
+    if not (exists window 1) then return "no-window"
+    set frontmost to true
+    set targetWindow to window 1
+    set windowPosition to position of targetWindow
+    set windowSize to size of targetWindow
+    set clickX to (item 1 of windowPosition) + (item 1 of windowSize) - ${MAC_CONTROLLED_BANNER_DISMISS_RIGHT_OFFSET}
+    set clickY to (item 2 of windowPosition) + ${MAC_CONTROLLED_BANNER_DISMISS_TOP_OFFSET}
+    click at {clickX, clickY}
+    return "clicked"
+  end tell
+end tell
+`;
+  const result = await runOsaScript(script, 1500).catch((error) => ({
+    ok: false,
+    stdout: "",
+    stderr: error instanceof Error ? error.message : String(error),
+  }));
+  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
+  const dismissed = result.ok === true && /clicked/i.test(output);
+  return {
+    attempted: true,
+    dismissed,
+    platform: "darwin",
+    reason: dismissed ? "clicked-banner-close" : "click-failed",
+    text: dismissed
+      ? "Dismissed the visible Chrome automation banner X. Remote debugging remains enabled."
+      : `Tried to dismiss the Chrome automation banner X, but it was not confirmed. ${output ? `Detail: ${output}` : ""}`.trim(),
+  };
+}
+
+function runOsaScript(script, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("osascript", [], { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error("osascript timed out"));
+    }, timeoutMs);
+    timer.unref?.();
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, stdout: stdout.trim(), stderr: stderr.trim(), code });
+    });
+    child.stdin.end(script);
+  });
+}
+
 function browserControlStatus(daemon, chromeRemoteDebugging = null) {
   const mode = daemon?.mode ?? AUTO_MODE;
   const realProfile = mode === AUTO_MODE || mode === "browserUrl";
@@ -936,6 +1106,7 @@ function browserControlStatus(daemon, chromeRemoteDebugging = null) {
     chromeRemoteDebuggingUserEnabled: chromeRemoteDebugging?.known ? chromeRemoteDebugging.userEnabled : null,
     chromeRemoteDebuggingMetadataAppliesToActiveBrowser: mode === AUTO_MODE ? true : null,
     canSafelySuppressBanner: false,
+    canDismissBannerAfterDetach: process.platform === "darwin",
     reason: !running
       ? "No running realbrowser daemon was detected."
       : mcpKnown
@@ -943,9 +1114,9 @@ function browserControlStatus(daemon, chromeRemoteDebugging = null) {
           ? "realbrowser is connected to Chrome through Chrome DevTools MCP."
           : "realbrowser daemon is warm; page-inspection commands may attach through Chrome DevTools MCP."
         : "realbrowser daemon is running, but this daemon version did not report whether Chrome DevTools MCP is connected.",
-    stopRealbrowserCommand: "realbrowser stop",
+    stopRealbrowserCommand: "realbrowser detach",
     turnOffChromeRemoteDebugging: REMOTE_DEBUGGING_SETTINGS_URL,
-    note: "The Chrome banner is a browser safety indicator. realbrowser should report it and provide a detach path, not hide it on a signed-in profile.",
+    note: "The Chrome banner is a browser safety indicator while attached. Plain detach closes realbrowser's session and may dismiss the banner UI, but it must not disable Chrome remote debugging.",
   };
 }
 
@@ -960,7 +1131,7 @@ function formatLocalStatusText(daemon, browserControl, chromeRemoteDebugging = n
     const bannerLine = "Chrome banner: not attributable to a running realbrowser daemon.";
     const cleanupLine = chromeRemoteDebugging?.known && !chromeRemoteDebugging.userEnabled
       ? "Cleanup: no realbrowser cleanup needed; if a banner remains, another tool/session may still be attached."
-      : `Cleanup: use the banner's "Turn off in settings" button or open ${browserControl.turnOffChromeRemoteDebugging}.`;
+      : `Cleanup: click the banner X to hide it, or open ${browserControl.turnOffChromeRemoteDebugging} only if you want to disable Chrome remote debugging.`;
     return [
       "realbrowser daemon: not running",
       bannerLine,
@@ -972,11 +1143,12 @@ function formatLocalStatusText(daemon, browserControl, chromeRemoteDebugging = n
   return [
     `realbrowser daemon: running pid ${daemon.pid} mode ${daemon.mode}`,
     `Chrome DevTools MCP connected: ${formatMaybeBoolean(daemon.mcpConnected)}`,
+    `Dedicated fallback disabled: ${formatMaybeBoolean(daemon.noFallback)}`,
     metadataLine,
     metadataCaveat,
     `Chrome banner: ${browserControl.chromeBannerExpectedNow === true ? "expected now" : browserControl.chromeBannerExpectedNow === false ? "may appear when the next browser command attaches" : "unknown; this daemon predates banner status reporting"}`,
     `Real signed-in profile may be controlled: ${browserControl.realSignedInProfileMayBeControlled ? "yes" : "no"}`,
-    `Cleanup: run \`${browserControl.stopRealbrowserCommand}\`; if the banner remains, turn off Chrome remote debugging from the banner or ${browserControl.turnOffChromeRemoteDebugging}.`,
+    `Cleanup: run \`${browserControl.stopRealbrowserCommand}\`; plain detach keeps Chrome remote debugging enabled and best-effort clicks the banner X. Use \`${browserControl.stopRealbrowserCommand} --cleanup-remote-debugging\` only when you want to disable Chrome remote debugging too.`,
   ].filter(Boolean).join("\n");
 }
 
@@ -1332,6 +1504,7 @@ class BrowserDaemon {
     this.mode = process.env.REALBROWSER_MODE === DEDICATED_MODE ? DEDICATED_MODE : AUTO_MODE;
     this.browserUrl = process.env.REALBROWSER_BROWSER_URL?.trim() || "";
     this.profileDir = process.env.REALBROWSER_PROFILE_DIR ?? DEFAULT_PROFILE_DIR;
+    this.noFallback = process.env.REALBROWSER_NO_FALLBACK === "1";
     this.mcp = null;
     this.tools = null;
     this.hiddenConsoleLines = new Set();
@@ -1397,7 +1570,13 @@ class BrowserDaemon {
       }
       return normalizeToolResult(result);
     } catch (error) {
-      if (!options.noFallback && this.mode === AUTO_MODE && !this.browserUrl && isAttachFailure(error)) {
+      if (
+        !options.noFallback &&
+        !this.noFallback &&
+        this.mode === AUTO_MODE &&
+        !this.browserUrl &&
+        isAttachFailure(error)
+      ) {
         const dedicated = await this.restartDedicated();
         const result = await dedicated.callTool(name, args);
         const err = toolError(result, name);
@@ -3937,6 +4116,7 @@ async function runDaemon() {
           ok: true,
           pid: process.pid,
           mode: daemon.currentMode(),
+          noFallback: daemon.noFallback,
           mcpConnected: Boolean(daemon.mcp),
         });
         return;
@@ -4053,6 +4233,12 @@ function runSelfTest() {
   assertSelfTest(parsedForegroundOpen.flags.front === true, "open --front opts into focus");
   const parsedCleanupDetach = parseArgv(["detach", "--cleanup-remote-debugging"]);
   assertSelfTest(parsedCleanupDetach.flags.cleanupRemoteDebugging === true, "parser handles cleanup remote debugging flag");
+  const parsedNoFallbackOpen = parseArgv(["open", "https://example.com", "--no-fallback"]);
+  assertSelfTest(parsedNoFallbackOpen.flags.noFallback === true, "parser handles no-fallback flag");
+  const parsedDismissDetach = parseArgv(["detach", "--dismiss-banner"]);
+  assertSelfTest(parsedDismissDetach.flags.dismissBanner === true, "parser handles dismiss banner flag");
+  const parsedNoDismissDetach = parseArgv(["detach", "--no-dismiss-banner"]);
+  assertSelfTest(parsedNoDismissDetach.flags.dismissBanner === false, "parser handles no-dismiss banner flag");
   const parsedAllowAttach = parseArgv(["cleanup-remote-debugging", "--allow-attach"]);
   assertSelfTest(parsedAllowAttach.flags.allowAttach === true, "parser handles cleanup allow attach flag");
   const backgroundPayload = daemonPayloadForCommand(parsedBackgroundOpen.command, parsedBackgroundOpen.args, parsedBackgroundOpen.flags);
@@ -4100,6 +4286,10 @@ function runSelfTest() {
   assertSelfTest(
     modeFromState({ modeKey: JSON.stringify({ mode: AUTO_MODE, browserUrl: "http://127.0.0.1:9222" }) }) === "browserUrl",
     "modeFromState detects browserUrl mode",
+  );
+  assertSelfTest(
+    noFallbackFromState({ modeKey: JSON.stringify({ mode: AUTO_MODE, noFallback: true }) }) === true,
+    "noFallbackFromState reads disabled fallback",
   );
   const detachedControl = browserControlStatus({ running: false, mode: AUTO_MODE, mcpConnected: null });
   assertSelfTest(detachedControl.realSignedInProfileMayBeControlled === false, "detached status reports no realbrowser control");

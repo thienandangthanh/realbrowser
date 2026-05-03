@@ -30,14 +30,16 @@ The CLI starts a persistent loopback daemon on demand. The daemon stores its por
 
 Default behavior:
 
-1. Prefer Chrome DevTools MCP `--autoConnect` so Codex can control the user's real running Chrome profile after Chrome remote debugging permission is enabled in `chrome://inspect/#remote-debugging`.
+1. Prefer Chrome DevTools MCP `--autoConnect` so Codex can control the user's real running Chrome profile after Chrome DevTools Protocol remote debugging is enabled in `chrome://inspect/#remote-debugging`.
 2. If auto-connect cannot attach, fall back to a dedicated profile at `~/.realbrowser/profile`.
 
 Chrome's "Allow remote debugging?" dialog is expected when a new Chrome DevTools MCP auto-connect session attaches to the real signed-in profile. `Allow` should be treated as permission for the current debugging connection, not a permanent approval for every future daemon process. Reuse the persistent daemon and avoid `stop`/`restart` unless needed.
 
-Chrome's "Chrome is being controlled by automated test software" banner is expected while Chrome DevTools MCP has an active debugging session. Do not try to hide it on the real signed-in profile as proof of cleanup. Report it as a safety indicator, run `realbrowser status` to identify whether the realbrowser daemon is connected, and use `realbrowser stop` or `realbrowser detach` to detach realbrowser. If the task should also leave the user's Chrome remote-debugging setting clean, use `realbrowser detach --cleanup-remote-debugging` while the daemon is still running; this attempts to turn off Chrome's official `chrome://inspect/#remote-debugging` setting before detaching. If the daemon is already stopped, `realbrowser cleanup-remote-debugging` will not create a fresh debugging session unless `--allow-attach` is passed. If the banner remains after detaching, tell the user to turn off remote debugging from the banner or `chrome://inspect/#remote-debugging`; dismissing the banner's `X` only hides browser UI and does not disable remote debugging.
+For tasks that require the user's logged-in Chrome profile, fallback is not acceptable. First verify the intended Chrome profile is active, open `chrome://inspect/#remote-debugging` in that profile, turn on "Allow remote debugging for this browser instance", then run realbrowser with `--no-fallback` or `REALBROWSER_NO_FALLBACK=1`. `status` should then report `Dedicated fallback disabled: yes`. If attach still fails, stop and report the Chrome remote-debugging/CDP blocker instead of continuing in the dedicated profile.
 
-Keep this portable. Do not add OS-specific process/port probes just to explain or clear Chrome's banner. The official portable boundary is Chrome DevTools MCP/CDP plus Chrome's own remote-debugging UI.
+Chrome's "Chrome is being controlled by automated test software" banner is expected while Chrome DevTools MCP has an active debugging session. Report it as a safety indicator, run `realbrowser status` to identify whether the realbrowser daemon is connected, and use `realbrowser stop` or `realbrowser detach` to detach realbrowser. Plain detach should not turn off Chrome remote debugging; it only closes the session and best-effort clicks the visible banner `X` on supported desktop platforms. This only hides browser UI and does not disable remote debugging/CDP. On platforms where browser-UI clicking is not automated, detach must still succeed and print a manual banner-X instruction. If the task should also turn off the user's Chrome remote-debugging setting, use `realbrowser detach --cleanup-remote-debugging` while the daemon is still running. If the daemon is already stopped, `realbrowser cleanup-remote-debugging` will not create a fresh debugging session unless `--allow-attach` is passed.
+
+Keep this portable. The official portable boundary is Chrome DevTools MCP/CDP plus Chrome's own remote-debugging UI. OS browser-UI automation is best-effort only and must not be required for the core attach/detach flow.
 
 Useful overrides:
 
@@ -48,13 +50,15 @@ REALBROWSER_BROWSER_URL=http://127.0.0.1:9222 "$REALBROWSER_CLI" tabs
 REALBROWSER_BROWSER_URL=http://127.0.0.1:9222 "$REALBROWSER_CLI" download <uid> report.pdf
 REALBROWSER_CDP_URL=http://127.0.0.1:9222 "$REALBROWSER_CLI" wait-download report.pdf
 REALBROWSER_STATE_FILE=/tmp/realbrowser.json "$REALBROWSER_CLI" doctor
+REALBROWSER_BROWSER_USER_DATA_DIR=/path/to/browser/profile-root "$REALBROWSER_CLI" status
+REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach
 ```
 
 ## Commands
 
 - `doctor [--deep]`: check Node, npm/npx, daemon, MCP tools, and optionally live tabs.
-- `status [--deep]`: show local daemon/control state without attaching by default. It may include default-local-Chrome remote-debugging metadata when that file is available; treat that as a diagnostic hint, not proof for dedicated profiles, `--browser-url`, Brave, Edge, or remote CDP. Pass `--deep` to attach and include tab count plus selected tab.
-- `stop` / `detach`: stop the local daemon and close realbrowser's MCP connection. Chrome may still show its controlled banner until remote debugging is turned off in Chrome. Add `--cleanup-remote-debugging` when the user explicitly wants Chrome's remote-debugging setting turned off too.
+- `status [--deep]`: show local daemon/control state without attaching by default. It may include default-local-browser remote-debugging metadata when that file is available; treat that as a diagnostic hint, not proof for dedicated profiles, `--browser-url`, or remote CDP. Pass `--deep` to attach and include tab count plus selected tab.
+- `stop` / `detach`: stop the local daemon and close realbrowser's MCP connection. Plain detach leaves Chrome remote debugging enabled and best-effort dismisses the visible automation banner `X`; pass `--no-dismiss-banner` to skip that UI click. Add `--cleanup-remote-debugging` only when the user explicitly wants Chrome's remote-debugging setting turned off too.
 - `cleanup-remote-debugging`: turn off Chrome's `chrome://inspect/#remote-debugging` setting through an existing realbrowser daemon, then stop the daemon. Add `--allow-attach` to start a fresh permission-gated attach when no daemon is running. Dedicated-profile mode skips user Chrome settings cleanup and just stops the managed session. `--browser-url` cleanup targets the configured backend through browser UI when possible; local Chrome metadata may not describe that backend.
 - `restart`: restart the persistent daemon's MCP/browser connection without changing the daemon token or port.
 - `tabs`: list open pages.
@@ -117,10 +121,12 @@ Global flags:
 - `--browser-url <url>`: connect to an existing CDP endpoint instead of autoConnect.
 - `--cdp-url <url>`: use a CDP endpoint for download interception while keeping the browser backend unchanged.
 - `--dedicated`: force the dedicated fallback profile.
+- `--no-fallback`: require real Chrome/Chrome MCP attach to work; do not switch to the dedicated profile. Use this whenever existing cookies/login state are required.
+- `--dismiss-banner` / `--no-dismiss-banner`: control the best-effort browser-UI click that hides Chrome's automation banner during plain detach. This does not change remote-debugging/CDP settings. On unsupported platforms, the CLI prints the manual banner-X instruction instead of failing.
 
 ## Operating Loop
 
-1. Start with `doctor` when setup is uncertain.
+1. Start with `doctor` when setup is uncertain. For login-state tasks, verify the intended Chrome profile, enable Chrome remote debugging/CDP in `chrome://inspect/#remote-debugging`, and run with `--no-fallback`.
 2. Use `tabs` before opening new pages if prior attempts may have left tabs around.
 3. Use `observe` first for page state; use `snapshot --efficient` only when you need clickable `uid` refs.
 4. Act only on current snapshot `uid` refs.
@@ -145,7 +151,9 @@ Global flags:
 
 - Supported runtimes: macOS, Linux, and Windows with Node.js 22+ and `npm`/`npx`.
 - Use `scripts/realbrowser` on macOS/Linux; use `scripts\realbrowser.ps1` on Windows PowerShell; use `scripts\realbrowser.cmd` on `cmd.exe`; `node scripts\realbrowser.mjs` and the npm bin are portable fallbacks.
-- Real-browser attach is delegated to Chrome DevTools MCP. If auto-connect cannot attach to a real profile on any OS, retry with `--backend dev`.
+- Real-browser attach is delegated to Chrome DevTools MCP. If auto-connect cannot attach to a real profile on any OS, retry with `--backend dev` only when existing cookies/login state are not required.
+- Remote-debugging metadata checks understand common Chrome, Chromium, Chrome Beta/Testing, Brave, Edge, Vivaldi, Linux Flatpak, and Windows user-data locations. Set `REALBROWSER_BROWSER_USER_DATA_DIR` or `REALBROWSER_CHROME_USER_DATA_DIR` when the profile root is custom.
+- Banner-X dismissal is a best-effort desktop UI action. The core detach flow remains portable because it does not require that UI automation to succeed, and it never disables CDP unless `--cleanup-remote-debugging` is explicitly passed.
 - Screenshot normalization is dependency-free and uses Chrome DevTools MCP capture/emulation calls on macOS, Linux, and Windows.
 - Protocol actions, screenshots, snapshots, console, network, and downloads should not require focusing the browser window.
 
