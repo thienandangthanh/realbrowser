@@ -35,10 +35,11 @@ Use `--session <name>` whenever multiple browser contexts may exist. A named ses
 Realbrowser also has one active session pointer at `~/.realbrowser/active-session.json`. `select-tab` sets it after a unique match, explicit `--session <name>` commands set it after successful page commands, and `use-session <name>` sets it manually. Plain follow-up commands such as `observe`, `console`, `capture-network`, `viewport`, and `screenshot` use the active running session automatically. Use `sessions` to see the active `*`, `active-session` to inspect it, `clear-session` to forget it, and `--no-active-session` when you intentionally want the default state file instead.
 
 For concurrent Codex tabs or other multi-agent work, use tab handles instead of
-selected-tab state. A handle is a small JSON file containing `session + pageId`.
-Commands that accept page context can use `--handle <path-or-name>` or
-`REALBROWSER_HANDLE`, which pins follow-up commands to that tab even when another
-Codex tab selects a different page in the same browser profile:
+selected-tab state. A handle is a small JSON file containing the target state
+file/session plus `pageId`. Commands that accept page context can use
+`--handle <path-or-name>` or `REALBROWSER_HANDLE`, which pins follow-up commands
+to that tab even when another Codex tab selects a different page in the same
+browser profile:
 
 ```bash
 "$REALBROWSER_CLI" claim https://ninzap.dev --session work-profile --handle-name ninzap --json
@@ -50,7 +51,10 @@ export REALBROWSER_HANDLE=ninzap
 ```
 
 Prefer `claim` + `--handle`/`REALBROWSER_HANDLE` for daily automation. Use
-`select` only for manual handoff or single-agent interactive browsing.
+`select` only for manual handoff or single-agent interactive browsing. Handles
+are live references, not restartable bookmarks: if the recorded daemon is gone
+or the page is closed, reclaim the tab instead of letting the command start a
+fresh daemon and reuse a stale `pageId`.
 
 Viewport and screenshot operations are page-scoped in Chrome DevTools. When a
 task depends on an exact viewport, especially mobile screenshots, capture the
@@ -67,7 +71,7 @@ Default behavior:
 1. Prefer Chrome DevTools MCP `--autoConnect` so Codex can control the user's real running Chrome profile after Chrome DevTools Protocol remote debugging is enabled in `chrome://inspect/#remote-debugging`.
 2. If auto-connect cannot attach, fall back to a dedicated profile at `~/.realbrowser/profile`.
 
-Chrome's "Allow remote debugging?" dialog is expected when a new Chrome DevTools MCP auto-connect session attaches to the real signed-in profile. `Allow` should be treated as permission for the current debugging connection, not a permanent approval for every future daemon process. Realbrowser should reuse an already-running real-profile attach session for plain auto-mode commands, including new `claim` calls from another Codex tab. For concurrent work in the same signed-in profile, use tab handles on that one shared attach point. Avoid creating multiple named auto-mode sessions for the same real profile; use `--dedicated` or `--anonymous` when you truly need a separate browser instance.
+Chrome's "Allow remote debugging?" dialog is expected when a new Chrome DevTools MCP auto-connect session attaches to the real signed-in profile. `Allow` should be treated as permission for the current debugging connection, not a permanent approval for every future daemon process. Realbrowser should reuse an already-running real-profile attach session for plain auto-mode commands, including new `claim` calls from another Codex tab. New real-profile attaches are serialized with a global lock so simultaneous Codex tabs wait, re-check for the first attach, and reuse it when possible. For concurrent work in the same signed-in profile, use tab handles on that one shared attach point. Avoid creating multiple named auto-mode sessions for the same real profile; use `--dedicated` or `--anonymous` when you truly need a separate browser instance.
 
 For tasks that require the user's logged-in Chrome profile, fallback is not acceptable. First verify the intended Chrome profile is active, open `chrome://inspect/#remote-debugging` in that profile, turn on "Allow remote debugging for this browser instance", then run realbrowser with `--no-fallback` or `REALBROWSER_NO_FALLBACK=1`. `status` should then report `Dedicated fallback disabled: yes`. If attach still fails, stop and report the Chrome remote-debugging/CDP blocker instead of continuing in the dedicated profile.
 

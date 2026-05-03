@@ -14,6 +14,7 @@ const DEFAULT_STATE_FILE = path.join(os.homedir(), ".realbrowser", "state.json")
 const DEFAULT_SESSION_DIR = path.join(os.homedir(), ".realbrowser", "sessions");
 const ACTIVE_SESSION_FILE = path.join(os.homedir(), ".realbrowser", "active-session.json");
 const DEFAULT_HANDLE_DIR = path.join(os.homedir(), ".realbrowser", "handles");
+const REAL_PROFILE_ATTACH_LOCK_FILE = path.join(os.homedir(), ".realbrowser", "real-profile-attach.lock");
 const DEFAULT_PROFILE_DIR = path.join(os.homedir(), ".realbrowser", "profile");
 const DEFAULT_SCREENSHOT_DIR = path.join(os.homedir(), ".realbrowser", "screenshots");
 const DEFAULT_DOWNLOAD_DIR = path.join(os.homedir(), ".realbrowser", "downloads");
@@ -688,6 +689,9 @@ function sessionNameFromFlags(flags = {}) {
 }
 
 function effectiveSessionNameFromFlags(flags = {}) {
+  if (flags.stateFile || process.env.REALBROWSER_STATE_FILE) {
+    return sessionNameFromFlags(flags);
+  }
   return sessionNameFromFlags(flags) || activeSessionNameFromFlags(flags);
 }
 
@@ -814,6 +818,9 @@ async function readHandleFile(filePath) {
   if (handle.pageId === undefined || handle.pageId === null) {
     throw new Error(`Realbrowser handle is missing pageId: ${resolved}`);
   }
+  if (!handle.session && !handle.stateFile) {
+    throw new Error(`Realbrowser handle is missing session/stateFile: ${resolved}`);
+  }
   return {
     path: resolved,
     session: String(handle.session ?? "").trim(),
@@ -824,6 +831,56 @@ async function readHandleFile(filePath) {
     updatedAt: handle.updatedAt ?? null,
     raw: handle,
   };
+}
+
+function explicitStateFileFromFlags(flags = {}) {
+  const value = flags.stateFile ?? process.env.REALBROWSER_STATE_FILE;
+  return value ? path.resolve(value) : "";
+}
+
+function stateFileFromHandle(handle) {
+  if (handle.stateFile) {
+    return path.resolve(handle.stateFile);
+  }
+  if (handle.session) {
+    return stateFileForSessionName(handle.session);
+  }
+  throw new Error(`Realbrowser handle is missing session/stateFile: ${handle.path}`);
+}
+
+function handleTargetDescription(handle) {
+  return handle.session
+    ? `session "${handle.session}" page ${handle.pageId}`
+    : `state file "${handle.stateFile}" page ${handle.pageId}`;
+}
+
+function staleHandleError(handle, reason) {
+  return new Error([
+    `Stale realbrowser handle: ${handle.path}`,
+    `Target: ${handleTargetDescription(handle)}.`,
+    reason,
+    "Run `realbrowser claim ... --handle-name <name>` again, or release the stale handle.",
+  ].join("\n"));
+}
+
+async function validateHandleTarget(handle) {
+  const stateFile = stateFileFromHandle(handle);
+  const state = await readJson(stateFile);
+  if (!state?.pid || !isProcessAlive(state.pid)) {
+    throw staleHandleError(handle, `The recorded daemon is not running for ${stateFile}.`);
+  }
+  try {
+    await health(state);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw staleHandleError(handle, `The recorded daemon is not healthy: ${reason}`);
+  }
+  const pagesResult = await daemonRpc(state, { command: "tabs", args: [], flags: {} });
+  const page = parseListPagesResult(pagesResult).find((entry) => entry.id === handle.pageId);
+  if (!page) {
+    throw staleHandleError(handle, `Page ${handle.pageId} is no longer open in the recorded daemon.`);
+  }
+  return { state, stateFile, page };
 }
 
 function handleAwareCommands() {
@@ -892,18 +949,23 @@ async function applyHandleToFlags(command, flags = {}) {
     return null;
   }
   const handle = await readHandleFile(handlePath);
-  const explicitHandle = Boolean(flags.handle);
-  if (explicitHandle && flags.session && handle.session && flags.session !== handle.session) {
-    throw new Error(`--handle session mismatch: handle uses "${handle.session}", command passed "${flags.session}"`);
+  const requestedSession = sessionNameFromFlags(flags);
+  if (requestedSession && handle.session && requestedSession !== handle.session) {
+    throw new Error(`--handle session mismatch: handle uses "${handle.session}", command passed "${requestedSession}"`);
   }
-  if (explicitHandle && flags.page !== undefined && parsePageId(flags.page) !== handle.pageId) {
+  const requestedStateFile = explicitStateFileFromFlags(flags);
+  if (requestedStateFile && handle.stateFile && requestedStateFile !== handle.stateFile) {
+    throw new Error(`--handle state-file mismatch: handle uses "${handle.stateFile}", command passed "${requestedStateFile}"`);
+  }
+  if (flags.page !== undefined && parsePageId(flags.page) !== handle.pageId) {
     throw new Error(`--handle page mismatch: handle uses page ${handle.pageId}, command passed page ${flags.page}`);
+  }
+  await validateHandleTarget(handle);
+  if (!flags.stateFile && handle.stateFile) {
+    flags.stateFile = handle.stateFile;
   }
   if (!flags.session && handle.session) {
     flags.session = handle.session;
-  }
-  if (!flags.stateFile && !handle.session && handle.stateFile) {
-    flags.stateFile = handle.stateFile;
   }
   if (flags.page === undefined) {
     flags.page = String(handle.pageId);
@@ -929,9 +991,18 @@ function readJsonSync(file) {
 }
 
 async function writeJson(file, value, mode = 0o600) {
-  await fsp.mkdir(path.dirname(file), { recursive: true });
-  await fsp.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, { mode });
-  await fsp.chmod(file, mode).catch(() => {});
+  const dir = path.dirname(file);
+  await fsp.mkdir(dir, { recursive: true });
+  const tempFile = path.join(dir, `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`);
+  try {
+    await fsp.writeFile(tempFile, `${JSON.stringify(value, null, 2)}\n`, { mode });
+    await fsp.chmod(tempFile, mode).catch(() => {});
+    await fsp.rename(tempFile, file);
+    await fsp.chmod(file, mode).catch(() => {});
+  } catch (error) {
+    await fsp.rm(tempFile, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 function isProcessAlive(pid) {
@@ -1056,20 +1127,28 @@ function modeKey(flags = {}) {
   });
 }
 
-function hasExplicitDaemonSelection(flags = {}) {
+function hasExplicitBrowserTargetSelection(flags = {}) {
+  const envMode = process.env.REALBROWSER_MODE;
   return Boolean(
     flags.anonymous ||
     flags.dedicated ||
     flags.backend ||
     flags.browserUrl ||
     flags.profileDir ||
-    flags.noFallback ||
     flags.keepAnonymous ||
-    process.env.REALBROWSER_MODE ||
-    process.env.REALBROWSER_ANONYMOUS ||
+    (envMode && envMode !== AUTO_MODE) ||
+    process.env.REALBROWSER_ANONYMOUS === "1" ||
     process.env.REALBROWSER_BROWSER_URL ||
     process.env.REALBROWSER_PROFILE_DIR ||
-    process.env.REALBROWSER_NO_FALLBACK,
+    process.env.REALBROWSER_KEEP_ANONYMOUS === "1",
+  );
+}
+
+function hasExplicitDaemonSelection(flags = {}) {
+  return Boolean(
+    hasExplicitBrowserTargetSelection(flags) ||
+    flags.noFallback ||
+    process.env.REALBROWSER_NO_FALLBACK === "1",
   );
 }
 
@@ -1086,6 +1165,13 @@ function shouldReplaceExistingDaemon(state, expectedModeKey, flags = {}, explici
     return false;
   }
   if (!explicitSelection) {
+    return false;
+  }
+  if (
+    desiredMode(flags) === AUTO_MODE &&
+    isRealProfileSessionMode(modeFromState(state)) &&
+    !hasExplicitBrowserTargetSelection(flags)
+  ) {
     return false;
   }
   if (
@@ -1188,6 +1274,7 @@ function shouldReuseExistingRealProfileSession(flags = {}) {
   if (desiredMode(flags) !== AUTO_MODE) {
     return false;
   }
+  const envMode = process.env.REALBROWSER_MODE;
   if (
     flags.stateFile ||
     flags.handle ||
@@ -1195,15 +1282,14 @@ function shouldReuseExistingRealProfileSession(flags = {}) {
     flags.browserUrl ||
     flags.cdpUrl ||
     flags.profileDir ||
-    flags.noFallback ||
     flags.keepAnonymous ||
     process.env.REALBROWSER_STATE_FILE ||
     process.env.REALBROWSER_HANDLE ||
-    process.env.REALBROWSER_MODE ||
-    process.env.REALBROWSER_ANONYMOUS ||
+    (envMode && envMode !== AUTO_MODE) ||
+    process.env.REALBROWSER_ANONYMOUS === "1" ||
     process.env.REALBROWSER_BROWSER_URL ||
     process.env.REALBROWSER_PROFILE_DIR ||
-    process.env.REALBROWSER_NO_FALLBACK
+    process.env.REALBROWSER_KEEP_ANONYMOUS === "1"
   ) {
     return false;
   }
@@ -1230,15 +1316,33 @@ async function reuseExistingRealProfileSession(flags = {}) {
   const reusable =
     sessions.find((session) => session.name === "default" && isRealProfileSessionMode(session.mode)) ??
     sessions.find((session) => isRealProfileSessionMode(session.mode));
-  if (!reusable || reusable.name === "default" || reusable.name === requestedSession) {
-    return reusable ?? null;
+  if (!reusable) {
+    return null;
   }
-  flags.session = reusable.name;
-  flags.reusedRealProfileSession = reusable.name;
+  if (reusable.name !== requestedSession && (requestedSession || reusable.name !== "default")) {
+    flags.session = reusable.name;
+    flags.reusedRealProfileSession = reusable.name;
+  }
   return reusable;
 }
 
 async function ensureDaemon(flags = {}) {
+  if (!shouldReuseExistingRealProfileSession(flags)) {
+    return await ensureDaemonUnlocked(flags);
+  }
+  const release = await acquireLock(REAL_PROFILE_ATTACH_LOCK_FILE);
+  try {
+    const reusable = await reuseExistingRealProfileSession(flags);
+    if (reusable?.state) {
+      return reusable.state;
+    }
+    return await ensureDaemonUnlocked(flags);
+  } finally {
+    await release();
+  }
+}
+
+async function ensureDaemonUnlocked(flags = {}) {
   const stateFile = stateFileFromFlags(flags);
   const existing = await readJson(stateFile);
   const expectedModeKey = modeKey(flags);
@@ -7269,6 +7373,22 @@ function runSelfTest() {
   assertSelfTest(parsedHandle.flags.handleOut === "tmp/next.json", "parser handles handle output flag");
   assertSelfTest(parsedHandle.flags.viewport === "390x844", "parser handles viewport flag");
   assertSelfTest(handlePathFromValue("ninzap").endsWith(path.join(".realbrowser", "handles", "ninzap.json")), "handle names map to handle directory");
+  const customHandleStateFile = path.resolve(os.tmpdir(), "realbrowser-custom-state.json");
+  assertSelfTest(
+    stateFileFromHandle({ path: "handle", session: "named", stateFile: customHandleStateFile, pageId: 7 }) === customHandleStateFile,
+    "handles prefer their recorded state file over a session label",
+  );
+  const previousRealbrowserSession = process.env.REALBROWSER_SESSION;
+  delete process.env.REALBROWSER_SESSION;
+  assertSelfTest(
+    effectiveSessionNameFromFlags({ stateFile: customHandleStateFile }) === "",
+    "explicit state files do not inherit the active session name",
+  );
+  if (previousRealbrowserSession === undefined) {
+    delete process.env.REALBROWSER_SESSION;
+  } else {
+    process.env.REALBROWSER_SESSION = previousRealbrowserSession;
+  }
   assertSelfTest(parseViewportSize("390x844").width === 390, "viewport parser reads width");
   assertSelfTest(parseViewportSize("390x844").height === 844, "viewport parser reads height");
   assertSelfTest(
@@ -7277,6 +7397,15 @@ function runSelfTest() {
   );
   assertSelfTest(shouldReuseExistingRealProfileSession({}) === true, "plain real-profile commands can reuse an existing attach");
   assertSelfTest(shouldReuseExistingRealProfileSession({ session: "codex-a" }) === true, "new auto sessions can reuse an existing real-profile attach");
+  assertSelfTest(shouldReuseExistingRealProfileSession({ noFallback: true }) === true, "no-fallback real-profile commands can reuse an existing attach");
+  const previousRealbrowserMode = process.env.REALBROWSER_MODE;
+  process.env.REALBROWSER_MODE = AUTO_MODE;
+  assertSelfTest(shouldReuseExistingRealProfileSession({}) === true, "explicit auto mode can reuse an existing attach");
+  if (previousRealbrowserMode === undefined) {
+    delete process.env.REALBROWSER_MODE;
+  } else {
+    process.env.REALBROWSER_MODE = previousRealbrowserMode;
+  }
   assertSelfTest(shouldReuseExistingRealProfileSession({ dedicated: true }) === false, "dedicated sessions do not auto-route");
   assertSelfTest(shouldReuseExistingRealProfileSession({ profile: "chrome:Default" }) === false, "profile-targeted commands do not auto-route");
   const parsedNoActive = parseArgv(["observe", "--no-active-session"]);
@@ -7375,6 +7504,24 @@ function runSelfTest() {
   assertSelfTest(
     noFallbackFromState({ modeKey: JSON.stringify({ mode: AUTO_MODE, noFallback: true }) }) === true,
     "noFallbackFromState reads disabled fallback",
+  );
+  assertSelfTest(
+    shouldReplaceExistingDaemon(
+      { modeKey: JSON.stringify({ mode: AUTO_MODE, browserUrl: "http://127.0.0.1:9222" }) },
+      modeKey({ noFallback: true }),
+      { noFallback: true },
+      true,
+    ) === false,
+    "no-fallback does not restart an existing real-profile attach",
+  );
+  assertSelfTest(
+    shouldReplaceExistingDaemon(
+      { modeKey: JSON.stringify({ mode: DEDICATED_MODE, browserUrl: "" }) },
+      modeKey({ noFallback: true }),
+      { noFallback: true },
+      true,
+    ) === true,
+    "no-fallback can replace a dedicated fallback session",
   );
   assertSelfTest(
     shouldAttemptBannerDismissal({ flags: {}, mode: AUTO_MODE }) === false,
