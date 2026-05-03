@@ -70,7 +70,7 @@ desktop/tablet/mobile screenshots":
 2. Open or claim one stable target. Use `--session <name>` for isolated flows
    and `claim ... --handle-name <task>` for longer workflows.
 3. Read before acting. Use `observe --max-chars 1500-2500` for page state and
-   `snapshot --efficient` only when clickable `uid` refs are needed.
+   `snapshot --efficient` when current `uid` or CDP `[ref=eN]` refs are needed.
 4. Act only on current refs. After navigation, modal changes, form submission,
    or stale-ref failures, run `observe` or `snapshot --efficient` again.
 5. Prefer visible-state waits over sleeps: `wait <text> --visible`,
@@ -160,9 +160,11 @@ body conclusions.
 
 - Cap routine reads: `observe --max-chars 2000`, `console --errors --limit 20`,
   `network --failed --limit 30`, `posts --limit <n> --max-chars 2000`.
-- Use `posts` for repeated cards, `blocks` for dashboards/search results,
-  `screenshot` for visual evidence, and `html --out <path>` for selector/debug
-  work.
+- On CDP-backed real-profile sessions, `posts` and `blocks` read the same
+  OpenClaw-style role snapshot substrate first. Treat the output as a generic
+  page element tree, not a site-specific feed parser.
+- Use `screenshot` for visual evidence and `html --out <path>` for
+  selector/debug work, not as the default page parser.
 - Do not use `--full-stdout` for large or unknown output. Prefer artifacts and
   targeted local inspection.
 - Use `--raw-size` only when exact browser pixels matter. Default screenshots

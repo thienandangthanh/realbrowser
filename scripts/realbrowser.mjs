@@ -247,23 +247,15 @@ const CONTENT_ROLES = new Set([
   "columnheader",
   "gridcell",
   "heading",
-  "image",
-  "img",
   "listitem",
   "main",
   "navigation",
-  "paragraph",
   "region",
   "rowheader",
-  "statictext",
-  "text",
 ]);
 
 const STRUCTURAL_ROLES = new Set([
   "application",
-  "banner",
-  "complementary",
-  "contentinfo",
   "directory",
   "document",
   "generic",
@@ -277,7 +269,6 @@ const STRUCTURAL_ROLES = new Set([
   "presentation",
   "row",
   "rowgroup",
-  "section",
   "table",
   "tablist",
   "toolbar",
@@ -329,11 +320,11 @@ const CLI_COMMAND_GROUPS = [
       { name: "tab", usage: "realbrowser tab <target> [--front]", summary: "Select a page target.", minArgs: 1 },
       { name: "focus", usage: "realbrowser focus <target>", summary: "Bring a page target to front.", minArgs: 1 },
       { name: "close", aliases: ["closetab"], usage: "realbrowser close <target>", summary: "Close a page target.", handle: false, minArgs: 1 },
-      { name: "click", usage: "realbrowser click <uid> [--page <id>]", summary: "Click an accessibility uid.", handle: true, minArgs: 1 },
-      { name: "hover", usage: "realbrowser hover <uid> [--page <id>]", summary: "Hover an accessibility uid.", handle: true, minArgs: 1 },
+      { name: "click", usage: "realbrowser click <uid|ref> [--page <id>]", summary: "Click an accessibility uid or CDP role ref.", handle: true, minArgs: 1 },
+      { name: "hover", usage: "realbrowser hover <uid|ref> [--page <id>]", summary: "Hover an accessibility uid or CDP role ref.", handle: true, minArgs: 1 },
       { name: "drag", usage: "realbrowser drag <fromUid> <toUid> [--page <id>]", summary: "Drag between accessibility uids.", handle: true, minArgs: 2 },
       { name: "type", usage: "realbrowser type <text> [--page <id>]", summary: "Type text.", handle: true, minArgs: 1 },
-      { name: "fill", usage: "realbrowser fill <uid> <value> [--page <id>]", summary: "Fill one field.", handle: true, minArgs: 2 },
+      { name: "fill", usage: "realbrowser fill <uid|ref> <value> [--page <id>]", summary: "Fill one field.", handle: true, minArgs: 2 },
       { name: "fill-form", usage: "realbrowser fill-form '[{\"uid\":\"...\",\"value\":\"...\"}]' [--page <id>]", summary: "Fill several fields.", handle: true, minArgs: 1 },
       { name: "press", usage: "realbrowser press <key> [--page <id>]", summary: "Press a key.", handle: true, minArgs: 1 },
       { name: "click-coords", usage: "realbrowser click-coords <x> <y> [--page <id>]", summary: "Click screen coordinates.", handle: true, minArgs: 2 },
@@ -351,7 +342,7 @@ const CLI_COMMAND_GROUPS = [
       { name: "eval", aliases: ["js"], usage: "realbrowser eval <js> [--page <id>] [--max-chars <n>] [--out <path>] [--raw] [--json]", summary: "Run JavaScript in the page.", handle: true, minArgs: 1 },
       { name: "text", usage: "realbrowser text [selector|uid] [--page <id>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read text.", handle: true },
       { name: "blocks", aliases: ["visible-blocks"], usage: "realbrowser blocks [selector] [--page <id>] [--limit <n>] [--max-chars <n>] [--fallback-text] [--out <path>] [--raw]", summary: "Read compact visible text blocks.", handle: true },
-      { name: "posts", aliases: ["feed", "content-blocks"], usage: "realbrowser posts [selector] [--page <id>] [--limit <n>] [--max-chars <n>] [--out <path>] [--json]", summary: "Read compact visible repeated content cards.", handle: true },
+      { name: "posts", aliases: ["feed", "content-blocks"], usage: "realbrowser posts [selector] [--page <id>] [--limit <n>] [--max-chars <n>] [--out <path>] [--json]", summary: "Read OpenClaw-style role snapshot content.", handle: true },
       { name: "html", usage: "realbrowser html [selector|uid] [--page <id>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read HTML.", handle: true },
       { name: "links", usage: "realbrowser links [selector|uid] [--page <id>] [--limit <n>] [--filter <text>] [--text-filter <text>] [--href-filter <text>] [--visible] [--json]", summary: "Read links.", handle: true },
       { name: "forms", usage: "realbrowser forms [selector|uid] [--page <id>] [--json]", summary: "Read forms.", handle: true },
@@ -2035,7 +2026,7 @@ async function ensureEndpointSession(endpointOrUrl, flags = {}, options = {}) {
     return null;
   }
   const existing = await runningEndpointSession(endpoint);
-  if (existing) {
+  if (existing && reusableEndpointSessionMatchesFlags(existing, endpoint, flags)) {
     if (options.mutateFlags !== false) {
       flags.session = existing.name;
       flags.reusedRealProfileSession = existing.name;
@@ -2079,6 +2070,26 @@ async function ensureEndpointSession(endpointOrUrl, flags = {}, options = {}) {
   };
 }
 
+function reusableEndpointSessionMatchesFlags(session, endpoint, flags = {}) {
+  if (!session?.state) {
+    return false;
+  }
+  const requestedBrowserUrl = endpoint?.wsEndpoint ?? endpoint?.httpUrl ?? realProfileEndpointFromFlags(flags);
+  if (!requestedBrowserUrl) {
+    return true;
+  }
+  const expectedFlags = {
+    ...flags,
+    browserUrl: requestedBrowserUrl,
+    noFallback: true,
+  };
+  if (!sessionNameFromFlags(expectedFlags) && session?.name) {
+    expectedFlags.session = session.name;
+  }
+  const expectedModeKey = modeKey(expectedFlags);
+  return session.state.modeKey === expectedModeKey;
+}
+
 async function reuseExistingEndpointSession(flags = {}) {
   const endpoint = realProfileEndpointFromFlags(flags);
   if (!endpoint || flags.force || flags.restartDaemon || flags.stateFile || flags.handle) {
@@ -2090,6 +2101,10 @@ async function reuseExistingEndpointSession(flags = {}) {
     browserEndpointEquivalent(browserUrlFromState(session.state), endpoint)
   );
   if (!reusable) {
+    return null;
+  }
+  const normalizedEndpoint = normalizeBrowserEndpoint(endpoint);
+  if (!reusableEndpointSessionMatchesFlags(reusable, normalizedEndpoint, flags)) {
     return null;
   }
   if (flags.session !== reusable.name) {
@@ -4314,11 +4329,25 @@ async function findBrowserTabs(options = {}) {
   for (const endpoint of endpoints) {
     const endpointSession = await runningEndpointSession(endpoint);
     if (endpointSession) {
-      endpointSessionNames.add(endpointSession.name);
-      tabs.push(...await tabsForKnownSession(endpointSession, { endpoint }));
-      continue;
+      const sessionTabs = await tabsForKnownSession(endpointSession, { endpoint });
+      if (sessionTabs.length > 0) {
+        endpointSessionNames.add(endpointSession.name);
+        tabs.push(...sessionTabs);
+        continue;
+      }
     }
-    const targets = await fetchCdpTargetList(endpoint, { allowWs: false }).catch(() => []);
+    let targets = await fetchCdpTargetList(endpoint, { allowWs: false }).catch(() => []);
+    if (targets.length === 0 && endpoint.wsEndpoint) {
+      const session = await ensureEndpointSession(endpoint, { noFallback: true }, { mutateFlags: false }).catch(() => null);
+      if (session) {
+        const sessionTabs = await tabsForKnownSession(session, { endpoint });
+        if (sessionTabs.length > 0) {
+          endpointSessionNames.add(session.name);
+          tabs.push(...sessionTabs);
+          continue;
+        }
+      }
+    }
     for (const target of targets) {
       if (target?.type && target.type !== "page") {
         continue;
@@ -4593,18 +4622,23 @@ async function fetchCdpTargetList(endpoint, options = {}) {
     try {
       return await fetchCdpTargetListFromHttp(endpoint.httpUrl);
     } catch (error) {
-      if (!endpoint.wsEndpoint) {
+      if (!endpoint.wsEndpoint && options.allowWs !== true) {
         throw error;
       }
     }
   }
-  if (!endpoint.wsEndpoint) {
+  const wsEndpoint = endpoint.wsEndpoint || (
+    endpoint.httpUrl && options.allowWs === true
+      ? await resolveCdpBrowserWebSocketUrl(endpoint.httpUrl)
+      : ""
+  );
+  if (!wsEndpoint) {
     return [];
   }
   if (options.allowWs !== true) {
     return [];
   }
-  return await fetchCdpTargetListFromWs(endpoint.wsEndpoint);
+  return await fetchCdpTargetListFromWs(wsEndpoint);
 }
 
 async function fetchCdpTargetListFromHttp(httpUrl) {
@@ -4766,7 +4800,6 @@ function buildCdpRoleTree(nodes) {
       role: axValue(raw.role) || "unknown",
       name: axValue(raw.name),
       value: axValue(raw.value),
-      description: axValue(raw.description),
       backendDOMNodeId:
         typeof raw.backendDOMNodeId === "number" && raw.backendDOMNodeId > 0
           ? Math.floor(raw.backendDOMNodeId)
@@ -4844,13 +4877,77 @@ function renderCdpRoleTree(tree, index, output, options = {}, indentOffset = 0) 
     const ref = node.ref ? ` [ref=${node.ref}]` : "";
     const nth = node.nth !== undefined && node.nth > 0 ? ` [nth=${node.nth}]` : "";
     const value = node.value ? ` value="${escapeQuoted(node.value)}"` : "";
-    const description = node.description ? ` description="${escapeQuoted(node.description)}"` : "";
     const url = node.url ? ` [url=${node.url}]` : "";
-    output.push(`${indent}- ${node.role}${name}${ref}${nth}${value}${description}${url}${cdpCursorSuffix(node.cursorInfo)}`);
+    output.push(`${indent}- ${node.role}${name}${ref}${nth}${value}${url}${cdpCursorSuffix(node.cursorInfo)}`);
   }
   for (const child of node.children) {
     renderCdpRoleTree(tree, child, output, options, indentOffset);
   }
+}
+
+function buildCdpReadableEntriesFromRoleTree(snapshot, options = {}) {
+  const tree = Array.isArray(snapshot?.tree) ? snapshot.tree : [];
+  const roots = Array.isArray(snapshot?.roots) ? snapshot.roots : [];
+  const limit = Math.max(1, Number.parseInt(String(options.limit ?? "20"), 10) || 20);
+  const kind = String(options.kind ?? "blocks").toLowerCase();
+  const isPostKind = kind === "posts" || kind === "feed" || kind === "content-blocks";
+  const entries = [];
+  const cleanText = (value) => String(value ?? "").replace(/\s+/gu, " ").trim();
+  const nodeText = (node) => cleanText([
+    node?.name,
+    node?.value,
+    node?.description,
+  ].filter(Boolean).join(" "));
+
+  const collectText = (index, rootIndex) => {
+    const node = tree[index];
+    if (!node) {
+      return "";
+    }
+    if (index !== rootIndex && normalizeRole(node) === "article") {
+      return "";
+    }
+    return cleanText([
+      nodeText(node),
+      ...(node.children ?? []).map((child) => collectText(child, rootIndex)),
+    ].filter(Boolean).join(" "));
+  };
+
+  const visit = (index, insideArticle = false) => {
+    if (entries.length >= limit) {
+      return;
+    }
+    const node = tree[index];
+    if (!node) {
+      return;
+    }
+    const role = normalizeRole(node);
+    const isArticle = role === "article";
+    const isCandidate = isPostKind
+      ? isArticle && !insideArticle
+      : CONTENT_ROLES.has(role) && Boolean(nodeText(node));
+    if (isCandidate) {
+      const text = collectText(index, index);
+      if (text) {
+        entries.push({
+          role,
+          ...(node.ref ? { ref: node.ref } : {}),
+          text,
+        });
+      }
+      if (isPostKind) {
+        return;
+      }
+    }
+    for (const child of node.children ?? []) {
+      visit(child, insideArticle || isArticle);
+    }
+  };
+
+  for (const root of roots) {
+    visit(root, false);
+  }
+  return entries;
 }
 
 async function findCdpCursorInteractiveElements(send) {
@@ -5093,6 +5190,74 @@ async function buildCdpRoleSnapshotFromSession(params) {
       interactive: refValues.filter((ref) => INTERACTIVE_ROLES.has(ref.role)).length,
     },
   };
+}
+
+async function prepareCdpPageSession(send) {
+  await Promise.all([
+    send("Page.enable").catch(() => null),
+    send("Runtime.enable").catch(() => null),
+    send("Network.enable").catch(() => null),
+    send("DOM.enable").catch(() => null),
+    send("Accessibility.enable").catch(() => null),
+  ]);
+  await send("Runtime.runIfWaitingForDebugger").catch(() => null);
+}
+
+async function cdpDomSnapshotFromSession(send, options = {}) {
+  const limit = Math.max(1, Math.min(5000, Math.floor(options.limit ?? 800)));
+  const maxTextChars = Math.max(0, Math.min(5000, Math.floor(options.maxTextChars ?? 220)));
+  const expression = `(() => {
+    const maxNodes = ${JSON.stringify(limit)};
+    const maxText = ${JSON.stringify(maxTextChars)};
+    const lower = (value) => String(value || "").toLocaleLowerCase();
+    const nodes = [];
+    const root = document.documentElement;
+    if (!root) return { nodes };
+    const stack = [{ el: root, depth: 0, parentRef: null }];
+    while (stack.length && nodes.length < maxNodes) {
+      const cur = stack.pop();
+      const el = cur.el;
+      if (!el || el.nodeType !== 1) continue;
+      const ref = "n" + String(nodes.length + 1);
+      const tag = lower(el.tagName);
+      const id = el.id ? String(el.id) : undefined;
+      const className = el.className ? String(el.className).slice(0, 300) : undefined;
+      const role = el.getAttribute && el.getAttribute("role") ? String(el.getAttribute("role")) : undefined;
+      const name = el.getAttribute && el.getAttribute("aria-label") ? String(el.getAttribute("aria-label")) : undefined;
+      let text = "";
+      try { text = String(el.innerText || "").trim(); } catch {}
+      if (maxText && text.length > maxText) text = text.slice(0, maxText) + "...";
+      const href = (el.href !== undefined && el.href !== null) ? String(el.href) : undefined;
+      const type = (el.type !== undefined && el.type !== null) ? String(el.type) : undefined;
+      const value = (el.value !== undefined && el.value !== null) ? String(el.value).slice(0, 500) : undefined;
+      nodes.push({
+        ref,
+        parentRef: cur.parentRef,
+        depth: cur.depth,
+        tag,
+        ...(id ? { id } : {}),
+        ...(className ? { className } : {}),
+        ...(role ? { role } : {}),
+        ...(name ? { name } : {}),
+        ...(text ? { text } : {}),
+        ...(href ? { href } : {}),
+        ...(type ? { type } : {}),
+        ...(value ? { value } : {}),
+      });
+      const children = el.children ? Array.from(el.children) : [];
+      for (let i = children.length - 1; i >= 0; i--) {
+        stack.push({ el: children[i], depth: cur.depth + 1, parentRef: ref });
+      }
+    }
+    return { nodes };
+  })()`;
+  const evaluated = await send("Runtime.evaluate", {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  const nodes = evaluated?.result?.value?.nodes;
+  return { nodes: Array.isArray(nodes) ? nodes : [] };
 }
 
 function browserTabMatchesQuery(tab, query) {
@@ -6094,6 +6259,7 @@ class BrowserDaemon {
     this.selectedCdpTargetId = null;
     this.cdpTargetAliases = new Map();
     this.cdpTargetHandles = new Map();
+    this.cdpRoleRefsByTarget = new Map();
     this.nextCdpTargetHandle = 1;
     this.cdpBrowserClient = null;
     this.cdpBrowserClientPromise = null;
@@ -6228,6 +6394,11 @@ class BrowserDaemon {
         return targets.filter((target) => !target?.type || target.type === "page");
       } catch (error) {
         if (!endpoint.wsEndpoint) {
+          const wsUrl = await resolveCdpBrowserWebSocketUrl(endpoint.httpUrl).catch(() => "");
+          if (wsUrl) {
+            const targets = await fetchCdpTargetListFromWs(wsUrl);
+            return targets.filter((target) => !target?.type || target.type === "page");
+          }
           throw error;
         }
       }
@@ -6267,6 +6438,7 @@ class BrowserDaemon {
     for (const targetId of this.cdpTargetHandles.keys()) {
       if (!currentTargetIds.has(targetId)) {
         this.cdpTargetHandles.delete(targetId);
+        this.cdpRoleRefsByTarget.delete(targetId);
       }
     }
     if (this.selectedCdpTargetId && !pages.some((page) => page.targetId === this.selectedCdpTargetId)) {
@@ -6292,7 +6464,7 @@ class BrowserDaemon {
         if (!this.shouldFallbackToMcpAfterCdp(flags)) {
           throw error;
         }
-        // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+        // Fall through to MCP when the current session policy allows it.
       }
     }
     return await this.callTool("list_pages", {});
@@ -6379,7 +6551,7 @@ class BrowserDaemon {
     }
   }
 
-  async cdpRoleSnapshot(flags = {}) {
+  async cdpRoleSnapshotData(flags = {}) {
     const targetId = await this.resolveCdpTargetId(flags);
     const efficient = flags.efficient || flags.mode === "efficient";
     const maxDepth =
@@ -6395,12 +6567,7 @@ class BrowserDaemon {
     };
     const built = await this.withCdpPageSession(targetId, async (client, sessionId) => {
       const send = async (method, params = {}) => await client.request(method, params, { sessionId });
-      await Promise.all([
-        send("Page.enable").catch(() => null),
-        send("Runtime.enable").catch(() => null),
-        send("DOM.enable").catch(() => null),
-        send("Accessibility.enable").catch(() => null),
-      ]);
+      await prepareCdpPageSession(send);
       return await buildCdpRoleSnapshotFromSession({
         send,
         options,
@@ -6409,6 +6576,12 @@ class BrowserDaemon {
         nextRef: { value: 1 },
       });
     });
+    this.cdpRoleRefsByTarget.set(targetId, built.refs);
+    return { built, options, targetId };
+  }
+
+  async cdpRoleSnapshot(flags = {}) {
+    const { built, options, targetId } = await this.cdpRoleSnapshotData(flags);
     const snapshot = built.lines.join("\n").trim() || (options.interactive ? "(no interactive elements)" : "(empty page)");
     return {
       snapshot,
@@ -6422,6 +6595,139 @@ class BrowserDaemon {
       targetId,
       cdp: true,
     };
+  }
+
+  async cdpDomSnapshot(flags = {}) {
+    const targetId = await this.resolveCdpTargetId(flags);
+    const requestedLimit = flags.domLimit ?? flags.nodes ?? flags.limit;
+    const requestedMaxText = flags.maxTextChars ?? flags.maxText ?? flags.textChars;
+    return await this.withCdpPageSession(targetId, async (client, sessionId) => {
+      const send = async (method, params = {}) => await client.request(method, params, { sessionId });
+      await prepareCdpPageSession(send);
+      const snap = await cdpDomSnapshotFromSession(send, {
+        limit: requestedLimit ? parsePositiveInteger(requestedLimit, "dom-limit") : undefined,
+        maxTextChars: requestedMaxText ? parsePositiveInteger(requestedMaxText, "max-text-chars") : undefined,
+      });
+      return { ...snap, targetId, cdp: true };
+    });
+  }
+
+  async cdpRoleRefInfo(ref, flags = {}) {
+    const targetId = await this.resolveCdpTargetId(flags);
+    const normalized = normalizeCdpRoleRef(ref);
+    if (!normalized) {
+      throw new Error(`Not a CDP role ref: ${ref}`);
+    }
+    const refs = this.cdpRoleRefsByTarget.get(targetId);
+    const info = refs?.[normalized];
+    if (!info) {
+      throw new Error(`Unknown CDP role ref "${normalized}". Run snapshot first and use a current [ref=eN] value.`);
+    }
+    if (typeof info.backendDOMNodeId !== "number") {
+      throw new Error(`CDP role ref "${normalized}" is not backed by a DOM node.`);
+    }
+    return { targetId, ref: normalized, info };
+  }
+
+  async cdpRoleRefElementBox(ref, flags = {}) {
+    const { targetId, ref: normalized, info } = await this.cdpRoleRefInfo(ref, flags);
+    return await this.withCdpPageSession(targetId, async (client, sessionId) => {
+      const send = async (method, params = {}) => await client.request(method, params, { sessionId });
+      await prepareCdpPageSession(send);
+      const resolved = await send("DOM.resolveNode", { backendNodeId: info.backendDOMNodeId });
+      const objectId = resolved?.object?.objectId;
+      if (!objectId) {
+        throw new Error(`Could not resolve CDP role ref "${normalized}" to a runtime object.`);
+      }
+      const evaluated = await send("Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration: `function() {
+          if (!(this instanceof Element)) return null;
+          this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+          const rect = this.getBoundingClientRect();
+          return {
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2,
+            width: rect.width,
+            height: rect.height,
+            tag: this.tagName ? this.tagName.toLowerCase() : "",
+            text: String(this.innerText || this.textContent || this.getAttribute("aria-label") || "").replace(/\\s+/g, " ").trim().slice(0, 160),
+          };
+        }`,
+        awaitPromise: true,
+        returnByValue: true,
+      });
+      if (evaluated?.exceptionDetails) {
+        throw new Error(formatCdpException(evaluated.exceptionDetails));
+      }
+      const box = evaluated?.result?.value;
+      if (!box || !(box.width > 0) || !(box.height > 0)) {
+        throw new Error(`CDP role ref "${normalized}" is not visible or has no box.`);
+      }
+      return { targetId, ref: normalized, box };
+    });
+  }
+
+  async clickCdpRoleRef(ref, flags = {}) {
+    const { targetId, ref: normalized, box } = await this.cdpRoleRefElementBox(ref, flags);
+    await this.withCdpPageSession(targetId, async (client, sessionId) => {
+      const send = async (method, params = {}) => await client.request(method, params, { sessionId });
+      await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: box.x, y: box.y });
+      await send("Input.dispatchMouseEvent", { type: "mousePressed", x: box.x, y: box.y, button: "left", clickCount: 1 });
+      await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: box.x, y: box.y, button: "left", clickCount: 1 });
+    });
+    return { text: `clicked ${normalized}`, cdp: true, targetId, ref: normalized };
+  }
+
+  async hoverCdpRoleRef(ref, flags = {}) {
+    const { targetId, ref: normalized, box } = await this.cdpRoleRefElementBox(ref, flags);
+    await this.withCdpPageSession(targetId, async (client, sessionId) => {
+      const send = async (method, params = {}) => await client.request(method, params, { sessionId });
+      await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: box.x, y: box.y });
+    });
+    return { text: `hovered ${normalized}`, cdp: true, targetId, ref: normalized };
+  }
+
+  async fillCdpRoleRef(ref, value, flags = {}) {
+    const { targetId, ref: normalized, info } = await this.cdpRoleRefInfo(ref, flags);
+    const stringValue = String(value ?? "");
+    return await this.withCdpPageSession(targetId, async (client, sessionId) => {
+      const send = async (method, params = {}) => await client.request(method, params, { sessionId });
+      await prepareCdpPageSession(send);
+      const resolved = await send("DOM.resolveNode", { backendNodeId: info.backendDOMNodeId });
+      const objectId = resolved?.object?.objectId;
+      if (!objectId) {
+        throw new Error(`Could not resolve CDP role ref "${normalized}" to a runtime object.`);
+      }
+      const evaluated = await send("Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration: `function(value) {
+          if (!(this instanceof HTMLElement)) throw new Error("Target is not an HTMLElement");
+          this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+          this.focus();
+          if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement || this instanceof HTMLSelectElement) {
+            this.value = value;
+            this.dispatchEvent(new Event("input", { bubbles: true }));
+            this.dispatchEvent(new Event("change", { bubbles: true }));
+            return true;
+          }
+          if (this.isContentEditable) {
+            this.textContent = value;
+            this.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+            this.dispatchEvent(new Event("change", { bubbles: true }));
+            return true;
+          }
+          throw new Error("Target is not fillable");
+        }`,
+        arguments: [{ value: stringValue }],
+        awaitPromise: true,
+        returnByValue: true,
+      });
+      if (evaluated?.exceptionDetails) {
+        throw new Error(formatCdpException(evaluated.exceptionDetails));
+      }
+      return { text: `filled ${normalized}`, cdp: true, targetId, ref: normalized };
+    });
   }
 
   async cdpActivateTarget(targetId) {
@@ -6532,11 +6838,15 @@ class BrowserDaemon {
   async evaluateCdpFunction(fnString, flags = {}) {
     const targetId = await this.resolveCdpTargetId(flags);
     const expression = `(${fnString})()`;
+    const requestedTimeout = Number.parseInt(String(flags.timeout ?? ""), 10);
+    const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
+      ? Math.max(15000, requestedTimeout + 1000)
+      : undefined;
     const result = await this.cdpPageRequest(targetId, "Runtime.evaluate", {
       expression,
       awaitPromise: true,
       returnByValue: true,
-    });
+    }, timeoutMs ? { timeoutMs } : {});
     if (result?.exceptionDetails) {
       throw new Error(formatCdpException(result.exceptionDetails));
     }
@@ -6624,7 +6934,7 @@ class BrowserDaemon {
         if (!this.shouldFallbackToMcpAfterCdp(flags)) {
           throw error;
         }
-        // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+        // Fall through to MCP when the current session policy allows it.
       }
     }
     return await this.callTool("select_page", {
@@ -6672,8 +6982,11 @@ class BrowserDaemon {
               await this.navigateCdpPage("url", args[0], flags),
               flags,
             );
-          } catch {
-            // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+          } catch (error) {
+            if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+              throw error;
+            }
+            // Fall through to MCP only for non-real-profile sessions or explicit reattach.
           }
         }
         return await this.maybeWaitReadyAfterPageResult(await this.callTool("navigate_page", {
@@ -6693,8 +7006,11 @@ class BrowserDaemon {
               await this.navigateCdpPage(command, undefined, flags),
               flags,
             );
-          } catch {
-            // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+          } catch (error) {
+            if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+              throw error;
+            }
+            // Fall through to MCP when the current session policy allows it.
           }
         }
         return await this.maybeWaitReadyAfterPageResult(await this.callTool("navigate_page", {
@@ -6734,8 +7050,11 @@ class BrowserDaemon {
               this.selectedCdpTargetId = null;
             }
             return { text: `closed ${args[0]}`, targetId, cdp: true };
-          } catch {
-            // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+          } catch (error) {
+            if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+              throw error;
+            }
+            // Fall through to MCP when the current session policy allows it.
           }
         }
         return await this.callTool("close_page", { pageId: parsePageId(args[0]) });
@@ -6746,9 +7065,21 @@ class BrowserDaemon {
         return await this.handleObserve(args, flags);
       case "click":
         requireArgs(command, args, 1);
+        if (this.shouldUseFastCdp(flags) && isCdpRoleRef(args[0])) {
+          return await this.clickCdpRoleRef(args[0], flags);
+        }
+        if (isCdpRoleRef(args[0])) {
+          throw new Error("CDP role refs require a current CDP-backed session. Run snapshot again or use a uid ref.");
+        }
         return await this.callTool("click", { ...this.pageArgs(flags), uid: args[0] });
       case "hover":
         requireArgs(command, args, 1);
+        if (this.shouldUseFastCdp(flags) && isCdpRoleRef(args[0])) {
+          return await this.hoverCdpRoleRef(args[0], flags);
+        }
+        if (isCdpRoleRef(args[0])) {
+          throw new Error("CDP role refs require a current CDP-backed session. Run snapshot again or use a uid ref.");
+        }
         return await this.callTool("hover", { ...this.pageArgs(flags), uid: args[0] });
       case "drag":
         requireArgs(command, args, 2);
@@ -6766,6 +7097,12 @@ class BrowserDaemon {
         });
       case "fill":
         requireArgs(command, args, 2);
+        if (this.shouldUseFastCdp(flags) && isCdpRoleRef(args[0])) {
+          return await this.fillCdpRoleRef(args[0], args.slice(1).join(" "), flags);
+        }
+        if (isCdpRoleRef(args[0])) {
+          throw new Error("CDP role refs require a current CDP-backed session. Run snapshot again or use a uid ref.");
+        }
         return await this.callTool("fill", {
           ...this.pageArgs(flags),
           uid: args[0],
@@ -7588,8 +7925,11 @@ class BrowserDaemon {
           await this.openCdpPage(url, flags, command),
           flags,
         );
-      } catch {
-        // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+      } catch (error) {
+        if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+          throw error;
+        }
+        // Fall through to MCP only for non-real-profile sessions or explicit reattach.
       }
     }
     const opened = await this.callTool("new_page", {
@@ -7803,7 +8143,7 @@ class BrowserDaemon {
         if (!this.shouldFallbackToMcpAfterCdp(flags)) {
           throw error;
         }
-        // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+        // Fall through to MCP when the current session policy allows it.
       }
     }
     const pageId = await this.resolvePageId(flags);
@@ -7940,6 +8280,22 @@ class BrowserDaemon {
       const result = await this.evaluateFunction(fn, flags, selectorOrUid);
       return flags.raw ? await formatRawResult(command, result, flags) : await formatReadResult(command, result, flags);
     };
+    const cdpSnapshotReadResult = async () => {
+      const snap = await this.cdpRoleSnapshot({ ...flags, compact: true });
+      const formatted = flags.raw
+        ? await formatRawResult(command, { text: snap.snapshot }, flags)
+        : await formatReadResult(command, { text: snap.snapshot }, flags);
+      return {
+        ...formatted,
+        structuredContent: {
+          ...(formatted.structuredContent ?? {}),
+          cdp: true,
+          targetId: snap.targetId,
+          source: "cdp-role-snapshot",
+          stats: snap.stats,
+        },
+      };
+    };
     switch (command) {
       case "url":
         return await rawResult("() => location.href");
@@ -7957,6 +8313,15 @@ class BrowserDaemon {
         );
       case "blocks":
       case "visible-blocks":
+        if (!target && this.shouldUseFastCdp(flags)) {
+          try {
+            return await cdpSnapshotReadResult();
+          } catch (error) {
+            if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+              throw error;
+            }
+          }
+        }
         return await rawResult(
           visibleBlocksFunction(target, { fallbackText: flags.fallbackText === true }),
           target,
@@ -7964,8 +8329,17 @@ class BrowserDaemon {
       case "posts":
       case "feed":
       case "content-blocks":
+        if (!target && this.shouldUseFastCdp(flags)) {
+          try {
+            return await cdpSnapshotReadResult();
+          } catch (error) {
+            if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+              throw error;
+            }
+          }
+        }
         return await rawResult(
-          visibleContentPostsFunction(target),
+          visibleBlocksFunction(target, { fallbackText: false }),
           target,
         );
       case "html":
@@ -8067,7 +8441,7 @@ class BrowserDaemon {
         if (!this.shouldFallbackToMcpAfterCdp(flags)) {
           throw error;
         }
-        // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+        // Fall through to MCP when the current session policy allows it.
       }
     }
     const pageId = await this.resolvePageId(flags);
@@ -8284,8 +8658,11 @@ class BrowserDaemon {
             structuredContent: { targetId, cdp: true },
             cdp: true,
           };
-        } catch {
-          // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+        } catch (error) {
+          if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+            throw error;
+          }
+          // Fall through to MCP when the current session policy allows it.
         }
       }
       return await this.callTool("emulate", this.pageArgs(flags));
@@ -8315,8 +8692,11 @@ class BrowserDaemon {
           },
           cdp: true,
         };
-      } catch {
-        // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+      } catch (error) {
+        if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+          throw error;
+        }
+        // Fall through to MCP when the current session policy allows it.
       }
     }
     const viewport = size.includes("x") && size.split("x").length >= 3 ? size : `${width}x${height}x1`;
@@ -9993,7 +10373,7 @@ async function formatReadResult(command, result, flags = {}) {
     fullText = displayedValue.length ? displayedValue.map(formatVisibleBlock).join("\n\n") : "(no visible blocks)";
   } else if ((command === "posts" || command === "feed" || command === "content-blocks") && Array.isArray(rawValue)) {
     displayedValue = rawValue.slice(0, limit);
-    fullText = displayedValue.length ? displayedValue.map(formatVisiblePost).join("\n\n") : "(no visible content cards)";
+    fullText = displayedValue.length ? displayedValue.map(formatVisibleBlock).join("\n\n") : "(no visible entries)";
   } else if (Array.isArray(rawValue)) {
     displayedValue = rawValue.slice(0, limit);
     fullText = formatValue(displayedValue);
@@ -10138,26 +10518,11 @@ function formatVisibleBlock(block, index) {
     Number.isFinite(block?.height) ? `h=${Math.round(block.height)}` : "",
   ].filter(Boolean).join(" ");
   const source = block?.source ? ` source=${block.source}` : "";
+  const ref = block?.ref ? ` ref=${block.ref}` : "";
+  const depth = Number.isFinite(block?.depth) ? ` depth=${Math.round(block.depth)}` : "";
   const selector = block?.selector ? ` ${block.selector}` : "";
-  const header = `[${index + 1}] ${label}${geometry ? ` ${geometry}` : ""}${source}${selector}`;
+  const header = `[${index + 1}] ${label}${geometry ? ` ${geometry}` : ""}${ref}${depth}${source}${selector}`;
   return `${header}\n${String(block?.text ?? "").trim()}`.trim();
-}
-
-function formatVisiblePost(post, index) {
-  const parts = [
-    `[${index + 1}] post`,
-    Number.isFinite(post?.top) ? `top=${Math.round(post.top)}` : "",
-    Number.isFinite(post?.height) ? `h=${Math.round(post.height)}` : "",
-    post?.source ? `source=${post.source}` : "",
-    post?.selector ? post.selector : "",
-  ].filter(Boolean);
-  const header = parts.join(" ");
-  const meta = [
-    post?.author ? `author: ${post.author}` : "",
-    post?.time ? `time: ${post.time}` : "",
-  ].filter(Boolean).join("\n");
-  const body = String(post?.body || post?.text || "").trim();
-  return [header, meta, body].filter(Boolean).join("\n").trim();
 }
 
 function defaultLimitForReadCommand(command) {
@@ -10479,8 +10844,6 @@ function visibleBlocksFunction(selector = undefined, options = {}) {
       const tag = el.tagName.toLowerCase();
       if (el.id) return tag + "#" + CSS.escape(el.id);
       const role = el.getAttribute("role");
-      const dataPagelet = el.getAttribute("data-pagelet");
-      if (dataPagelet) return tag + '[data-pagelet="' + dataPagelet + '"]';
       if (role) return tag + '[role="' + role + '"]';
       const parent = el.parentElement;
       if (!parent) return tag;
@@ -10506,15 +10869,14 @@ function visibleBlocksFunction(selector = undefined, options = {}) {
     if (explicitSelector) {
       pushCandidates(queryAll(explicitSelector), "explicit");
     } else {
-      pushCandidates(queryAll('[role="main"] [role="article"], [role="article"], article'), "article");
-      pushCandidates(queryAll('[data-pagelet*="FeedUnit"], [data-pagelet*="feed_unit"], [aria-posinset], div[data-ad-preview="message"]'), "feed");
+      pushCandidates(queryAll('[role="main"] [role="article"], [role="article"], article, [role="listitem"], [role="region"], section'), "content");
       if (candidates.length < 4) {
-        pushCandidates(queryAll('[role="feed"] > *, main [data-pagelet], main section, [role="main"] > div, main > div'), "main-child");
+        pushCandidates(queryAll('[role="feed"] > *, main section, [role="main"] > section, main > article, [role="main"] > article, main > ul > li, [role="main"] li'), "main-child");
       }
       if (candidates.length < 4) {
         const roots = queryAll('[role="main"], main').length ? queryAll('[role="main"], main') : [document.body].filter(Boolean);
         for (const root of roots) {
-          const blocks = [...root.querySelectorAll('article, section, [role="article"], [role="group"], div')]
+          const blocks = [...root.querySelectorAll('article, section, li, tr, td, th, [role="article"], [role="group"], [role="listitem"], [role="region"], [role="row"], [role="cell"], [role="gridcell"]')]
             .filter((el) => {
               if (!visible(el)) return false;
               const text = cleanLines(el.innerText || el.textContent || "", 1600);
@@ -10583,293 +10945,6 @@ function visibleBlocksFunction(selector = undefined, options = {}) {
           text: fallbackText,
         });
       }
-    }
-    return out;
-  }`;
-}
-
-function visibleContentPostsFunction(selector = undefined) {
-  return `() => {
-    const explicitSelector = ${selector ? JSON.stringify(selector) : "null"};
-    const visible = (el) => {
-      if (!(el instanceof Element)) return false;
-      const rect = el.getBoundingClientRect();
-      if (rect.width < 80 || rect.height < 24 || rect.bottom < -innerHeight * 0.25 || rect.top > innerHeight * 3) return false;
-      const style = getComputedStyle(el);
-      return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || "1") > 0;
-    };
-    const visibleRect = (rect) => rect && rect.width > 0 && rect.height > 0 && rect.bottom >= -innerHeight * 0.25 && rect.top <= innerHeight * 3;
-    const pageBrandLabels = (() => {
-      const out = new Set();
-      const add = (value) => {
-        const normalized = String(value || "").replace(/\\s+/g, " ").trim().toLowerCase();
-        if (normalized.length >= 2 && normalized.length <= 50) out.add(normalized);
-      };
-      const hostParts = String(location.hostname || "").replace(/^www\\./i, "").split(".").filter(Boolean);
-      if (hostParts.length) add(hostParts[0]);
-      for (const part of String(document.title || "").split(/\\s+[|·•-]\\s+/)) {
-        add(part);
-      }
-      return out;
-    })();
-    const isBoilerplateLine = (line) => {
-      const value = String(line || "").trim();
-      if (!value) return true;
-      if (value.length > 220) return false;
-      if (pageBrandLabels.has(value.toLowerCase())) return true;
-      return /^(like|comment|share|reply|send|save|follow|following|more|see more|view more|show more|load more|hide|report|translate|copy link|not now|join|joined|visit|subscribe|notifications?|write a comment|add a comment|comment as .+|top contributor|add friend|message|log in|sign up)$/i.test(value) ||
-        /^(?:view|show|load)\\s+(?:\\d+\\s+)?(?:more\\s+)?(?:comments?|answers?|replies?|items?|results?|responses?)$/i.test(value) ||
-        /^(?:like|comment|share|reply|send|save)\\s*\\d+(?:[.,]\\d+)?\\s*[kmb]?$/i.test(value) ||
-        /^\\d+(?:[.,]\\d+)?\\s*[kmb]?$/i.test(value) ||
-        /^\\d+\\s*(likes?|comments?|answers?|shares?|replies?|views?)$/i.test(value) ||
-        /^[·•⋯…]+$/.test(value);
-    };
-    const isBoundaryLine = (line) => {
-      const value = String(line || "").trim();
-      return /^(?:view|show|load)\\s+(?:\\d+\\s+)?(?:more\\s+)?(?:comments?|answers?|replies?)$/i.test(value) ||
-        /^(?:write|add) a (?:comment|reply|answer)$/i.test(value) ||
-        /^(?:comment|answer) as\\b/i.test(value) ||
-        /^(?:most relevant|all comments|all answers)$/i.test(value);
-    };
-    const cleanLines = (value, max = 1800) => {
-      const seen = new Set();
-      const lines = String(value || "")
-        .replace(/\\u00a0/g, " ")
-        .split("\\n")
-        .map((line) => line.replace(/\\s+/g, " ").trim())
-        .filter((line) => line.length > 1)
-        .filter((line) => {
-          const key = line.toLowerCase();
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        });
-      return lines.join("\\n").slice(0, max).trim();
-    };
-    const joinSegments = (segments, max = 2400) => {
-      const lines = [];
-      const seen = new Set();
-      for (const segment of segments) {
-        for (const rawLine of String(segment || "").split("\\n")) {
-          const line = rawLine.replace(/\\s+/g, " ").trim();
-          if (line.length <= 1) continue;
-          const key = line.toLowerCase();
-          if (seen.has(key)) continue;
-          seen.add(key);
-          lines.push(line);
-          if (lines.join("\\n").length >= max) {
-            return lines.join("\\n").slice(0, max).trim();
-          }
-        }
-      }
-      return lines.join("\\n").slice(0, max).trim();
-    };
-    const visibleText = (root, max = 2400) => {
-      if (!(root instanceof Element)) return "";
-      const segments = [];
-      const blockedTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "PATH"]);
-      const nodeVisible = (node) => {
-        const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
-        if (!(el instanceof Element)) return false;
-        if (blockedTags.has(el.tagName)) return false;
-        let current = el;
-        while (current && current instanceof Element && current !== root.parentElement) {
-          if (blockedTags.has(current.tagName)) return false;
-          const style = getComputedStyle(current);
-          if (style.visibility === "hidden" || style.display === "none" || Number(style.opacity || "1") <= 0) return false;
-          if (current === root) break;
-          current = current.parentElement;
-        }
-        return true;
-      };
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-        acceptNode(node) {
-          const value = String(node.nodeValue || "").replace(/\\s+/g, " ").trim();
-          if (value.length <= 1) return NodeFilter.FILTER_REJECT;
-          if (!nodeVisible(node)) return NodeFilter.FILTER_REJECT;
-          try {
-            const range = document.createRange();
-            range.selectNodeContents(node);
-            const rects = [...range.getClientRects()];
-            range.detach?.();
-            return rects.some(visibleRect) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-          } catch {
-            return NodeFilter.FILTER_REJECT;
-          }
-        },
-      });
-      let visited = 0;
-      while (walker.nextNode() && visited < 1200 && joinSegments(segments, max).length < max) {
-        visited += 1;
-        segments.push(walker.currentNode.nodeValue || "");
-      }
-      for (const media of root.querySelectorAll('img[alt], [role="img"][aria-label], video[aria-label], canvas[aria-label]')) {
-        if (!(media instanceof Element) || !visible(media)) continue;
-        const label = media.getAttribute("alt") || media.getAttribute("aria-label") || "";
-        const cleaned = label.replace(/^(?:image|photo|may be an image of|may be an image of text that says)\\s*[:\\-]?\\s*/i, "").trim();
-        if (cleaned.length >= 8 && !isBoilerplateLine(cleaned)) segments.push(cleaned);
-      }
-      return joinSegments(segments, max);
-    };
-    const mostlyRepeatedBrand = (text) => {
-      const lines = cleanLines(text, 800).split("\\n").filter(Boolean);
-      if (lines.length < 3) return false;
-      const unique = [...new Set(lines.map((line) => line.toLowerCase()))];
-      return unique.length <= 2 && unique.every((line) => pageBrandLabels.has(line) || line === "facebook");
-    };
-    const candidateText = (el, max = 2400) => {
-      const fromVisibleNodes = visibleText(el, max);
-      if (fromVisibleNodes.length >= 30 || !mostlyRepeatedBrand(fromVisibleNodes)) {
-        return fromVisibleNodes;
-      }
-      const fallback = cleanLines(el.innerText || el.textContent || el.getAttribute("aria-label") || "", max);
-      return mostlyRepeatedBrand(fallback) ? fromVisibleNodes : fallback;
-    };
-    const cssPath = (el) => {
-      if (!(el instanceof Element)) return "";
-      const tag = el.tagName.toLowerCase();
-      if (el.id) return tag + "#" + CSS.escape(el.id);
-      const role = el.getAttribute("role");
-      const ariaPos = el.getAttribute("aria-posinset");
-      const dataPagelet = el.getAttribute("data-pagelet");
-      const testId = el.getAttribute("data-testid");
-      if (dataPagelet) return tag + '[data-pagelet="' + dataPagelet + '"]';
-      if (testId) return tag + '[data-testid="' + testId + '"]';
-      if (role && ariaPos) return tag + '[role="' + role + '"][aria-posinset="' + ariaPos + '"]';
-      if (role) return tag + '[role="' + role + '"]';
-      const parent = el.parentElement;
-      if (!parent) return tag;
-      const siblings = [...parent.children].filter((child) => child.tagName === el.tagName);
-      const index = siblings.indexOf(el) + 1;
-      return tag + (siblings.length > 1 ? ":nth-of-type(" + index + ")" : "");
-    };
-    const queryAll = (query) => {
-      try {
-        return [...document.querySelectorAll(query)];
-      } catch {
-        return [];
-      }
-    };
-    const pushCandidates = (items, source) => {
-      for (const item of items) {
-        if (item instanceof Element) {
-          candidates.push({ el: item, source });
-        }
-      }
-    };
-    const timePattern = /\\b(?:just now|today|yesterday|\\d+\\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks|mo|month|months|y|yr|yrs|year|years)\\s*ago|\\d+[smhdw]|\\d{1,2}:\\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\s+\\d{1,2})\\b/i;
-    const extractParts = (text) => {
-      const lines = text.split("\\n").map((line) => line.trim()).filter(Boolean);
-      const boundaryIndex = lines.findIndex(isBoundaryLine);
-      const beforeBoundary = boundaryIndex >= 0 ? lines.slice(0, boundaryIndex) : lines;
-      const contentLines = beforeBoundary.filter((line) => !isBoilerplateLine(line));
-      const timeIndex = contentLines.findIndex((line) => timePattern.test(line) && line.length <= 120);
-      const time = timeIndex >= 0 ? contentLines[timeIndex] : undefined;
-      const authorIndex = contentLines.findIndex((line, index) => {
-        if (index === timeIndex) return false;
-        if (timePattern.test(line)) return false;
-        return line.length <= 100;
-      });
-      const author = authorIndex >= 0 ? contentLines[authorIndex] : undefined;
-      const ignoredIndexes = new Set([authorIndex, timeIndex].filter((index) => index >= 0));
-      const bodyStart = Math.max(...[authorIndex, timeIndex].filter((index) => index >= 0), -1) + 1;
-      let bodyLines = contentLines
-        .slice(bodyStart)
-        .filter((line, offset) => !ignoredIndexes.has(bodyStart + offset))
-        .map((line) => line.replace(/\\s*See more\\s*$/i, "").trim())
-        .filter(Boolean);
-      if (bodyLines.length === 0) {
-        bodyLines = contentLines.filter((_, index) => !ignoredIndexes.has(index));
-      }
-      return {
-        author,
-        time,
-        body: bodyLines.join("\\n").slice(0, 1800).trim(),
-      };
-    };
-    const candidates = [];
-    if (explicitSelector) {
-      pushCandidates(queryAll(explicitSelector), "explicit");
-    } else {
-      const feedChildren = queryAll('[role="feed"] > *')
-        .filter((el) => {
-          if (!visible(el)) return false;
-          const text = candidateText(el, 2600);
-          if (text.length < 30 || text.length > 8000 || mostlyRepeatedBrand(text)) return false;
-          const lines = text.split("\\n").filter((line) => !isBoilerplateLine(line));
-          return lines.length >= 2 || text.length >= 120;
-        });
-      const usingFeedChildren = feedChildren.length > 0;
-      if (usingFeedChildren) {
-        pushCandidates(feedChildren, "feed");
-      } else {
-        pushCandidates(queryAll('[role="main"] [role="article"], main [role="article"], [role="article"], article'), "article");
-        pushCandidates(queryAll('[aria-posinset], [data-pagelet*="FeedUnit"], [data-pagelet*="feed_unit"]'), "feed");
-        pushCandidates(queryAll('main [data-testid*="post"], main [data-testid*="feed"], [role="main"] [data-testid*="post"], [role="main"] [data-testid*="feed"]'), "testid");
-      }
-      if (!usingFeedChildren && candidates.length < 4) {
-        pushCandidates(queryAll('main section, [role="main"] section, main [role="group"], [role="main"] [role="group"], main > div, [role="main"] > div'), "main-child");
-      }
-      if (!usingFeedChildren && candidates.length < 4) {
-        const roots = queryAll('main, [role="main"]').length ? queryAll('main, [role="main"]') : [document.body].filter(Boolean);
-        for (const root of roots) {
-          const blocks = [...root.querySelectorAll('article, section, [role="article"], [role="group"], [aria-posinset], div')]
-            .filter((el) => {
-              if (!visible(el)) return false;
-              const text = candidateText(el, 2600);
-              if (text.length < 30 || text.length > 6000 || mostlyRepeatedBrand(text)) return false;
-              const lines = text.split("\\n").filter((line) => !isBoilerplateLine(line));
-              if (lines.length < 2 && text.length < 120) return false;
-              return true;
-            })
-            .slice(0, 100);
-          pushCandidates(blocks, "visible-dom");
-        }
-      }
-    }
-    const unique = [];
-    const seenElements = new Set();
-    for (const candidate of candidates) {
-      if (seenElements.has(candidate.el)) continue;
-      seenElements.add(candidate.el);
-      unique.push(candidate);
-    }
-    const entries = unique
-      .filter((candidate) => visible(candidate.el))
-      .map((candidate) => {
-        const el = candidate.el;
-        const rect = el.getBoundingClientRect();
-        const text = candidateText(el, 2400);
-        const parts = extractParts(text);
-        return {
-          tag: el.tagName.toLowerCase(),
-          role: el.getAttribute("role") || undefined,
-          source: candidate.source,
-          selector: cssPath(el),
-          top: Math.round(rect.top + scrollY),
-          left: Math.round(rect.left + scrollX),
-          height: Math.round(rect.height),
-          author: parts.author,
-          time: parts.time,
-          body: parts.body || text,
-          text,
-        };
-      })
-      .filter((entry) => entry.text.length >= 30 && (entry.body || entry.text).length >= 20 && !mostlyRepeatedBrand(entry.text))
-      .sort((a, b) => a.top - b.top || a.height - b.height || a.left - b.left || a.text.length - b.text.length);
-    const out = [];
-    for (const entry of entries) {
-      const normalized = entry.text.toLowerCase();
-      const duplicate = out.some((previous) => {
-        const previousText = previous.text.toLowerCase();
-        return previousText === normalized ||
-          (normalized.length > 80 && previousText.includes(normalized)) ||
-          (previousText.length > 80 && normalized.includes(previousText));
-      });
-      if (!duplicate) {
-        out.push(entry);
-      }
-      if (out.length >= 30) break;
     }
     return out;
   }`;
@@ -11447,6 +11522,18 @@ function isIntegerText(value) {
 
 function isUidRef(value) {
   return typeof value === "string" && /^\d+_\d+$/.test(value);
+}
+
+function normalizeCdpRoleRef(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const normalized = value.trim().replace(/^@/u, "").replace(/^ref=/iu, "");
+  return /^e\d+$/iu.test(normalized) ? normalized.toLowerCase() : "";
+}
+
+function isCdpRoleRef(value) {
+  return Boolean(normalizeCdpRoleRef(value));
 }
 
 function selectorLiteral(selector) {
@@ -12050,12 +12137,22 @@ async function runSelfTest() {
     visibleBlocksFunction(undefined, { fallbackText: true }).includes("allowFallbackText = true"),
     "visible blocks can opt into fallback text",
   );
-  const visiblePostsScript = visibleContentPostsFunction();
-  new Function(`return ${visiblePostsScript}`)();
-  assertSelfTest(visiblePostsScript.includes("pageBrandLabels"), "content cards use generic page-brand filtering");
-  assertSelfTest(!visiblePostsScript.includes("facebook.com"), "content cards avoid site-specific host checks");
-  assertSelfTest(!visiblePostsScript.includes("isCommentBoundaryLine"), "content cards avoid page-specific boundary trimming");
-  assertSelfTest(!visiblePostsScript.includes("topLevelFeed"), "content cards rely on repeated container boundaries");
+  const pageletToken = "data-" + "pagelet";
+  assertSelfTest(!visibleBlocksFunction().includes(pageletToken), "visible blocks avoid site-specific pagelet selectors");
+  assertSelfTest(
+    [...INTERACTIVE_ROLES].join("|") === "button|checkbox|combobox|link|listbox|menuitem|menuitemcheckbox|menuitemradio|option|radio|searchbox|slider|spinbutton|switch|tab|textbox|treeitem",
+    "interactive role set matches OpenClaw",
+  );
+  assertSelfTest(
+    [...CONTENT_ROLES].join("|") === "article|cell|columnheader|gridcell|heading|listitem|main|navigation|region|rowheader",
+    "content role set matches OpenClaw",
+  );
+  assertSelfTest(
+    [...STRUCTURAL_ROLES].join("|") === "application|directory|document|generic|grid|group|ignored|list|menu|menubar|none|presentation|row|rowgroup|table|tablist|toolbar|tree|treegrid",
+    "structural role set matches OpenClaw",
+  );
+  assertSelfTest(normalizeCdpRoleRef("ref=E12") === "e12", "CDP role refs normalize from snapshot syntax");
+  assertSelfTest(!isCdpRoleRef("1_2"), "MCP uid refs stay distinct from CDP role refs");
   new Function(`return ${linksReadFunction({ filter: "docs", limit: "3", visible: true })}`)();
   new Function(`return ${linkReadBodyFunction({ textFilter: "docs", hrefFilter: "guide" })}`)();
   new Function(`return ${waitForSelectorFunction("main", 1000, { visible: true })}`)();
