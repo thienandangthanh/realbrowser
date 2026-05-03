@@ -18,3 +18,4 @@ screenshots/
 downloads/
 tmp/
 *.crdownload
+.gstack/
