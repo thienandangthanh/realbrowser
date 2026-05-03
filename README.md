@@ -188,6 +188,9 @@ Realbrowser is designed to keep Codex token use low:
 - Use `snapshot --efficient` when clickable `uid` refs are needed.
 - Use `snapshot --labels` or `screenshot --labels` for annotated screenshots.
 - `open` and `newtab` open background tabs by default; pass `--front` only for an explicit visual handoff.
+- For real signed-in profile opens, do not add `--select` by default while the
+  user is working in another app. Open in the background, then use
+  `find-tab`/`select-tab` or a handle if follow-up automation needs a target.
 - Use compact targets from `tabs`/`find-tab` such as `t1` instead of raw target ids.
 - Use `links --filter/--text-filter/--href-filter --visible` when you need a
   small link set instead of full-page link dumps.

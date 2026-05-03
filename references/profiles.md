@@ -37,14 +37,19 @@ or Vivaldi. Use `--json` only when exact `userDataDir`, `profilePath`,
 ## Opening A Specific Profile
 
 ```bash
-"$REALBROWSER_CLI" open --profile "chrome:Profile 4" https://example.com --select --no-fallback --timeout 15000
-"$REALBROWSER_CLI" active-session
+"$REALBROWSER_CLI" open --profile "chrome:Profile 4" https://example.com --no-fallback --timeout 15000
+"$REALBROWSER_CLI" find-tab example.com --all-sessions
+"$REALBROWSER_CLI" select-tab example.com --all-sessions
 "$REALBROWSER_CLI" observe --max-chars 2000
 ```
 
 `open --profile <id> <url>` is the script-owned way to launch a selected UI
 profile. Do not call OS browser launchers directly from an agent. If the
 selected profile exposes no DevTools endpoint, stop and report the blocker.
+Omit `--select` by default when the user is actively working in another app:
+background open plus `find-tab`/`select-tab` keeps foregrounding explicit.
+Use `--select`, `--front`, `focus`, or `--foreground-until-ready` only when the
+task explicitly needs automation selection or visual handoff.
 
 Browser-level endpoints can include tabs from multiple profiles. After attach,
 verify/select by URL or title before taking action.
