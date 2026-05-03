@@ -32,6 +32,7 @@ const DAEMON_CAPABILITIES = Object.freeze([
   "content-posts",
   "endpoint-session-manager",
   "filtered-links",
+  "managed-headless",
   "page-local-wait",
   "persistent-cdp-ws-target-list",
   "visible-wait",
@@ -402,6 +403,9 @@ const CLI_GLOBAL_FLAGS = [
   "--page <id-or-target>",
   "--select",
   "--front",
+  "--headless",
+  "--headed",
+  "--no-headless",
   "--anonymous",
   "--keep-anonymous",
   "--force",
@@ -589,6 +593,8 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--front",
   "--full",
   "--full-page",
+  "--headless",
+  "--headed",
   "--help",
   "--ignore-active-session",
   "--interactive",
@@ -602,6 +608,7 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--no-dismiss-banner",
   "--no-fallback",
   "--no-fallback-text",
+  "--no-headless",
   "--no-fast",
   "--no-network",
   "--no-normalize",
@@ -919,6 +926,11 @@ function parseArgv(argv) {
       flags.allSessions = true;
     } else if (arg === "--front" || arg === "--bring-to-front") {
       flags.front = true;
+    } else if (arg === "--headless") {
+      flags.headless = true;
+    } else if (arg === "--headed" || arg === "--no-headless") {
+      flags.headless = false;
+      flags.headed = true;
     } else if (arg === "--restart-daemon" || arg === "--reload-daemon") {
       flags.restartDaemon = true;
     } else if (arg === "--select") {
@@ -1491,6 +1503,48 @@ function desiredMode(flags = {}) {
   return AUTO_MODE;
 }
 
+function parseBooleanEnv(value) {
+  if (value === undefined || value === "") {
+    return null;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return null;
+}
+
+function hasExplicitHeadlessSelection(flags = {}) {
+  return (
+    typeof flags.headless === "boolean" ||
+    flags.headed === true ||
+    flags.front === true ||
+    parseBooleanEnv(process.env.REALBROWSER_HEADLESS) !== null ||
+    parseBooleanEnv(process.env.REALBROWSER_HEADED) !== null
+  );
+}
+
+function desiredHeadless(flags = {}, mode = desiredMode(flags)) {
+  if (flags.front || flags.headed === true) {
+    return false;
+  }
+  if (typeof flags.headless === "boolean") {
+    return flags.headless;
+  }
+  const envHeaded = parseBooleanEnv(process.env.REALBROWSER_HEADED);
+  if (envHeaded === true) {
+    return false;
+  }
+  const envHeadless = parseBooleanEnv(process.env.REALBROWSER_HEADLESS);
+  if (envHeadless !== null) {
+    return envHeadless;
+  }
+  return mode === ANONYMOUS_MODE || mode === DEDICATED_MODE;
+}
+
 function profileDirForMode(mode, flags = {}) {
   const configured = flags.profileDir ?? process.env.REALBROWSER_PROFILE_DIR;
   if (configured) {
@@ -1518,6 +1572,7 @@ function modeKey(flags = {}) {
     mode,
     browserUrl: flags.browserUrl ?? process.env.REALBROWSER_BROWSER_URL ?? "",
     profileDir: profileDirForMode(mode, flags),
+    headless: desiredHeadless(flags, mode),
     packageSpec: PACKAGE_SPEC,
     noFallback: Boolean(flags.noFallback || process.env.REALBROWSER_NO_FALLBACK === "1"),
     keepAnonymous: Boolean(flags.keepAnonymous || process.env.REALBROWSER_KEEP_ANONYMOUS === "1"),
@@ -1532,11 +1587,14 @@ function hasExplicitBrowserTargetSelection(flags = {}) {
     flags.backend ||
     flags.browserUrl ||
     flags.profileDir ||
+    hasExplicitHeadlessSelection(flags) ||
     flags.keepAnonymous ||
     (envMode && envMode !== AUTO_MODE) ||
     process.env.REALBROWSER_ANONYMOUS === "1" ||
     process.env.REALBROWSER_BROWSER_URL ||
     process.env.REALBROWSER_PROFILE_DIR ||
+    parseBooleanEnv(process.env.REALBROWSER_HEADLESS) !== null ||
+    parseBooleanEnv(process.env.REALBROWSER_HEADED) !== null ||
     process.env.REALBROWSER_KEEP_ANONYMOUS === "1",
   );
 }
@@ -1578,6 +1636,7 @@ function shouldReplaceExistingDaemon(state, expectedModeKey, flags = {}, explici
     desiredMode(flags) === ANONYMOUS_MODE &&
     !flags.profileDir &&
     !process.env.REALBROWSER_PROFILE_DIR &&
+    !hasExplicitHeadlessSelection(flags) &&
     modeFromState(state) === ANONYMOUS_MODE
   ) {
     return false;
@@ -1612,6 +1671,10 @@ function applyRestartDaemonInheritance(flags = {}, state = null) {
   }
   if (parsed.noFallback === true) {
     flags.noFallback = true;
+  }
+  if (typeof parsed.headless === "boolean") {
+    flags.headless = parsed.headless;
+    flags.headed = parsed.headless === false;
   }
   return flags;
 }
@@ -1685,6 +1748,7 @@ async function listKnownSessions(flags = {}) {
       pid: state.pid,
       startedAt: state.startedAt,
       mode: healthBody.mode ?? modeFromState(state) ?? "unknown",
+      headless: healthBody.headless ?? headlessFromState(state),
       noFallback: healthBody.noFallback ?? noFallbackFromState(state),
       mcpConnected: Boolean(healthBody.mcpConnected),
       version: healthBody.version ?? state.version ?? null,
@@ -1748,6 +1812,18 @@ function browserUrlFromState(state) {
     return String(JSON.parse(state.modeKey)?.browserUrl ?? "").trim();
   } catch {
     return "";
+  }
+}
+
+function headlessFromState(state) {
+  if (!state?.modeKey) {
+    return null;
+  }
+  try {
+    const value = JSON.parse(state.modeKey)?.headless;
+    return typeof value === "boolean" ? value : null;
+  } catch {
+    return null;
   }
 }
 
@@ -1990,6 +2066,7 @@ async function ensureDaemonUnlocked(flags = {}) {
     await fsp.rm(stateFile, { force: true });
     await fsp.mkdir(stateDir(stateFile), { recursive: true });
     const startMode = desiredMode(flags);
+    const startHeadless = desiredHeadless(flags, startMode);
     const keepAnonymous = flags.keepAnonymous || process.env.REALBROWSER_KEEP_ANONYMOUS === "1";
     const startProfileDir = startMode === ANONYMOUS_MODE && keepAnonymous
       ? await anonymousProfileDirForStart(flags)
@@ -1999,6 +2076,7 @@ async function ensureDaemonUnlocked(flags = {}) {
       ...process.env,
       REALBROWSER_STATE_FILE: stateFile,
       REALBROWSER_MODE: startMode,
+      REALBROWSER_HEADLESS: startHeadless ? "1" : "0",
       REALBROWSER_PROFILE_DIR: startProfileDir,
       ...(sessionName ? { REALBROWSER_SESSION: sessionName } : {}),
       ...(flags.browserUrl ? { REALBROWSER_BROWSER_URL: flags.browserUrl } : {}),
@@ -3303,6 +3381,7 @@ function formatSessionListText(sessions, activeSession = null) {
     active: session.active ? "*" : "",
     name: session.name,
     mode: session.mode,
+    headless: session.headless === null || session.headless === undefined ? "?" : session.headless ? "yes" : "no",
     pid: String(session.pid ?? ""),
     mcp: session.mcpConnected ? "yes" : "no",
     script: session.scriptHash ? (session.scriptHash === SCRIPT_HASH ? "current" : `old:${session.scriptHash}`) : "old",
@@ -3312,6 +3391,7 @@ function formatSessionListText(sessions, activeSession = null) {
     active: 1,
     name: Math.max("Session".length, ...rows.map((row) => row.name.length)),
     mode: Math.max("Mode".length, ...rows.map((row) => row.mode.length)),
+    headless: Math.max("Headless".length, ...rows.map((row) => row.headless.length)),
     pid: Math.max("PID".length, ...rows.map((row) => row.pid.length)),
     mcp: Math.max("MCP".length, ...rows.map((row) => row.mcp.length)),
     script: Math.max("Script".length, ...rows.map((row) => row.script.length)),
@@ -3320,14 +3400,15 @@ function formatSessionListText(sessions, activeSession = null) {
     row.active.padEnd(widths.active),
     row.name.padEnd(widths.name),
     row.mode.padEnd(widths.mode),
+    row.headless.padEnd(widths.headless),
     row.pid.padEnd(widths.pid),
     row.mcp.padEnd(widths.mcp),
     row.script.padEnd(widths.script),
     row.state,
   ].join("  ");
   return [
-    line({ active: "", name: "Session", mode: "Mode", pid: "PID", mcp: "MCP", script: "Script", state: "State file" }),
-    line({ active: "-", name: "-".repeat(widths.name), mode: "-".repeat(widths.mode), pid: "-".repeat(widths.pid), mcp: "-".repeat(widths.mcp), script: "-".repeat(widths.script), state: "----------" }),
+    line({ active: "", name: "Session", mode: "Mode", headless: "Headless", pid: "PID", mcp: "MCP", script: "Script", state: "State file" }),
+    line({ active: "-", name: "-".repeat(widths.name), mode: "-".repeat(widths.mode), headless: "-".repeat(widths.headless), pid: "-".repeat(widths.pid), mcp: "-".repeat(widths.mcp), script: "-".repeat(widths.script), state: "----------" }),
     ...rows.map(line),
     "",
     '* marks the active session used by commands without --session.',
@@ -3359,6 +3440,7 @@ function publicSessionInfo(session) {
     pid: session.pid,
     startedAt: session.startedAt,
     mode: session.mode,
+    headless: session.headless,
     noFallback: session.noFallback,
     mcpConnected: session.mcpConnected,
     version: session.version,
@@ -4872,6 +4954,9 @@ function buildMcpArgs(config) {
   } else {
     args.push(`--userDataDir=${config.profileDir}`);
   }
+  if (config.headless && !config.browserUrl && config.mode !== AUTO_MODE) {
+    args.push("--headless=true");
+  }
   args.push("--experimentalStructuredContent");
   args.push("--experimental-page-id-routing");
   args.push("--no-usage-statistics");
@@ -4988,6 +5073,7 @@ class BrowserDaemon {
     this.profileDir = process.env.REALBROWSER_PROFILE_DIR ?? (this.mode === ANONYMOUS_MODE ? "" : DEFAULT_PROFILE_DIR);
     this.noFallback = process.env.REALBROWSER_NO_FALLBACK === "1";
     this.keepAnonymous = process.env.REALBROWSER_KEEP_ANONYMOUS === "1";
+    this.headless = parseBooleanEnv(process.env.REALBROWSER_HEADLESS) ?? desiredHeadless({}, this.mode);
     this.mcp = null;
     this.tools = null;
     this.hiddenConsoleLines = new Set();
@@ -5012,6 +5098,7 @@ class BrowserDaemon {
       mode: this.browserUrl ? DEDICATED_MODE : this.mode,
       browserUrl: this.browserUrl,
       profileDir: this.profileDir,
+      headless: this.headless,
       keepAnonymous: this.keepAnonymous,
     });
     await client.initialize();
@@ -9508,6 +9595,7 @@ async function runDaemon() {
           scriptHash: SCRIPT_HASH,
           capabilities: DAEMON_CAPABILITIES,
           mode: daemon.currentMode(),
+          headless: daemon.headless,
           noFallback: daemon.noFallback,
           mcpConnected: Boolean(daemon.mcp),
         });
@@ -9549,6 +9637,7 @@ async function runDaemon() {
       dedicated: process.env.REALBROWSER_MODE === DEDICATED_MODE,
       browserUrl: process.env.REALBROWSER_BROWSER_URL?.trim() || undefined,
       profileDir: process.env.REALBROWSER_PROFILE_DIR || undefined,
+      headless: process.env.REALBROWSER_HEADLESS === "1",
       keepAnonymous: process.env.REALBROWSER_KEEP_ANONYMOUS === "1",
     }),
   });
@@ -9650,6 +9739,20 @@ async function runSelfTest() {
   assertSelfTest(parsedBackgroundOpen.flags.front !== true, "open defaults to background mode");
   const parsedForegroundOpen = parseArgv(["open", "https://example.com", "--front"]);
   assertSelfTest(parsedForegroundOpen.flags.front === true, "open --front opts into focus");
+  const parsedHeadlessOpen = parseArgv(["open", "https://example.com", "--anonymous", "--headless"]);
+  assertSelfTest(parsedHeadlessOpen.flags.headless === true, "parser handles headless flag");
+  const parsedHeadedOpen = parseArgv(["open", "https://example.com", "--anonymous", "--headed"]);
+  assertSelfTest(parsedHeadedOpen.flags.headless === false && parsedHeadedOpen.flags.headed === true, "parser handles headed flag");
+  assertSelfTest(desiredHeadless({ anonymous: true }) === true, "anonymous sessions default to headless");
+  assertSelfTest(desiredHeadless({ anonymous: true, front: true }) === false, "front opts managed sessions into headed mode");
+  assertSelfTest(
+    buildMcpArgs({ mode: ANONYMOUS_MODE, profileDir: "", headless: true }).includes("--headless=true"),
+    "anonymous MCP launch can be headless",
+  );
+  assertSelfTest(
+    !buildMcpArgs({ mode: ANONYMOUS_MODE, profileDir: "", headless: false }).includes("--headless=true"),
+    "headed anonymous MCP launch omits headless flag",
+  );
   const parsedSelectOpen = parseArgv(["open", "https://example.com", "--select"]);
   assertSelfTest(parsedSelectOpen.flags.select === true, "open --select selects for automation");
   const parsedCleanupDetach = parseArgv(["detach", "--cleanup-remote-debugging"]);

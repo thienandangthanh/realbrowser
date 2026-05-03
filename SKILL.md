@@ -174,7 +174,7 @@ When the user asks to check a URL that may already be open, search existing debu
 
 ## Anonymous Sessions And Network Capture
 
-`--anonymous` means Chrome DevTools MCP isolated browser state in a Chrome Incognito window, not privacy/anonymity on the network. It starts Chrome DevTools MCP with isolated mode and an incognito Chrome argument, then navigates the initial incognito `about:blank` page instead of using MCP `new_page`, because `new_page` can open a separate normal isolated window. Use it when the user asks for anonymous mode, clean login testing, first-run UI checks, or cookie-free behavior:
+`--anonymous` means Chrome DevTools MCP isolated browser state, not privacy/anonymity on the network. Managed anonymous and dedicated sessions run headless by default so smoke tests and data-URL checks do not pop a Chrome window over the terminal. Pass `--headed`, `--front`, or `REALBROWSER_HEADLESS=0` only when visible UI is part of the task. Anonymous mode starts Chrome DevTools MCP with isolated mode and an incognito Chrome argument, then navigates the initial incognito `about:blank` page instead of using MCP `new_page`, because `new_page` can open a separate normal isolated window. Use it when the user asks for anonymous mode, clean login testing, first-run UI checks, or cookie-free behavior:
 
 ```bash
 "$REALBROWSER_CLI" open https://app.example.com --anonymous --select
@@ -406,6 +406,7 @@ Global flags:
 - `--browser <key>`: narrow profile discovery/selection to a browser such as `chrome`, `brave`, `edge`, `chromium`, or `vivaldi`.
 - `--select`: after profile-targeted `open`/`newtab`, wait for the matching debuggable tab, attach to its endpoint, and select it for follow-up commands.
 - `--anonymous`: use Chrome DevTools MCP isolated browser state. This is clean browser state, not network anonymity.
+- `--headless` / `--headed`: control managed anonymous/dedicated Chrome visibility. Managed sessions default to headless; existing real-profile attach ignores this because Chrome is already running.
 - `--keep-anonymous`: keep the temporary anonymous profile directory after detach for debugging.
 - `--force`: only for commands that explicitly document it. For handle-writing commands, it intentionally replaces an existing handle file; for `use-session`, it remembers a session name before that daemon starts.
 - `--restart-daemon` / `--reload-daemon`: explicitly stop and reload the selected daemon with the current skill code. For real signed-in Chrome sessions this may show one fresh remote-debugging approval prompt, so use it only when accepting that tradeoff.
@@ -459,7 +460,7 @@ Global flags:
 - Remote-debugging metadata checks understand common Chrome, Chromium, Chrome Beta/Testing, Brave, Edge, Vivaldi, Linux Flatpak, and Windows user-data locations. Set `REALBROWSER_BROWSER_USER_DATA_DIR` or `REALBROWSER_CHROME_USER_DATA_DIR` when the profile root is custom.
 - Profile discovery and profile launching are cross-platform only on the OS where the target browser is installed and running. In split-host setups such as WSL, Parallels, Docker, SSH, or a Linux guest controlling a macOS/Windows host browser, the guest filesystem and `127.0.0.1` are not the host browser/profile by default. Run the host-side wrapper on the host OS, or connect to the host browser's forwarded CDP endpoint with `--browser-url <host-cdp-url>`. Stop and report the host/guest boundary if the endpoint is not reachable.
 - Profile launch uses Chrome's `--profile-directory` flag; attach commands use Chrome DevTools MCP/CDP and cannot switch profiles unless the selected profile exposes a DevTools endpoint. Browser-level endpoints may include tabs from multiple profiles, so tab selection remains mandatory.
-- Anonymous mode uses Chrome DevTools MCP isolated state by default. `--keep-anonymous` uses a temporary `userDataDir` for inspection after detach. Neither mode masks IP address, device/browser fingerprint, or network identity.
+- Anonymous mode uses Chrome DevTools MCP isolated state by default. Managed anonymous/dedicated sessions are headless unless `--headed`, `--front`, or `REALBROWSER_HEADLESS=0` is used. `--keep-anonymous` uses a temporary `userDataDir` for inspection after detach. Neither mode masks IP address, device/browser fingerprint, or network identity.
 - Network capture uses in-browser PerformanceResourceTiming plus DevTools request rows; it is designed for UI/performance triage, not full proxy-grade packet capture.
 - Banner-X dismissal is an opt-in best-effort desktop UI action via `detach --dismiss-banner`. The core detach flow remains portable because it does not require that UI automation to succeed, and it never disables CDP unless `--cleanup-remote-debugging` is explicitly passed.
 - Screenshot normalization is dependency-free and uses Chrome DevTools MCP capture/emulation calls on macOS, Linux, and Windows.

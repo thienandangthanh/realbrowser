@@ -164,6 +164,8 @@ Realbrowser is designed to keep Codex token use low:
 - Use `observe` for the first page read.
 - Use `posts --limit <n>` for feed-like content, and `blocks --limit <n>`
   for search results and dashboards where full-page text is too noisy.
+- Managed anonymous/dedicated sessions run headless by default. Use `--headed`
+  or `--front` only for an explicit visual handoff.
 - Use `wait <text>` or readiness waits instead of shell sleeps.
 - Use profile/endpoint sessions when possible; cheap operations use one
   persistent direct-CDP socket before MCP. Reuse the endpoint-scoped session for
