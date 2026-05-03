@@ -26,7 +26,7 @@ preflight for every screenshot.
 
 On Windows PowerShell, prefer `scripts\realbrowser.ps1 ...`. On `cmd.exe`, use `scripts\realbrowser.cmd ...`. `node scripts\realbrowser.mjs ...` and the installed `realbrowser` npm bin are also portable. The POSIX `scripts/realbrowser` wrapper is for macOS/Linux shells.
 
-The CLI starts a persistent loopback daemon on demand. The daemon stores its port and bearer token in `~/.realbrowser/state.json` and talks to `chrome-devtools-mcp` over stdio.
+The CLI starts a persistent loopback daemon on demand. The daemon stores its port and bearer token in `~/.realbrowser/state.json`. When a concrete CDP endpoint is known from `--profile`, `--browser-url`, or `REALBROWSER_BROWSER_URL`, cheap operations such as `tabs`, `open`, `select`, `goto`, `reload`, `url`, `text`, `links`, and `js` use DevTools HTTP where possible and one persistent direct-CDP socket inside the daemon when WebSocket control is needed. Do not start another session for the same real-browser endpoint unless the user explicitly passes `--force`; duplicate endpoint sessions can trigger another Chrome remote-debugging approval. Chrome DevTools MCP remains the fallback and the high-level path for snapshots, screenshots, clickable `uid` actions, console/network buffers, emulation, and labels.
 
 `status` is side-effect-light by default and should be used to check whether realbrowser is already controlling Chrome. It may inspect default-local-Chrome remote-debugging metadata when that file is available, without attaching to the browser backend; treat that metadata as a hint, not proof for every backend. Use `status --deep`, `tabs`, or any page command only when you intentionally want to attach to the browser backend.
 
@@ -62,6 +62,14 @@ project/task-specific `--handle-out` path under the repo, such as
 projects. Do not share or release the same handle from more than one active
 task. If you intentionally want to replace an existing handle file, pass
 `--force`.
+
+`tabs` and `find-tab` print compact suggested targets such as `t1`, `t2`, etc.
+Use those handles with `select-tab`, `select`, `tab`, `focus`, `close`, and
+direct CDP-backed reads/navigation in the same running session. For high-level
+MCP-only operations such as `snapshot --labels` or clickable `uid` actions,
+prefer selecting the tab once and then omitting `--page` unless `tabs --json`
+shows a numeric MCP page id. Raw CDP target ids are still available in `--json`,
+but normal workflows should prefer the short target.
 
 Viewport and screenshot operations are page-scoped in Chrome DevTools. When a
 task depends on an exact viewport, especially mobile screenshots, capture the
@@ -285,16 +293,16 @@ REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dis
 - `stop` / `detach`: stop the selected daemon and close realbrowser's MCP connection. With an active session, plain `detach` stops that active session; use `--session <name>` to stop a specific named session or `--all-sessions` to stop every running session. Do not detach real signed-in profile sessions as routine cleanup. Plain detach leaves Chrome remote debugging enabled and does not touch browser UI. Add `--dismiss-banner` only when the user explicitly wants a best-effort click on the visible automation banner `X`. Add `--cleanup-remote-debugging` only when the user explicitly wants Chrome's remote-debugging setting turned off too.
 - `cleanup-remote-debugging`: turn off Chrome's `chrome://inspect/#remote-debugging` setting through an existing realbrowser daemon, then stop the daemon. Add `--allow-attach` to start a fresh permission-gated attach when no daemon is running. Dedicated-profile mode skips user Chrome settings cleanup and just stops the managed session. `--browser-url` cleanup targets the configured backend through browser UI when possible; local Chrome metadata may not describe that backend.
 - `restart`: restart the persistent daemon's MCP/browser connection without changing the daemon token or port.
-- `tabs`: list open pages.
-- `open <url>` / `newtab <url>`: open a URL in a new background page without bringing Chrome to the front. Pass `--front` only when the user explicitly wants Chrome focused.
+- `tabs`: list open pages with compact targets such as `t1`. With a known CDP endpoint, this is a direct CDP read and does not need MCP. Short targets are stable for that daemon session.
+- `open <url>` / `newtab <url>`: open a URL in a new background page without bringing Chrome to the front. With a known CDP endpoint, this uses direct CDP target creation; pass `--front` only when the user explicitly wants Chrome focused.
 - `open <url> --profile <profile-query> [--select]` / `newtab <url> --profile <profile-query> [--select]`: open the URL through the OS browser launcher in the selected Chrome/Chromium UI profile. This selects the profile for the visible browser tab; `--select` then attaches to the detected endpoint and selects the matching page for later commands.
 - `open <url> --profile <profile-query> --anonymous --session <name> --select`: open a profile-bound Chrome Incognito window, attach to its detected DevTools endpoint, and keep later commands on the named session.
-- `navigate <url>` / `goto <url>`: navigate the selected page to a URL.
-- `back`, `forward`, `reload`: navigate browser history or reload the page.
-- `select <pageId> [--front]` / `tab <pageId>`: select a page for later commands. It does not bring Chrome to the front unless `--front` is passed.
+- `navigate <url>` / `goto <url>`: navigate the selected page to a URL. With a known CDP endpoint, this uses direct CDP.
+- `back`, `forward`, `reload`: navigate browser history or reload the page. With a known CDP endpoint, this uses direct CDP.
+- `select <target> [--front]` / `tab <target>`: select a page for later commands. `<target>` can be a short target from `tabs`, such as `t1`. It does not bring Chrome to the front unless `--front` is passed.
 - `select <uid|selector> <value> [--page <id>]`: select a dropdown option by value, label, or visible text.
-- `focus <pageId>`: select a page and bring Chrome to the front.
-- `close <pageId>` / `closetab <pageId>`: close a tab.
+- `focus <target>`: select a page and bring Chrome to the front.
+- `close <target>` / `closetab <target>`: close a tab.
 - `observe [--screenshot] [--limit <n>] [--max-chars <n>]`: compact page overview with title, URL, headings, visible controls, fields, console errors, and failed/recent network lines. Use this first for "what is on the page?"
 - `snapshot` / `accessibility [--efficient] [--interactive] [--compact] [--depth <n>] [--max-chars <n>] [--max-nodes <n>] [--labels|--annotate] [--out <path>] [--raw|--verbose]`: get a capped role-style snapshot with actionable Chrome MCP `uid` refs. `--efficient` is the OpenClaw-style preset: interactive, compact, depth-limited, and capped. `--labels` saves a labeled screenshot and prints `MEDIA:<path>`.
 - `click <uid> [--page <id>]`: click a ref from the latest snapshot.
@@ -333,14 +341,15 @@ REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dis
 - `tool <mcpToolName> [jsonArgs]`: call a raw MCP tool for features not wrapped yet.
 - `chain '[["observe"],["snapshot","--efficient"],["console","--errors"]]' [--return summary|final|all] [--trace <path>]`: run multiple commands in one daemon RPC for speed. Default output is a compact summary; full traces should go to disk.
 
-Passing `--page <id>` targets a tab directly without focusing Chrome, so background screenshots and snapshots do not cover the terminal. Opening pages should also stay background by default; use `--front` or `focus` only for explicit handoff.
+Passing `--page <id-or-target>` targets a tab directly without focusing Chrome, so background screenshots and snapshots do not cover the terminal. With direct CDP fast paths this can be a short target such as `t1`; for MCP-only commands, use the numeric MCP page id from `tabs --mcp`. Opening pages should also stay background by default; use `--front` or `focus` only for explicit handoff.
 
 Global flags:
 
 - `--json`: print raw JSON responses.
 - `--quiet`: print only the shortest useful value when available.
 - `--verbose`: raise output caps and request more detail. Use when the compact result is missing useful context.
-- `--raw`: bypass realbrowser compaction and print the underlying MCP response. Use when the user asks for full output.
+- `--raw`: bypass realbrowser compaction and print the underlying adapter response. Use when the user asks for full output.
+- `--mcp` / `--no-fast`: bypass direct CDP fast paths for this command and force the Chrome DevTools MCP path when available. Use this only when debugging the adapter or when exact MCP page ids are required.
 - `--mode compact|normal|verbose|raw`: output mode shortcut. `REALBROWSER_OUTPUT=verbose|raw|quiet` can set the default for a command or session.
 - `--`: stop option parsing. Use before literal text or JavaScript that begins with a known flag, such as `type -- --raw`.
 - `--session <name>`: use or create a named realbrowser session. Use this for workflows with multiple profiles, multiple anonymous windows, or long-lived app contexts.
@@ -388,6 +397,7 @@ Global flags:
 ## Token And Speed Rules
 
 - Prefer `observe`, `snapshot --efficient`, `console --errors --limit 20`, and `network --failed --limit 30`.
+- Prefer direct CDP-backed endpoint/profile sessions for cheap reads and navigation. Use `--mcp` only when you need to compare against Chrome DevTools MCP behavior.
 - Do not call raw/full snapshot by default. If the user asks for verbose or full output, use `--verbose`, `--raw`, `REALBROWSER_OUTPUT=verbose`, `REALBROWSER_OUTPUT=raw`, or `--out <path>`.
 - On Windows PowerShell, set full-output mode with `$env:REALBROWSER_OUTPUT = "raw"` before running `scripts\realbrowser.ps1`, then remove it with `Remove-Item Env:\REALBROWSER_OUTPUT`.
 - For large HTML/text/network bodies, use `--out <path>` or `network get --response-file <path>`.

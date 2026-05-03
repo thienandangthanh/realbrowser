@@ -10,12 +10,16 @@ The default Codex browser automation path is useful, but it is not enough for we
 - A local CLI at `scripts/realbrowser`.
 - A persistent loopback daemon for fast follow-up commands.
 - Chrome DevTools MCP integration for real Chrome attach.
+- Direct CDP fast paths for cheap endpoint/profile operations such as tab list,
+  open, select, navigation, JavaScript evaluation, and simple page reads, using
+  DevTools HTTP where possible and one persistent CDP socket per daemon when a
+  WebSocket is needed.
 - A dedicated profile fallback at `~/.realbrowser/profile`.
-- Tab listing/selection, navigation, compact observations, efficient snapshots, clicks, typing, forms, JavaScript evaluation, capped console and network inspection, OpenClaw-style normalized screenshots, annotated labels, pre-armed dialog handling, user-agent emulation, and download interception.
+- Short tab targets for daemon sessions, tab listing/selection, navigation, compact observations, efficient snapshots, clicks, typing, forms, JavaScript evaluation, capped console and network inspection, OpenClaw-style normalized screenshots, annotated labels, pre-armed dialog handling, user-agent emulation, and download interception.
 
 ## Why Not Just Playwright?
 
-Playwright is excellent for isolated automation, but this project is for the opposite case: debugging a real browser session with the same login and state the developer already has. Realbrowser uses Chrome DevTools MCP first, then adds small local wrappers for the operations Codex needs to move quickly.
+Playwright is excellent for isolated automation, but this project is for the opposite case: debugging a real browser session with the same login and state the developer already has. Realbrowser uses direct CDP for cheap operations when a concrete endpoint is known, and Chrome DevTools MCP for high-level operations such as snapshots, screenshots, refs, console/network buffers, and emulation.
 
 ## Skill Architecture
 
@@ -151,9 +155,14 @@ Stopping or detaching realbrowser closes its daemon/MCP connection. If Chrome st
 Realbrowser is designed to keep Codex token use low:
 
 - Use `observe` for the first page read.
+- Use profile/endpoint sessions when possible; cheap operations use one
+  persistent direct-CDP socket before MCP. Reuse the endpoint-scoped session for
+  a real signed-in browser; pass `--force` only when intentionally creating a
+  duplicate controller.
 - Use `snapshot --efficient` when clickable `uid` refs are needed.
 - Use `snapshot --labels` or `screenshot --labels` for annotated screenshots.
 - `open` and `newtab` open background tabs by default; pass `--front` only for an explicit visual handoff.
+- Use compact targets from `tabs`/`find-tab` such as `t1` instead of raw target ids.
 - Use `console --errors --limit 20` and `network --failed --limit 30`.
 - Use project-specific `--handle-out tmp/realbrowser-handles/<task>.json`
   paths for parallel Codex tabs. Existing handle files are not overwritten
@@ -213,7 +222,7 @@ Output modes:
 
 - Compact default: capped, model-friendly output.
 - `--verbose` or `REALBROWSER_OUTPUT=verbose`: raises caps and requests more detail where the backend supports it.
-- `--raw` or `REALBROWSER_OUTPUT=raw`: bypasses realbrowser compaction and prints the underlying MCP response.
+- `--raw` or `REALBROWSER_OUTPUT=raw`: bypasses realbrowser compaction and prints the underlying adapter response.
 - `--out <path>` and `--request-file`/`--response-file`: write large data to disk instead of putting it in the agent transcript.
 - `--` stops option parsing. Use it before literal text or JavaScript that starts with a known flag, for example `realbrowser type -- --raw`.
 

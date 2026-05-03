@@ -291,10 +291,10 @@ const CLI_COMMAND_GROUPS = [
       { name: "back", usage: "realbrowser back [--page <id>]", summary: "Navigate back.", handle: true },
       { name: "forward", usage: "realbrowser forward [--page <id>]", summary: "Navigate forward.", handle: true },
       { name: "reload", usage: "realbrowser reload [--page <id>]", summary: "Reload the page.", handle: true },
-      { name: "select", usage: "realbrowser select <pageId>|<uid|selector> [value] [--page <id>] [--front]", summary: "Select a page or option.", minArgs: 1 },
-      { name: "tab", usage: "realbrowser tab <pageId> [--front]", summary: "Select a page by id.", minArgs: 1 },
-      { name: "focus", usage: "realbrowser focus <pageId>", summary: "Bring a page to front.", minArgs: 1 },
-      { name: "close", aliases: ["closetab"], usage: "realbrowser close <pageId>", summary: "Close a page.", handle: false, minArgs: 1 },
+      { name: "select", usage: "realbrowser select <target>|<uid|selector> [value] [--page <id>] [--front]", summary: "Select a page/target or option.", minArgs: 1 },
+      { name: "tab", usage: "realbrowser tab <target> [--front]", summary: "Select a page target.", minArgs: 1 },
+      { name: "focus", usage: "realbrowser focus <target>", summary: "Bring a page target to front.", minArgs: 1 },
+      { name: "close", aliases: ["closetab"], usage: "realbrowser close <target>", summary: "Close a page target.", handle: false, minArgs: 1 },
       { name: "click", usage: "realbrowser click <uid> [--page <id>]", summary: "Click an accessibility uid.", handle: true, minArgs: 1 },
       { name: "hover", usage: "realbrowser hover <uid> [--page <id>]", summary: "Hover an accessibility uid.", handle: true, minArgs: 1 },
       { name: "drag", usage: "realbrowser drag <fromUid> <toUid> [--page <id>]", summary: "Drag between accessibility uids.", handle: true, minArgs: 2 },
@@ -385,7 +385,9 @@ const CLI_GLOBAL_FLAGS = [
   "--cdp-url <url>",
   "--profile <profile-query>",
   "--browser <browser-key>",
+  "--page <id-or-target>",
   "--select",
+  "--front",
   "--anonymous",
   "--keep-anonymous",
   "--force",
@@ -398,6 +400,8 @@ const CLI_GLOBAL_FLAGS = [
   "--no-network",
   "--dedicated",
   "--no-fallback",
+  "--mcp",
+  "--no-fast",
   "--cleanup-remote-debugging",
   "--dismiss-banner",
   "--allow-attach",
@@ -572,9 +576,11 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--keep-anonymous",
   "--keep-isolated",
   "--labels",
+  "--mcp",
   "--no-active-session",
   "--no-dismiss-banner",
   "--no-fallback",
+  "--no-fast",
   "--no-network",
   "--no-normalize",
   "--no-reload",
@@ -823,6 +829,9 @@ function parseArgv(argv) {
       flags.errors = true;
     } else if (arg === "--preserve") {
       flags.preserve = true;
+    } else if (arg === "--mcp" || arg === "--no-fast") {
+      flags.mcp = true;
+      flags.fast = false;
     } else if (arg === "--verbose") {
       flags.verbose = true;
     } else if (arg === "-o" || arg === "--output") {
@@ -1612,20 +1621,20 @@ function shouldReuseExistingRealProfileSession(flags = {}) {
   if (desiredMode(flags) !== AUTO_MODE) {
     return false;
   }
+  if (realProfileEndpointFromFlags(flags)) {
+    return false;
+  }
   const envMode = process.env.REALBROWSER_MODE;
   if (
     flags.stateFile ||
     flags.handle ||
     flags.profile ||
-    flags.browserUrl ||
-    flags.cdpUrl ||
     flags.profileDir ||
     flags.keepAnonymous ||
     process.env.REALBROWSER_STATE_FILE ||
     process.env.REALBROWSER_HANDLE ||
     (envMode && envMode !== AUTO_MODE) ||
     process.env.REALBROWSER_ANONYMOUS === "1" ||
-    process.env.REALBROWSER_BROWSER_URL ||
     process.env.REALBROWSER_PROFILE_DIR ||
     process.env.REALBROWSER_KEEP_ANONYMOUS === "1"
   ) {
@@ -1642,6 +1651,49 @@ function realProfileEndpointFromFlags(flags = {}) {
     process.env.REALBROWSER_CDP_URL ??
     ""
   ).trim();
+}
+
+function browserUrlFromState(state) {
+  if (!state?.modeKey) {
+    return "";
+  }
+  try {
+    return String(JSON.parse(state.modeKey)?.browserUrl ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function browserEndpointEquivalent(left, right) {
+  const a = String(left ?? "").trim();
+  const b = String(right ?? "").trim();
+  if (!a || !b) {
+    return false;
+  }
+  if (a === b) {
+    return true;
+  }
+  return normalizeCdpHttpUrl(a) !== null && normalizeCdpHttpUrl(a) === normalizeCdpHttpUrl(b);
+}
+
+async function reuseExistingEndpointSession(flags = {}) {
+  const endpoint = realProfileEndpointFromFlags(flags);
+  if (!endpoint || flags.force || flags.stateFile || flags.handle) {
+    return null;
+  }
+  const sessions = await listKnownSessions({ noActiveSession: true });
+  const reusable = sessions.find((session) =>
+    isRealProfileSessionMode(session.mode) &&
+    browserEndpointEquivalent(browserUrlFromState(session.state), endpoint)
+  );
+  if (!reusable) {
+    return null;
+  }
+  if (flags.session !== reusable.name) {
+    flags.session = reusable.name;
+    flags.reusedRealProfileSession = reusable.name;
+  }
+  return reusable;
 }
 
 function shouldUseRealProfileAttachLock(flags = {}) {
@@ -1710,6 +1762,10 @@ async function ensureDaemon(flags = {}) {
   }
   const release = await acquireLock(REAL_PROFILE_ATTACH_LOCK_FILE);
   try {
+    const endpointReusable = await reuseExistingEndpointSession(flags);
+    if (endpointReusable?.state) {
+      return endpointReusable.state;
+    }
     const reusable = await reuseExistingRealProfileSession(flags);
     if (reusable?.state) {
       return reusable.state;
@@ -2137,21 +2193,10 @@ async function runCli() {
 }
 
 function daemonPayloadForCommand(command, args, flags = {}, state = null) {
-  if (command === "open" || command === "newtab") {
-    requireArgs(command, args, 1);
-    if (flags.anonymous || modeFromState(state) === ANONYMOUS_MODE) {
-      return { command, args, flags };
-    }
-    return {
-      command: "tool",
-      args: backgroundNewPageArgs(args[0], flags),
-      flags,
-    };
-  }
   if (command === "chain") {
     return {
       command,
-      args: translateChainOpenSteps(args),
+      args,
       flags,
     };
   }
@@ -3082,8 +3127,8 @@ async function openUrlInRunningProfileSession(profile, url, flags = {}) {
     select: Boolean(flags.select),
   };
   const opened = await daemonRpc(endpointSession.state, {
-    command: "tool",
-    args: backgroundNewPageArgs(url, openFlags),
+    command: "open",
+    args: [url],
     flags: openFlags,
   });
   const afterPages = parseListPagesResult(await daemonRpc(endpointSession.state, {
@@ -3116,7 +3161,8 @@ async function openUrlInRunningProfileSession(profile, url, flags = {}) {
     profile: publicProfileInfo(profile),
     launch: {
       command: "realbrowser-session",
-      args: ["new_page", url],
+      args: ["open", url],
+      fastPath: "cdp-or-mcp",
       session: endpointSession.name,
       pid: endpointSession.pid,
     },
@@ -3183,11 +3229,11 @@ async function findBrowserTabs(options = {}) {
   const filtered = options.query
     ? dedupeBrowserTabs(tabs).filter((tab) => browserTabMatchesQuery(tab, options.query))
     : dedupeBrowserTabs(tabs);
-  return filtered.sort((a, b) => (
+  return withBrowserTabHandles(filtered.sort((a, b) => (
     (a.sessionName || "").localeCompare(b.sessionName || "") ||
     (a.url || "").localeCompare(b.url || "") ||
     (a.title || "").localeCompare(b.title || "")
-  ));
+  )));
 }
 
 async function runningSessionByName(name) {
@@ -3241,13 +3287,16 @@ async function tabsForKnownSession(session, context = {}) {
   const pages = parseListPagesResult(pagesResult);
   return pages.map((page) => ({
     id: `${session.name}:${page.id}`,
+    tabId: page.tabId,
+    suggestedTargetId: page.suggestedTargetId ?? page.tabId,
     targetId: String(page.id),
+    cdpTargetId: page.targetId,
     browserUrl: endpoint?.httpUrl ?? `session:${session.name}`,
     browserWsEndpoint: endpoint?.wsEndpoint ?? null,
     endpointHttpUrl: endpoint?.httpUrl ?? null,
     webSocketDebuggerUrl: null,
     url: page.url,
-    title: page.selected ? "(selected)" : "",
+    title: page.title || (page.selected ? "(selected)" : ""),
     source: "session",
     sessionName: session.name,
     stateFile: session.stateFile,
@@ -3315,6 +3364,18 @@ function dedupeBrowserTabs(tabs) {
     }
   }
   return out;
+}
+
+function withBrowserTabHandles(tabs) {
+  return tabs.map((tab, index) => {
+    const tabId = tab.tabId || `t${index + 1}`;
+    const suggestedTargetId = tab.label || `t${index + 1}`;
+    return {
+      ...tab,
+      tabId,
+      suggestedTargetId,
+    };
+  });
 }
 
 function browserTabEndpoints(profiles, options = {}) {
@@ -3425,6 +3486,115 @@ async function fetchCdpTargetList(endpoint) {
   }
 }
 
+async function cdpHttpJson(baseUrl, route, options = {}) {
+  const url = `${baseUrl.replace(/\/$/u, "")}${route}`;
+  const response = await fetch(url, {
+    method: options.method ?? "GET",
+    signal: AbortSignal.timeout(options.timeoutMs ?? 5000),
+  });
+  const text = await response.text();
+  let body = text;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    // Some DevTools HTTP endpoints return plain text.
+  }
+  if (!response.ok) {
+    throw new Error(`CDP ${route} failed (${response.status}): ${typeof body === "string" ? body : JSON.stringify(body)}`);
+  }
+  return body;
+}
+
+async function cdpCreateTargetViaHttp(baseUrl, targetUrl) {
+  const route = `/json/new?${encodeURIComponent(targetUrl)}`;
+  try {
+    return await cdpHttpJson(baseUrl, route, { method: "PUT", timeoutMs: 5000 });
+  } catch {
+    return await cdpHttpJson(baseUrl, route, { method: "GET", timeoutMs: 5000 });
+  }
+}
+
+function formatCdpPagesResult(pages) {
+  const rows = pages.map((page) => ({
+    target: page.suggestedTargetId ?? page.tabId ?? `t${page.id}`,
+    page: String(page.id),
+    title: truncateOneLine(page.title || "(untitled)", 36),
+    url: page.url || "about:blank",
+    selected: page.selected ? "*" : "",
+  }));
+  const widths = {
+    target: Math.max("Target".length, ...rows.map((row) => row.target.length)),
+    page: Math.max("Page".length, ...rows.map((row) => row.page.length)),
+    title: Math.max("Title".length, ...rows.map((row) => row.title.length)),
+  };
+  const line = (row) => [
+    row.selected.padEnd(1),
+    row.target.padEnd(widths.target),
+    row.page.padEnd(widths.page),
+    row.title.padEnd(widths.title),
+    row.url,
+  ].join("  ");
+  return {
+    text: pages.length === 0
+      ? "No CDP page targets found."
+      : [
+          line({ selected: "", target: "Target", page: "Page", title: "Title", url: "URL" }),
+          line({
+            selected: "-",
+            target: "-".repeat(widths.target),
+            page: "-".repeat(widths.page),
+            title: "-".repeat(widths.title),
+            url: "---",
+          }),
+          ...rows.map(line),
+        ].join("\n"),
+    structuredContent: {
+      pages: pages.map((page) => ({
+        id: page.id,
+        tabId: page.tabId,
+        suggestedTargetId: page.suggestedTargetId,
+        targetId: page.targetId,
+        title: page.title,
+        url: page.url,
+        selected: page.selected,
+      })),
+    },
+    cdp: true,
+  };
+}
+
+function formatCdpException(exceptionDetails = {}) {
+  const description = exceptionDetails.exception?.description;
+  const text = exceptionDetails.text;
+  return description || text || "CDP Runtime.evaluate failed";
+}
+
+function cdpRemoteObjectValue(remote = {}) {
+  if (Object.hasOwn(remote, "value")) {
+    return remote.value;
+  }
+  if (remote.subtype === "null") {
+    return null;
+  }
+  if (remote.unserializableValue !== undefined) {
+    return remote.unserializableValue;
+  }
+  if (remote.description !== undefined) {
+    return remote.description;
+  }
+  return undefined;
+}
+
+function formatCdpValue(value) {
+  if (value === undefined) {
+    return "undefined";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  return JSON.stringify(value, null, 2);
+}
+
 function browserTabMatchesQuery(tab, query) {
   const needle = normalizeProfileToken(query);
   if (!needle) {
@@ -3432,6 +3602,9 @@ function browserTabMatchesQuery(tab, query) {
   }
   return [
     tab.id,
+    tab.suggestedTargetId,
+    tab.tabId,
+    tab.label,
     tab.targetId,
     tab.url,
     tab.title,
@@ -3453,7 +3626,13 @@ function selectBrowserTabCandidate(tabs, query) {
   if (exactUrl.length > 1) {
     throw new Error(`Tab query "${query}" matched multiple exact URLs:\n${formatBrowserTabCandidates(exactUrl)}`);
   }
-  const exactId = tabs.filter((tab) => tab.id === query || tab.targetId === query);
+  const exactId = tabs.filter((tab) =>
+    tab.id === query ||
+    tab.targetId === query ||
+    tab.suggestedTargetId === query ||
+    tab.tabId === query ||
+    tab.label === query
+  );
   if (exactId.length === 1) {
     return exactId[0];
   }
@@ -3624,7 +3803,7 @@ function formatBrowserTabListText(tabs) {
     return "No debuggable tabs found. Enable remote debugging in the target browser/profile, search named sessions with `--all-sessions`, or open a URL with `realbrowser open --profile <id> <url>` first.";
   }
   const rows = tabs.map((tab) => ({
-    id: tab.id,
+    id: tab.suggestedTargetId ?? tab.tabId ?? tab.id,
     context: tab.sessionName ? `session:${tab.sessionName}` : compactList(tab.profileNames, 32) || "-",
     title: truncateOneLine(tab.title || "(untitled)", 42),
     url: tab.url || "-",
@@ -3641,23 +3820,30 @@ function formatBrowserTabListText(tabs) {
     row.url,
   ].join("  ");
   return [
-    line({ id: "ID", context: "Context", title: "Title", url: "URL" }),
+    line({ id: "Target", context: "Context", title: "Title", url: "URL" }),
     line({ id: "-".repeat(widths.id), context: "-".repeat(widths.context), title: "-".repeat(widths.title), url: "---" }),
     ...rows.map(line),
     "",
-    'Use: realbrowser select-tab "<url-or-title-fragment>"',
+    'Use: realbrowser select-tab "<target-or-url-fragment>"',
     'For named anonymous sessions: realbrowser select-tab "<query>" --all-sessions. A unique match becomes the active session for plain follow-up commands.',
   ].join("\n");
 }
 
 function formatBrowserTabCandidates(tabs) {
-  return tabs.map((tab) => `- ${tab.id} ${tab.sessionName ? `[session:${tab.sessionName}] ` : ""}${tab.title || "(untitled)"} ${tab.url}`).join("\n");
+  return tabs.map((tab) => {
+    const handle = tab.suggestedTargetId ?? tab.tabId ?? tab.id;
+    return `- ${handle} (${tab.id}) ${tab.sessionName ? `[session:${tab.sessionName}] ` : ""}${tab.title || "(untitled)"} ${tab.url}`;
+  }).join("\n");
 }
 
 function publicBrowserTabInfo(tab) {
   return {
+    suggestedTargetId: tab.suggestedTargetId,
+    tabId: tab.tabId,
+    label: tab.label,
     id: tab.id,
     targetId: tab.targetId,
+    cdpTargetId: tab.cdpTargetId,
     browserUrl: tab.browserUrl,
     browserWsEndpoint: tab.browserWsEndpoint,
     endpointHttpUrl: tab.endpointHttpUrl,
@@ -4010,41 +4196,6 @@ function formatMaybeBoolean(value) {
   return "unknown";
 }
 
-function backgroundNewPageArgs(url, flags = {}) {
-  return [
-    "new_page",
-    JSON.stringify({
-      url,
-      background: !flags.front,
-      ...(flags.timeout ? { timeout: parsePositiveInteger(flags.timeout, "timeout") } : {}),
-    }),
-  ];
-}
-
-function translateChainOpenSteps(args) {
-  if (args.length === 0) {
-    return args;
-  }
-  const steps = parseJsonArg(args.join(" "), "chain");
-  if (!Array.isArray(steps)) {
-    return args;
-  }
-  let changed = false;
-  const translated = steps.map((step) => {
-    if (!Array.isArray(step) || step.length === 0) {
-      return step;
-    }
-    const parsed = parseArgv(step.map((value) => String(value)));
-    if (parsed.command !== "open" && parsed.command !== "newtab") {
-      return step;
-    }
-    requireArgs(parsed.command, parsed.args, 1);
-    changed = true;
-    return ["tool", ...backgroundNewPageArgs(parsed.args[0], parsed.flags)];
-  });
-  return changed ? [JSON.stringify(translated)] : args;
-}
-
 class McpClient {
   constructor(config) {
     this.config = config;
@@ -4175,17 +4326,20 @@ class CdpClient {
     this.nextId = 1;
     this.pending = new Map();
     this.listeners = new Set();
+    this.closed = false;
   }
 
   connect() {
     if (typeof WebSocket === "undefined") {
-      throw new Error("This Node runtime does not provide WebSocket; CDP download interception is unavailable.");
+      throw new Error("This Node runtime does not provide WebSocket; CDP WebSocket operations are unavailable.");
     }
     this.ws = new WebSocket(this.wsUrl);
     this.ws.addEventListener("message", (event) => this.handleMessage(String(event.data)));
     this.ws.addEventListener("close", () => {
+      this.closed = true;
       const error = new Error("CDP socket closed");
-      for (const { reject } of this.pending.values()) {
+      for (const { reject, timer } of this.pending.values()) {
+        clearTimeout(timer);
         reject(error);
       }
       this.pending.clear();
@@ -4195,6 +4349,7 @@ class CdpClient {
       timeout.unref?.();
       this.ws.addEventListener("open", () => {
         clearTimeout(timeout);
+        this.closed = false;
         resolve();
       }, { once: true });
       this.ws.addEventListener("error", () => {
@@ -4204,13 +4359,36 @@ class CdpClient {
     });
   }
 
-  request(method, params = {}) {
+  request(method, params = {}, options = {}) {
     const id = this.nextId;
     this.nextId += 1;
-    this.ws.send(JSON.stringify({ id, method, params }));
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+    const message = { id, method, params };
+    if (options.sessionId) {
+      message.sessionId = options.sessionId;
+    }
+    const timeoutMs = Number.parseInt(
+      String(options.timeoutMs ?? process.env.REALBROWSER_CDP_REQUEST_TIMEOUT_MS ?? "15000"),
+      10,
+    );
+    let timer = null;
+    const promise = new Promise((resolve, reject) => {
+      timer = Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? setTimeout(() => {
+            this.pending.delete(id);
+            reject(new Error(`CDP ${method} timed out after ${timeoutMs}ms`));
+          }, timeoutMs)
+        : null;
+      timer?.unref?.();
+      this.pending.set(id, { resolve, reject, timer });
     });
+    try {
+      this.ws.send(JSON.stringify(message));
+    } catch (error) {
+      this.pending.delete(id);
+      clearTimeout(timer);
+      return Promise.reject(error);
+    }
+    return promise;
   }
 
   onEvent(listener) {
@@ -4226,6 +4404,7 @@ class CdpClient {
         return;
       }
       this.pending.delete(message.id);
+      clearTimeout(pending.timer);
       if (message.error) {
         pending.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
       } else {
@@ -4240,6 +4419,7 @@ class CdpClient {
 
   close() {
     try {
+      this.closed = true;
       this.ws?.close();
     } catch {
       // Best effort.
@@ -4332,6 +4512,10 @@ function parseListPagesResult(result) {
       }
       pages.push({
         id: parsePageId(entry.id),
+        tabId: entry.tabId === undefined ? undefined : String(entry.tabId),
+        suggestedTargetId: entry.suggestedTargetId === undefined ? undefined : String(entry.suggestedTargetId),
+        targetId: entry.targetId === undefined ? undefined : String(entry.targetId),
+        title: entry.title === undefined ? "" : String(entry.title),
         url: String(entry.url ?? ""),
         selected: entry.selected === true,
       });
@@ -4394,6 +4578,12 @@ class BrowserDaemon {
     this.tools = null;
     this.hiddenConsoleLines = new Set();
     this.hiddenNetworkLines = new Set();
+    this.selectedCdpTargetId = null;
+    this.cdpTargetAliases = new Map();
+    this.cdpTargetHandles = new Map();
+    this.nextCdpTargetHandle = 1;
+    this.cdpBrowserClient = null;
+    this.cdpBrowserClientPromise = null;
   }
 
   async ensureMcp() {
@@ -4428,7 +4618,320 @@ class BrowserDaemon {
     });
   }
 
+  cdpEndpoint() {
+    const rawBrowserUrl = this.browserUrl.trim();
+    const httpUrl = /^https?:\/\//iu.test(rawBrowserUrl)
+      ? normalizeCdpHttpUrl(rawBrowserUrl)
+      : null;
+    const wsEndpoint = normalizeCdpWsEndpoint(rawBrowserUrl);
+    if (!httpUrl && !wsEndpoint) {
+      return null;
+    }
+    return {
+      httpUrl,
+      wsEndpoint,
+      browserUrl: this.browserUrl,
+    };
+  }
+
+  async cdpBrowserWebSocketUrl() {
+    const endpoint = this.cdpEndpoint();
+    if (endpoint?.wsEndpoint) {
+      return endpoint.wsEndpoint;
+    }
+    if (endpoint?.httpUrl) {
+      return await resolveCdpBrowserWebSocketUrl(endpoint.httpUrl);
+    }
+    throw new Error("No CDP browser endpoint configured");
+  }
+
+  async ensureCdpBrowserClient() {
+    if (this.cdpBrowserClient && !this.cdpBrowserClient.closed) {
+      return this.cdpBrowserClient;
+    }
+    if (this.cdpBrowserClientPromise) {
+      return await this.cdpBrowserClientPromise;
+    }
+    this.cdpBrowserClientPromise = (async () => {
+      const client = new CdpClient(await this.cdpBrowserWebSocketUrl());
+      await client.connect();
+      this.cdpBrowserClient = client;
+      return client;
+    })();
+    try {
+      return await this.cdpBrowserClientPromise;
+    } finally {
+      this.cdpBrowserClientPromise = null;
+    }
+  }
+
+  closeCdpBrowserClient() {
+    this.cdpBrowserClient?.close();
+    this.cdpBrowserClient = null;
+    this.cdpBrowserClientPromise = null;
+  }
+
+  async cdpBrowserRequest(method, params = {}, options = {}, retry = true) {
+    const client = await this.ensureCdpBrowserClient();
+    try {
+      return await client.request(method, params, options);
+    } catch (error) {
+      if (retry && client.closed) {
+        this.closeCdpBrowserClient();
+        return await this.cdpBrowserRequest(method, params, options, false);
+      }
+      throw error;
+    }
+  }
+
+  shouldUseFastCdp(flags = {}) {
+    return flags.mcp !== true && flags.fast !== false && Boolean(this.cdpEndpoint());
+  }
+
+  async cdpTargets() {
+    const endpoint = this.cdpEndpoint();
+    if (!endpoint) {
+      return [];
+    }
+    if (endpoint.wsEndpoint && !endpoint.httpUrl) {
+      const result = await this.cdpBrowserRequest("Target.getTargets", {});
+      const targets = Array.isArray(result?.targetInfos) ? result.targetInfos : [];
+      return targets.filter((target) => !target?.type || target.type === "page");
+    }
+    const targets = await fetchCdpTargetList(endpoint);
+    return targets.filter((target) => !target?.type || target.type === "page");
+  }
+
+  async cdpPages() {
+    const targets = await this.cdpTargets();
+    const currentTargetIds = new Set();
+    const pages = targets.map((target, index) => {
+      const targetId = String(target.id ?? target.targetId ?? "");
+      currentTargetIds.add(targetId);
+      let tabId = this.cdpTargetHandles.get(targetId);
+      if (!tabId) {
+        tabId = `t${this.nextCdpTargetHandle}`;
+        this.nextCdpTargetHandle += 1;
+        this.cdpTargetHandles.set(targetId, tabId);
+      }
+      const id = Number.parseInt(tabId.slice(1), 10) || index + 1;
+      return {
+        id,
+        tabId,
+        suggestedTargetId: tabId,
+        targetId,
+        url: String(target.url ?? ""),
+        title: String(target.title ?? ""),
+        webSocketDebuggerUrl: target.webSocketDebuggerUrl ?? null,
+        selected: Boolean(this.selectedCdpTargetId && targetId === this.selectedCdpTargetId),
+      };
+    });
+    for (const targetId of this.cdpTargetHandles.keys()) {
+      if (!currentTargetIds.has(targetId)) {
+        this.cdpTargetHandles.delete(targetId);
+      }
+    }
+    if (this.selectedCdpTargetId && !pages.some((page) => page.targetId === this.selectedCdpTargetId)) {
+      this.selectedCdpTargetId = null;
+    }
+    this.cdpTargetAliases = new Map();
+    for (const page of pages) {
+      for (const alias of [String(page.id), page.tabId, page.suggestedTargetId, page.targetId]) {
+        if (alias) {
+          this.cdpTargetAliases.set(alias, page.targetId);
+        }
+      }
+    }
+    return pages;
+  }
+
+  async handleTabs(flags = {}) {
+    if (this.shouldUseFastCdp(flags)) {
+      try {
+        const pages = await this.cdpPages();
+        return formatCdpPagesResult(pages);
+      } catch {
+        // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+      }
+    }
+    return await this.callTool("list_pages", {});
+  }
+
+  async resolveCdpTargetId(flags = {}) {
+    if (!this.shouldUseFastCdp(flags)) {
+      return null;
+    }
+    const pages = await this.cdpPages();
+    if (pages.length === 0) {
+      throw new Error("No CDP page targets found");
+    }
+    const requested = flags.page !== undefined ? String(flags.page) : "";
+    if (requested) {
+      const targetId = this.cdpTargetAliases.get(requested);
+      if (targetId) {
+        return targetId;
+      }
+      const exactUrl = pages.filter((page) => page.url === requested);
+      if (exactUrl.length === 1) {
+        return exactUrl[0].targetId;
+      }
+      throw new Error(`No CDP page target matched ${requested}`);
+    }
+    if (this.selectedCdpTargetId && pages.some((page) => page.targetId === this.selectedCdpTargetId)) {
+      return this.selectedCdpTargetId;
+    }
+    const selected = pages.find((page) => page.selected) ?? pages[0];
+    this.selectedCdpTargetId = selected.targetId;
+    return selected.targetId;
+  }
+
+  async cdpPageForTargetId(targetId) {
+    const pages = await this.cdpPages();
+    return pages.find((page) => page.targetId === targetId) ?? null;
+  }
+
+  async cdpPageRequest(targetId, method, params = {}) {
+    const client = await this.ensureCdpBrowserClient();
+    let sessionId = null;
+    try {
+      const attached = await client.request("Target.attachToTarget", {
+        targetId,
+        flatten: true,
+      });
+      sessionId = String(attached?.sessionId ?? "");
+      if (!sessionId) {
+        throw new Error(`CDP attach did not return a session id for target ${targetId}`);
+      }
+      return await client.request(method, params, { sessionId });
+    } finally {
+      if (sessionId) {
+        await safeCdpRequest(client, "Target.detachFromTarget", { sessionId });
+      }
+    }
+  }
+
+  async cdpActivateTarget(targetId) {
+    const endpoint = this.cdpEndpoint();
+    if (endpoint?.httpUrl) {
+      const activated = await cdpHttpJson(endpoint.httpUrl, `/json/activate/${encodeURIComponent(targetId)}`, {
+        timeoutMs: 3000,
+      }).then(() => true).catch(() => false);
+      if (activated) {
+        return;
+      }
+    }
+    try {
+      await this.cdpBrowserRequest("Target.activateTarget", { targetId }, { timeoutMs: 3000 });
+    } catch {
+      // Best effort.
+    }
+  }
+
+  async cdpCreateTarget(url, flags = {}) {
+    const endpoint = this.cdpEndpoint();
+    if (!endpoint) {
+      throw new Error("No CDP endpoint configured");
+    }
+    let targetId = "";
+    if (endpoint.httpUrl) {
+      const created = await cdpCreateTargetViaHttp(endpoint.httpUrl, url).catch(() => null);
+      targetId = String(created?.id ?? created?.targetId ?? "");
+    }
+    if (!targetId) {
+      const result = await this.cdpBrowserRequest("Target.createTarget", {
+        url,
+        background: !flags.front,
+      });
+      targetId = String(result?.targetId ?? "");
+    }
+    if (!targetId) {
+      throw new Error("CDP target creation did not return a target id");
+    }
+    this.selectedCdpTargetId = targetId;
+    if (flags.front) {
+      await this.cdpActivateTarget(targetId);
+    }
+    const timeoutMs = parsePositiveInteger(flags.timeout ?? "10000", "timeout");
+    const page = await this.waitForCdpPage(targetId, url, timeoutMs);
+    return page ?? { id: null, tabId: null, targetId, url, title: "" };
+  }
+
+  async waitForCdpPage(targetId, url, timeoutMs) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt <= timeoutMs) {
+      const pages = await this.cdpPages();
+      const page =
+        pages.find((entry) => entry.targetId === targetId) ??
+        pages.find((entry) => pageUrlMatchesRequest(entry.url, url));
+      if (page) {
+        return page;
+      }
+      await sleep(100);
+    }
+    return null;
+  }
+
+  async openCdpPage(url, flags = {}, command = "open") {
+    const page = await this.cdpCreateTarget(url, flags);
+    return {
+      text: [
+        `${command === "newtab" ? "Opened new tab" : "Opened"} ${url}`,
+        page.id ? `Page: ${page.tabId ?? `t${page.id}`} ${page.url || url}` : `Target: ${page.targetId}`,
+        flags.front ? "Focused browser tab: yes" : "Focused browser tab: no",
+        "Fast path: CDP",
+      ].join("\n"),
+      quiet: page.tabId ?? String(page.id ?? page.targetId),
+      page,
+      cdp: true,
+    };
+  }
+
+  async navigateCdpPage(type, url, flags = {}) {
+    const targetId = await this.resolveCdpTargetId(flags);
+    if (type === "url") {
+      await this.cdpPageRequest(targetId, "Page.navigate", { url });
+      this.selectedCdpTargetId = targetId;
+      return {
+        text: `navigated ${targetId} to ${url}`,
+        targetId,
+        cdp: true,
+      };
+    }
+    if (type === "reload") {
+      await this.cdpPageRequest(targetId, "Page.reload", { ignoreCache: Boolean(flags.ignoreCache) });
+      return { text: `reloaded ${targetId}`, targetId, cdp: true };
+    }
+    const history = await this.cdpPageRequest(targetId, "Page.getNavigationHistory", {});
+    const offset = type === "back" ? -1 : 1;
+    const entry = history.entries?.[history.currentIndex + offset];
+    if (!entry) {
+      throw new Error(`No ${type} history entry for ${targetId}`);
+    }
+    await this.cdpPageRequest(targetId, "Page.navigateToHistoryEntry", { entryId: entry.id });
+    return { text: `${type}: ${entry.url}`, targetId, cdp: true };
+  }
+
+  async evaluateCdpFunction(fnString, flags = {}) {
+    const targetId = await this.resolveCdpTargetId(flags);
+    const expression = `(${fnString})()`;
+    const result = await this.cdpPageRequest(targetId, "Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    if (result?.exceptionDetails) {
+      throw new Error(formatCdpException(result.exceptionDetails));
+    }
+    const value = cdpRemoteObjectValue(result?.result);
+    return {
+      text: formatCdpValue(value),
+      structuredContent: { result: value, targetId },
+      cdp: true,
+    };
+  }
+
   async restartDedicated() {
+    this.closeCdpBrowserClient();
     if (this.mcp) {
       await this.mcp.close().catch(() => {});
     }
@@ -4479,7 +4982,30 @@ class BrowserDaemon {
     }
   }
 
-  async selectPage(pageId, bringToFront = false) {
+  async selectPage(pageId, bringToFront = false, flags = {}) {
+    if (this.shouldUseFastCdp(flags)) {
+      try {
+        const targetId = await this.resolveCdpTargetId({ ...flags, page: pageId });
+        this.selectedCdpTargetId = targetId;
+        if (bringToFront) {
+          await this.cdpActivateTarget(targetId);
+        }
+        const page = await this.cdpPageForTargetId(targetId);
+        return {
+          text: [
+            `Selected ${page?.tabId ?? pageId} for automation.`,
+            page?.url ?? targetId,
+            bringToFront ? "Focused browser tab: yes" : "Focused browser tab: no",
+            "Fast path: CDP",
+          ].join("\n"),
+          quiet: page?.tabId ?? String(pageId),
+          page,
+          cdp: true,
+        };
+      } catch {
+        // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+      }
+    }
     return await this.callTool("select_page", {
       pageId: parsePageId(pageId),
       ...(bringToFront ? { bringToFront: true } : {}),
@@ -4505,7 +5031,7 @@ class BrowserDaemon {
       case "chain":
         return await this.handleChain(args, flags);
       case "tabs":
-        return await this.callTool("list_pages", {});
+        return await this.handleTabs(flags);
       case "open":
       case "newtab":
         requireArgs(command, args, 1);
@@ -4513,6 +5039,13 @@ class BrowserDaemon {
       case "navigate":
       case "goto":
         requireArgs(command, args, 1);
+        if (this.shouldUseFastCdp(flags)) {
+          try {
+            return await this.navigateCdpPage("url", args[0], flags);
+          } catch {
+            // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+          }
+        }
         return await this.callTool("navigate_page", {
           ...this.pageArgs(flags),
           type: "url",
@@ -4521,25 +5054,54 @@ class BrowserDaemon {
       case "back":
       case "forward":
       case "reload":
+        if (this.shouldUseFastCdp(flags)) {
+          try {
+            return await this.navigateCdpPage(command, undefined, flags);
+          } catch {
+            // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+          }
+        }
         return await this.callTool("navigate_page", {
           ...this.pageArgs(flags),
           type: command,
         });
       case "select":
         requireArgs(command, args, 1);
-        if (args.length >= 2 || !isIntegerText(args[0])) {
+        if (args.length >= 2) {
           return await this.handleSelectOption(args, flags);
         }
-        return await this.selectPage(args[0], Boolean(flags.front));
+        return await this.selectPage(args[0], Boolean(flags.front), flags);
       case "tab":
         requireArgs(command, args, 1);
-        return await this.selectPage(args[0], Boolean(flags.front));
+        return await this.selectPage(args[0], Boolean(flags.front), flags);
       case "focus":
         requireArgs(command, args, 1);
-        return await this.selectPage(args[0], true);
+        return await this.selectPage(args[0], true, flags);
       case "close":
       case "closetab":
         requireArgs(command, args, 1);
+        if (this.shouldUseFastCdp(flags)) {
+          try {
+            const targetId = await this.resolveCdpTargetId({ ...flags, page: args[0] });
+            const endpoint = this.cdpEndpoint();
+            if (endpoint?.httpUrl) {
+              const closed = await cdpHttpJson(endpoint.httpUrl, `/json/close/${encodeURIComponent(targetId)}`, {
+                timeoutMs: 3000,
+              }).then(() => true).catch(() => false);
+              if (!closed) {
+                await this.cdpBrowserRequest("Target.closeTarget", { targetId }, { timeoutMs: 3000 });
+              }
+            } else {
+              await this.cdpBrowserRequest("Target.closeTarget", { targetId }, { timeoutMs: 3000 });
+            }
+            if (this.selectedCdpTargetId === targetId) {
+              this.selectedCdpTargetId = null;
+            }
+            return { text: `closed ${args[0]}`, targetId, cdp: true };
+          } catch {
+            // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+          }
+        }
         return await this.callTool("close_page", { pageId: parsePageId(args[0]) });
       case "snapshot":
       case "accessibility":
@@ -4674,6 +5236,7 @@ class BrowserDaemon {
       case "cleanup-remote-debugging":
         return await this.handleCleanupRemoteDebugging(flags);
       case "stop":
+        this.closeCdpBrowserClient();
         await this.mcp?.close().catch(() => {});
         if (this.mode === ANONYMOUS_MODE && !this.keepAnonymous && this.profileDir) {
           await fsp.rm(this.profileDir, { recursive: true, force: true }).catch(() => {});
@@ -4823,6 +5386,21 @@ class BrowserDaemon {
   }
 
   async status() {
+    if (this.shouldUseFastCdp({})) {
+      const pages = await this.cdpPages().catch(() => []);
+      const selected = pages.find((page) => page.selected) ?? null;
+      return {
+        daemon: {
+          pid: process.pid,
+          stateFile: this.stateFile,
+          mode: this.currentMode(),
+        },
+        browserControl: this.browserControlStatus(),
+        tabs: pages.length,
+        selected,
+        fastPath: "cdp",
+      };
+    }
     const tabs = await this.callTool("list_pages", {});
     const pages = parseListPagesResult(tabs);
     const selected = pages.find((page) => page.selected) ?? null;
@@ -4839,6 +5417,7 @@ class BrowserDaemon {
   }
 
   async restart() {
+    this.closeCdpBrowserClient();
     if (this.mcp) {
       await this.mcp.close().catch(() => {});
     }
@@ -5214,6 +5793,13 @@ class BrowserDaemon {
         return await this.selectPage(pageId, Boolean(flags.front));
       }
     }
+    if (this.shouldUseFastCdp(flags)) {
+      try {
+        return await this.openCdpPage(url, flags, command);
+      } catch {
+        // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+      }
+    }
     return await this.callTool("new_page", {
       url,
       background: !flags.front,
@@ -5402,6 +5988,14 @@ class BrowserDaemon {
   }
 
   async handleEval(args, flags = {}) {
+    if (this.shouldUseFastCdp(flags) && !flags.uid) {
+      try {
+        const result = await this.evaluateCdpFunction(buildEvalFunction(args.join(" ")), flags);
+        return flags.raw ? result : compactTextResult(result, flags, DEFAULT_READ_MAX_CHARS);
+      } catch {
+        // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+      }
+    }
     const pageId = await this.resolvePageId(flags);
     const result = await this.callTool("evaluate_script", {
       function: buildEvalFunction(args.join(" ")),
@@ -5644,6 +6238,13 @@ class BrowserDaemon {
   }
 
   async evaluateFunction(fnString, flags = {}, selectorOrUid = undefined) {
+    if (this.shouldUseFastCdp(flags) && !flags.uid && !(selectorOrUid && isUidRef(selectorOrUid))) {
+      try {
+        return await this.evaluateCdpFunction(fnString, flags);
+      } catch {
+        // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
+      }
+    }
     const pageId = await this.resolvePageId(flags);
     return await this.callTool("evaluate_script", {
       function: fnString,
@@ -8049,6 +8650,10 @@ async function runSelfTest() {
   assertSelfTest(parsedSelectOpen.flags.select === true, "open --select selects for automation");
   const parsedCleanupDetach = parseArgv(["detach", "--cleanup-remote-debugging"]);
   assertSelfTest(parsedCleanupDetach.flags.cleanupRemoteDebugging === true, "parser handles cleanup remote debugging flag");
+  const parsedMcpBypass = parseArgv(["tabs", "--mcp"]);
+  assertSelfTest(parsedMcpBypass.flags.mcp === true && parsedMcpBypass.flags.fast === false, "parser handles MCP fast-path bypass");
+  const parsedNoFast = parseArgv(["tabs", "--no-fast"]);
+  assertSelfTest(parsedNoFast.flags.mcp === true && parsedNoFast.flags.fast === false, "parser handles no-fast alias");
   const parsedNoFallbackOpen = parseArgv(["open", "https://example.com", "--no-fallback"]);
   assertSelfTest(parsedNoFallbackOpen.flags.noFallback === true, "parser handles no-fallback flag");
   const parsedProfileOpen = parseArgv(["open", "https://example.com", "--profile", "chrome:Profile 4", "--browser=chrome"]);
@@ -8255,6 +8860,21 @@ async function runSelfTest() {
       mockProfileEndpoint.wsEndpoint === "ws://127.0.0.1:9222/devtools/browser/mock",
     "profile endpoint is normalized for running-session reuse",
   );
+  const wsOnlyDaemon = new BrowserDaemon(path.join(os.tmpdir(), "realbrowser-ws-only-self-test.json"));
+  wsOnlyDaemon.browserUrl = "ws://127.0.0.1:9222/devtools/browser/mock";
+  const wsOnlyEndpoint = wsOnlyDaemon.cdpEndpoint();
+  assertSelfTest(
+    wsOnlyEndpoint?.httpUrl === null &&
+      wsOnlyEndpoint.wsEndpoint === "ws://127.0.0.1:9222/devtools/browser/mock",
+    "daemon CDP endpoint does not invent HTTP for a WS-only backend",
+  );
+  assertSelfTest(
+    browserEndpointEquivalent(
+      "ws://127.0.0.1:9222/devtools/browser/mock",
+      "http://127.0.0.1:9222",
+    ),
+    "endpoint session reuse treats matching CDP HTTP and WS endpoints as equivalent",
+  );
   const openedCandidate = openedPageCandidate(
     [{ id: 1, url: "https://example.com/old" }],
     [
@@ -8274,13 +8894,12 @@ async function runSelfTest() {
   const parsedAllowAttach = parseArgv(["cleanup-remote-debugging", "--allow-attach"]);
   assertSelfTest(parsedAllowAttach.flags.allowAttach === true, "parser handles cleanup allow attach flag");
   const backgroundPayload = daemonPayloadForCommand(parsedBackgroundOpen.command, parsedBackgroundOpen.args, parsedBackgroundOpen.flags);
-  assertSelfTest(backgroundPayload.command === "tool", "open is client-translated for old daemons");
-  assertSelfTest(backgroundPayload.args[0] === "new_page", "open translation calls new_page");
-  assertSelfTest(JSON.parse(backgroundPayload.args[1]).background === true, "open translation uses background by default");
+  assertSelfTest(backgroundPayload.command === "open", "open is handled by the daemon hot path");
+  assertSelfTest(backgroundPayload.args[0] === "https://example.com", "open payload preserves URL");
   const selectPayload = daemonPayloadForCommand(parsedSelectOpen.command, parsedSelectOpen.args, parsedSelectOpen.flags);
-  assertSelfTest(JSON.parse(selectPayload.args[1]).background === true, "open --select still opens in background");
+  assertSelfTest(selectPayload.command === "open" && selectPayload.flags.select === true, "open --select stays daemon-owned");
   const foregroundPayload = daemonPayloadForCommand(parsedForegroundOpen.command, parsedForegroundOpen.args, parsedForegroundOpen.flags);
-  assertSelfTest(JSON.parse(foregroundPayload.args[1]).background === false, "open --front uses foreground");
+  assertSelfTest(foregroundPayload.command === "open" && foregroundPayload.flags.front === true, "open --front stays daemon-owned");
   const anonymousPayload = daemonPayloadForCommand(parsedAnonymousOpen.command, parsedAnonymousOpen.args, parsedAnonymousOpen.flags);
   assertSelfTest(anonymousPayload.command === "open", "anonymous open is handled by daemon to preserve incognito context");
   const anonymousFollowupPayload = daemonPayloadForCommand(
@@ -8292,8 +8911,7 @@ async function runSelfTest() {
   assertSelfTest(anonymousFollowupPayload.command === "open", "open reuses daemon handling when state is anonymous");
   const chainPayload = daemonPayloadForCommand("chain", ['[["open","https://example.com"],["snapshot","--efficient"]]'], {});
   const translatedChain = JSON.parse(chainPayload.args[0]);
-  assertSelfTest(translatedChain[0][0] === "tool" && translatedChain[0][1] === "new_page", "chain open is translated to new_page");
-  assertSelfTest(JSON.parse(translatedChain[0][2]).background === true, "chain open defaults to background");
+  assertSelfTest(translatedChain[0][0] === "open", "chain open stays daemon-owned");
   assertSelfTest(translatedChain[1][0] === "snapshot", "chain translation preserves other commands");
   assertSelfTest(buildEvalFunction("() => 1") === "() => 1", "buildEvalFunction preserves direct arrow functions");
   assertSelfTest(
@@ -8412,6 +9030,30 @@ async function runSelfTest() {
     text: "## Pages\n1: about:blank\n2: chrome://inspect/#remote-debugging [selected]",
   });
   assertSelfTest(parsedPages[1]?.url.startsWith("chrome://inspect/"), "list_pages text parser keeps inspect urls");
+  const cdpPagesResult = formatCdpPagesResult([
+    {
+      id: 1,
+      tabId: "t1",
+      suggestedTargetId: "t1",
+      targetId: "ABC",
+      title: "Example",
+      url: "https://example.com/",
+      selected: true,
+    },
+  ]);
+  const parsedCdpPages = parseListPagesResult(cdpPagesResult);
+  assertSelfTest(
+    parsedCdpPages[0]?.targetId === "ABC" && parsedCdpPages[0]?.tabId === "t1",
+    "CDP tab structured output preserves short handles and raw target id",
+  );
+  const handledTabs = withBrowserTabHandles([
+    { id: "raw-a", url: "https://a.example/" },
+    { id: "raw-b", tabId: "local", url: "https://b.example/" },
+  ]);
+  assertSelfTest(
+    handledTabs[0].suggestedTargetId === "t1" && handledTabs[1].suggestedTargetId === "t2",
+    "browser tab lists get compact suggested targets",
+  );
   console.log("self-test ok");
 }
 
