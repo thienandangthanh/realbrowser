@@ -24,6 +24,7 @@ const DEFAULT_SCREENSHOT_MAX_BYTES = parseOptionalBytesEnv("REALBROWSER_SCREENSH
 const START_TIMEOUT_MS = Number.parseInt(process.env.REALBROWSER_START_TIMEOUT_MS ?? "20000", 10);
 const MCP_START_TIMEOUT_MS = Number.parseInt(process.env.REALBROWSER_MCP_TIMEOUT_MS ?? "30000", 10);
 const PACKAGE_SPEC = process.env.REALBROWSER_MCP_PACKAGE ?? "chrome-devtools-mcp@latest";
+const CLI_VERSION = "0.1.0";
 const AUTO_MODE = "auto";
 const DEDICATED_MODE = "dedicated";
 const ANONYMOUS_MODE = "anonymous";
@@ -251,119 +252,467 @@ const STRUCTURAL_ROLES = new Set([
   "row",
 ]);
 
-function usage() {
-  return `realbrowser
+const CLI_COMMAND_GROUPS = [
+  {
+    title: "Daily workflow",
+    commands: [
+      { name: "status", usage: "realbrowser status [--deep] [--json]", summary: "Show current daemon and Chrome control state." },
+      { name: "claim", aliases: ["claim-tab", "handle-claim"], usage: "realbrowser claim [url] [--handle-out <path>|--handle-name <name>] [--session <name>] [--json]", summary: "Claim a tab and write a reusable handle." },
+      { name: "handles", aliases: ["list-handles", "handle-list"], usage: "realbrowser handles [--json]", summary: "List saved tab handles." },
+      { name: "release-handle", aliases: ["handle-release", "delete-handle"], usage: "realbrowser release-handle <path-or-name> [--json]", summary: "Delete a saved tab handle.", minArgs: 1 },
+      { name: "mobile-screenshot", usage: "realbrowser mobile-screenshot [url] [path] [--viewport <WxH>] [--handle <path-or-name>] [--handle-out <path>] [--session <name>]", summary: "Capture a page-scoped mobile screenshot with dimension checks.", handle: true },
+      { name: "screenshot", usage: "realbrowser screenshot [path] [--full|--full-page] [--uid <uid>] [--labels|--annotate] [--format png|jpeg|webp] [--quality <0-100>] [--max-side <px>] [--max-bytes <bytes|5mb>] [--raw-size|--no-normalize] [--page <id>]", summary: "Capture a screenshot.", handle: true },
+      { name: "observe", usage: "realbrowser observe [--screenshot] [--limit <n>] [--max-chars <n>] [--page <id>] [--json]", summary: "Read a compact page observation.", handle: true },
+      { name: "snapshot", aliases: ["accessibility"], usage: "realbrowser snapshot [--page <id>] [--efficient] [--interactive] [--compact] [--depth <n>] [--max-chars <n>] [--max-nodes <n>] [--labels|--annotate] [--out <path>] [--raw|--verbose] [--json]", summary: "Read the accessibility tree.", handle: true },
+    ],
+  },
+  {
+    title: "Sessions and profiles",
+    commands: [
+      { name: "doctor", usage: "realbrowser doctor [--deep] [--json]", summary: "Check runtime dependencies and browser attach readiness." },
+      { name: "profiles", aliases: ["profile-list", "list-profiles"], usage: "realbrowser profiles [query] [--browser <key>] [--json]", summary: "List local Chromium-family profiles." },
+      { name: "sessions", aliases: ["session-list", "list-sessions"], usage: "realbrowser sessions [--json]", summary: "List running realbrowser sessions." },
+      { name: "active-session", aliases: ["current-session", "session-current"], usage: "realbrowser active-session [--json]", summary: "Show the active session pointer." },
+      { name: "use-session", aliases: ["session-use"], usage: "realbrowser use-session <name> [--force] [--json]", summary: "Set the active session pointer.", minArgs: 1 },
+      { name: "clear-session", aliases: ["session-clear", "clear-active-session"], usage: "realbrowser clear-session [--json]", summary: "Clear the active session pointer." },
+      { name: "find-tab", aliases: ["tabs-all", "search-tabs"], usage: "realbrowser find-tab [query] [--browser <key>] [--all-sessions] [--json]", summary: "Search tabs across browser/session inventory." },
+      { name: "select-tab", aliases: ["attach-tab"], usage: "realbrowser select-tab <query> [--browser <key>] [--all-sessions] [--front] [--no-activate-session] [--json]", summary: "Select a matching tab for automation.", minArgs: 1 },
+      { name: "open-profile", aliases: ["profile-open"], usage: "realbrowser open-profile <profile-query> <url> [--browser <key>] [--select] [--front] [--json]", summary: "Open a URL in a specific browser UI profile.", minArgs: 2 },
+      { name: "cleanup-remote-debugging", aliases: ["cleanup"], usage: "realbrowser cleanup-remote-debugging [--allow-attach] [--json]", summary: "Turn off Chrome remote-debugging when possible." },
+      { name: "stop", aliases: ["detach"], usage: "realbrowser stop|detach [--all-sessions] [--dismiss-banner] [--cleanup-remote-debugging] [--json]", summary: "Stop realbrowser session state." },
+    ],
+  },
+  {
+    title: "Navigation and page actions",
+    commands: [
+      { name: "tabs", usage: "realbrowser tabs [--json]", summary: "List pages in the current session." },
+      { name: "open", aliases: ["newtab"], usage: "realbrowser open <url> [--front] [--anonymous|--profile <profile-query>] [--browser <key>] [--select] [--json]", summary: "Open a URL.", handle: false, minArgs: 1 },
+      { name: "navigate", aliases: ["goto"], usage: "realbrowser navigate <url> [--page <id>]", summary: "Navigate the selected page.", handle: true, minArgs: 1 },
+      { name: "back", usage: "realbrowser back [--page <id>]", summary: "Navigate back.", handle: true },
+      { name: "forward", usage: "realbrowser forward [--page <id>]", summary: "Navigate forward.", handle: true },
+      { name: "reload", usage: "realbrowser reload [--page <id>]", summary: "Reload the page.", handle: true },
+      { name: "select", usage: "realbrowser select <pageId>|<uid|selector> [value] [--page <id>] [--front]", summary: "Select a page or option.", minArgs: 1 },
+      { name: "tab", usage: "realbrowser tab <pageId> [--front]", summary: "Select a page by id.", minArgs: 1 },
+      { name: "focus", usage: "realbrowser focus <pageId>", summary: "Bring a page to front.", minArgs: 1 },
+      { name: "close", aliases: ["closetab"], usage: "realbrowser close <pageId>", summary: "Close a page.", handle: false, minArgs: 1 },
+      { name: "click", usage: "realbrowser click <uid> [--page <id>]", summary: "Click an accessibility uid.", handle: true, minArgs: 1 },
+      { name: "hover", usage: "realbrowser hover <uid> [--page <id>]", summary: "Hover an accessibility uid.", handle: true, minArgs: 1 },
+      { name: "drag", usage: "realbrowser drag <fromUid> <toUid> [--page <id>]", summary: "Drag between accessibility uids.", handle: true, minArgs: 2 },
+      { name: "type", usage: "realbrowser type <text> [--page <id>]", summary: "Type text.", handle: true, minArgs: 1 },
+      { name: "fill", usage: "realbrowser fill <uid> <value> [--page <id>]", summary: "Fill one field.", handle: true, minArgs: 2 },
+      { name: "fill-form", usage: "realbrowser fill-form '[{\"uid\":\"...\",\"value\":\"...\"}]' [--page <id>]", summary: "Fill several fields.", handle: true, minArgs: 1 },
+      { name: "press", usage: "realbrowser press <key> [--page <id>]", summary: "Press a key.", handle: true, minArgs: 1 },
+      { name: "click-coords", usage: "realbrowser click-coords <x> <y> [--page <id>]", summary: "Click screen coordinates.", handle: true, minArgs: 2 },
+      { name: "highlight", usage: "realbrowser highlight <uid|selector> [--page <id>]", summary: "Highlight a target.", handle: true, minArgs: 1 },
+      { name: "upload", usage: "realbrowser upload <uid> <file> [--page <id>]", summary: "Upload a file.", handle: true, minArgs: 2 },
+      { name: "wait", usage: "realbrowser wait <text>|--load|--domcontentloaded|--networkidle [--timeout <ms>] [--page <id>]", summary: "Wait for text or page readiness.", handle: true, minArgs: 1 },
+      { name: "scroll", usage: "realbrowser scroll [selector|uid] [--page <id>]", summary: "Scroll the page or target.", handle: true },
+      { name: "viewport", aliases: ["resize"], usage: "realbrowser viewport <WxH|reset> [--page <id>]", summary: "Set or reset viewport size.", handle: true, minArgs: 1 },
+    ],
+  },
+  {
+    title: "Inspection and diagnostics",
+    commands: [
+      { name: "eval", aliases: ["js"], usage: "realbrowser eval <js> [--page <id>] [--json]", summary: "Run JavaScript in the page.", handle: true, minArgs: 1 },
+      { name: "text", usage: "realbrowser text [selector|uid] [--page <id>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read text.", handle: true },
+      { name: "html", usage: "realbrowser html [selector|uid] [--page <id>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read HTML.", handle: true },
+      { name: "links", usage: "realbrowser links [selector|uid] [--page <id>] [--limit <n>] [--json]", summary: "Read links.", handle: true },
+      { name: "forms", usage: "realbrowser forms [selector|uid] [--page <id>] [--json]", summary: "Read forms.", handle: true },
+      { name: "cookies", usage: "realbrowser cookies [--page <id>] [--json]", summary: "Read cookies.", handle: true },
+      { name: "storage", usage: "realbrowser storage [--page <id>] [--json]", summary: "Read storage.", handle: true },
+      { name: "perf", usage: "realbrowser perf [--page <id>] [--json]", summary: "Read performance timings.", handle: true },
+      { name: "url", usage: "realbrowser url [--page <id>]", summary: "Read current URL.", handle: true },
+      { name: "css", usage: "realbrowser css <selector|uid> <property> [--page <id>]", summary: "Read CSS property.", handle: true, minArgs: 2 },
+      { name: "attrs", usage: "realbrowser attrs <selector|uid> [--page <id>]", summary: "Read element attributes.", handle: true, minArgs: 1 },
+      { name: "is", usage: "realbrowser is <visible|hidden|enabled|disabled|checked|editable|focused> <selector|uid> [--page <id>]", summary: "Check element state.", handle: true, minArgs: 2 },
+      { name: "console", usage: "realbrowser console [get <msgid>] [--errors] [--filter <text>] [--limit <n>] [--clear] [--preserve] [--json]", summary: "Read captured console messages.", handle: true },
+      { name: "network", usage: "realbrowser network [get <reqid>] [--failed] [--filter <text>] [--limit <n>] [--clear] [--preserve] [--request-file <path>] [--response-file <path>] [--json]", summary: "Read captured network requests.", handle: true },
+      { name: "errors", usage: "realbrowser errors [--clear] [--limit <n>] [--page <id>]", summary: "Read console errors.", handle: true },
+      { name: "requests", usage: "realbrowser requests [--failed] [--filter <text>] [--clear] [--limit <n>] [--page <id>]", summary: "Read network requests.", handle: true },
+      { name: "capture-network", aliases: ["network-capture", "capture-requests"], usage: "realbrowser capture-network [url] [--anonymous|--profile <profile-query>|--browser-url <url>] [--reload] [--duration <ms>] [--har <path>] [--json]", summary: "Capture network traffic.", handle: true },
+      { name: "capture-console", aliases: ["console-capture", "capture-logs", "logs-capture"], usage: "realbrowser capture-console [url] [--anonymous|--profile <profile-query>|--reload] [--duration <ms>] [--out <path>] [--errors] [--no-network] [--json]", summary: "Capture console messages.", handle: true },
+    ],
+  },
+  {
+    title: "Advanced",
+    commands: [
+      { name: "emulate", usage: "realbrowser emulate [--network <name|Offline|reset>] [--cpu <rate>] [--user-agent <ua|reset>] [--color-scheme dark|light|auto] [--geolocation <lat>x<long>] [--page <id>]", summary: "Set emulation options.", handle: true },
+      { name: "useragent", usage: "realbrowser useragent <ua|reset> [--page <id>]", summary: "Set user agent.", handle: true, minArgs: 1 },
+      { name: "cookie", usage: "realbrowser cookie <name=value> [--page <id>]", summary: "Set a cookie.", handle: true, minArgs: 1 },
+      { name: "dialog", usage: "realbrowser dialog [list|arm accept|arm dismiss|--accept|--dismiss|current accept|current dismiss] [text] [--page <id>]", summary: "Handle browser dialogs.", handle: true },
+      { name: "dialog-accept", usage: "realbrowser dialog-accept [text] [--page <id>]", summary: "Arm dialog acceptance.", handle: true },
+      { name: "dialog-dismiss", usage: "realbrowser dialog-dismiss [--page <id>]", summary: "Arm dialog dismissal.", handle: true },
+      { name: "responsive", usage: "realbrowser responsive <path-prefix> [--page <id>]", summary: "Capture common responsive screenshots.", minArgs: 1 },
+      { name: "diff", usage: "realbrowser diff <url1> <url2> [--page <id>]", summary: "Compare two URLs visually.", minArgs: 2 },
+      { name: "download", usage: "realbrowser download <uid> [path] [--cdp-url <url>] [--download-dir <dir>] [--timeout <ms>] [--page <id>]", summary: "Trigger and wait for a download.", handle: true, minArgs: 1 },
+      { name: "wait-download", aliases: ["waitfordownload"], usage: "realbrowser wait-download [path] [--cdp-url <url>] [--download-dir <dir>] [--timeout <ms>]", summary: "Wait for an external download." },
+      { name: "handoff", usage: "realbrowser handoff [pageId]", summary: "Print handoff context.", handle: true },
+      { name: "resume", usage: "realbrowser resume [pageId] [--page <id>]", summary: "Resume from handoff context.", handle: true },
+      { name: "trace", usage: "realbrowser trace start|stop|analyze <insightSetId> <insightName> [--page <id>]", summary: "Use DevTools trace tools.", handle: true, minArgs: 1 },
+      { name: "tool", usage: "realbrowser tool <mcpToolName> [jsonArgs]", summary: "Call a raw MCP tool.", minArgs: 1 },
+      { name: "tools", usage: "realbrowser tools [--json]", summary: "List MCP tools." },
+      { name: "chain", usage: "realbrowser chain '[[\"snapshot\",\"--page\",\"1\"],[\"console\",\"--errors\",\"--page\",\"1\"]]' [--return summary|final|all] [--trace <path>] [--json]", summary: "Run several realbrowser commands in one daemon RPC.", minArgs: 1 },
+      { name: "restart", usage: "realbrowser restart [--json]", summary: "Restart the MCP backend." },
+    ],
+  },
+];
 
-Usage:
-  realbrowser doctor [--deep] [--json]
-  realbrowser status [--deep] [--json]
-  realbrowser profiles [query] [--browser <key>] [--json]
-  realbrowser sessions [--json]
-  realbrowser active-session|current-session [--json]
-  realbrowser use-session <name> [--force] [--json]
-  realbrowser clear-session [--json]
-  realbrowser claim [url] [--handle-out <path>|--handle-name <name>] [--session <name>] [--json]
-  realbrowser handles|list-handles [--json]
-  realbrowser release-handle <path-or-name> [--json]
-  realbrowser find-tab|tabs-all [query] [--browser <key>] [--all-sessions] [--json]
-  realbrowser select-tab <query> [--browser <key>] [--all-sessions] [--front] [--no-activate-session] [--json]
-  realbrowser open-profile <profile-query> <url> [--browser <key>] [--select] [--front] [--json]
-  realbrowser capture-network [url] [--anonymous|--profile <profile-query>|--browser-url <url>] [--reload] [--duration <ms>] [--har <path>] [--json]
-  realbrowser capture-console [url] [--anonymous|--profile <profile-query>|--reload] [--duration <ms>] [--out <path>] [--errors] [--no-network] [--json]
-  realbrowser restart [--json]
-  realbrowser cleanup-remote-debugging [--allow-attach] [--json]
-  realbrowser tabs [--json]
-  realbrowser open|newtab <url> [--front] [--anonymous|--profile <profile-query>] [--browser <key>] [--select] [--json]
-  realbrowser navigate|goto <url>
-  realbrowser back|forward|reload [--page <id>]
-  realbrowser select <pageId> [--front]
-  realbrowser select <uid|selector> <value> [--page <id>]
-  realbrowser tab <pageId> [--front]
-  realbrowser focus <pageId>
-  realbrowser close|closetab <pageId>
-  realbrowser observe [--screenshot] [--limit <n>] [--max-chars <n>] [--page <id>] [--json]
-  realbrowser snapshot|accessibility [--page <id>] [--efficient] [--interactive] [--compact] [--depth <n>] [--max-chars <n>] [--max-nodes <n>] [--labels|--annotate] [--out <path>] [--raw|--verbose] [--json]
-  realbrowser click <uid> [--page <id>]
-  realbrowser hover <uid> [--page <id>]
-  realbrowser drag <fromUid> <toUid> [--page <id>]
-  realbrowser type <text> [--page <id>]
-  realbrowser fill <uid> <value> [--page <id>]
-  realbrowser fill-form '[{"uid":"...","value":"..."}]' [--page <id>]
-  realbrowser press <key> [--page <id>]
-  realbrowser click-coords <x> <y> [--page <id>]
-  realbrowser highlight <uid|selector> [--page <id>]
-  realbrowser upload <uid> <file> [--page <id>]
-  realbrowser wait <text> [more text...] [--timeout <ms>] [--page <id>]
-  realbrowser wait --load|--domcontentloaded|--networkidle [--timeout <ms>] [--page <id>]
-  realbrowser scroll [selector|uid] [--page <id>]
-  realbrowser viewport <WxH|reset> [--page <id>]
-  realbrowser mobile-screenshot [url] [path] [--viewport <WxH>] [--handle <path-or-name>] [--handle-out <path>] [--session <name>]
-  realbrowser emulate [--network <name|Offline|reset>] [--cpu <rate>] [--user-agent <ua|reset>] [--color-scheme dark|light|auto] [--geolocation <lat>x<long>] [--page <id>]
-  realbrowser useragent <ua|reset> [--page <id>]
-  realbrowser cookie <name=value> [--page <id>]
-  realbrowser dialog [list|arm accept|arm dismiss|--accept|--dismiss|current accept|current dismiss] [text] [--page <id>]
-  realbrowser dialog-accept [text] [--page <id>]
-  realbrowser dialog-dismiss [--page <id>]
-  realbrowser eval|js <js> [--page <id>] [--json]
-  realbrowser text|html|links|forms|cookies|storage|perf|url [selector|uid] [--page <id>] [--max-chars <n>] [--limit <n>] [--out <path>] [--raw]
-  realbrowser css <selector|uid> <property> [--page <id>]
-  realbrowser attrs <selector|uid> [--page <id>]
-  realbrowser is <visible|hidden|enabled|disabled|checked|editable|focused> <selector|uid> [--page <id>]
-  realbrowser console [get <msgid>] [--errors] [--filter <text>] [--limit <n>] [--clear] [--preserve] [--json]
-  realbrowser network [get <reqid>] [--failed] [--filter <text>] [--limit <n>] [--clear] [--preserve] [--request-file path] [--response-file path] [--json]
-  realbrowser errors [--clear] [--limit <n>] [--page <id>]
-  realbrowser requests [--failed] [--filter <text>] [--clear] [--limit <n>] [--page <id>]
-  realbrowser screenshot [path] [--full|--full-page] [--uid <uid>] [--labels|--annotate] [--format png|jpeg|webp] [--quality <0-100>] [--max-side <px>] [--max-bytes <bytes|5mb>] [--raw-size|--no-normalize] [--page <id>]
-  realbrowser responsive <path-prefix> [--page <id>]
-  realbrowser diff <url1> <url2> [--page <id>]
-  realbrowser download <uid> [path] [--cdp-url <url>] [--download-dir <dir>] [--timeout <ms>] [--page <id>]
-  realbrowser wait-download|waitfordownload [path] [--cdp-url <url>] [--download-dir <dir>] [--timeout <ms>]
-  realbrowser handoff [pageId]
-  realbrowser resume [pageId] [--page <id>]
-  realbrowser trace start|stop [--page <id>]
-  realbrowser trace analyze <insightSetId> <insightName> [--page <id>]
-  realbrowser tool <mcpToolName> [jsonArgs]
-  realbrowser tools [--json]
-  realbrowser chain '[["snapshot","--page","1"],["console","--errors","--page","1"]]' [--return summary|final|all] [--trace <path>] [--json]
-  realbrowser stop|detach [--dismiss-banner] [--cleanup-remote-debugging]
+const HIDDEN_CLI_COMMANDS = [
+  { name: "daemon", usage: "realbrowser daemon" },
+  { name: "self-test", usage: "realbrowser self-test" },
+];
 
-Global flags:
-  --json
-  --quiet
-  --verbose
-  --raw
-  --mode compact|normal|verbose|raw
-  --session <name>
-  --handle <path-or-name>
-  --handle-out <path>
-  --handle-name <name>
-  --no-active-session
-  --no-activate-session
-  --all-sessions
-  --state-file <path>
-  --backend real|dev
-  --browser-url <url>
-  --cdp-url <url>
-  --profile <profile-query>
-  --browser <browser-key>
-  --select
-  --anonymous
-  --keep-anonymous
-  --force
-  --reload
-  --duration <ms>
-  --har <path>
-  --out <path>
-  --no-network
-  --dedicated
-  --no-fallback
-  --cleanup-remote-debugging
-  --dismiss-banner
-  --allow-attach
-`;
+const CLI_GLOBAL_FLAGS = [
+  "-h, --help",
+  "--version",
+  "--json",
+  "-q, --quiet",
+  "--verbose",
+  "--raw",
+  "--mode compact|normal|verbose|raw",
+  "--session <name>",
+  "--handle <path-or-name>",
+  "--handle-out <path>",
+  "--handle-name <name>",
+  "--no-active-session",
+  "--no-activate-session",
+  "--all-sessions",
+  "--state-file <path>",
+  "--backend real|dev",
+  "--browser-url <url>",
+  "--cdp-url <url>",
+  "--profile <profile-query>",
+  "--browser <browser-key>",
+  "--select",
+  "--anonymous",
+  "--keep-anonymous",
+  "--force",
+  "--reload",
+  "--duration <ms>",
+  "--har <path>",
+  "-o, --output <path>",
+  "--out <path>",
+  "--no-network",
+  "--dedicated",
+  "--no-fallback",
+  "--cleanup-remote-debugging",
+  "--dismiss-banner",
+  "--allow-attach",
+];
+
+function allCliCommandSpecs({ includeHidden = false } = {}) {
+  const visible = CLI_COMMAND_GROUPS.flatMap((group) => group.commands.map((command) => ({ ...command, group: group.title })));
+  return includeHidden ? [...visible, ...HIDDEN_CLI_COMMANDS] : visible;
+}
+
+function commandNames(spec) {
+  return [spec.name, ...(spec.aliases ?? [])];
+}
+
+function commandSpecFor(commandName, options = {}) {
+  const normalized = String(commandName ?? "").trim();
+  if (!normalized) {
+    return null;
+  }
+  return allCliCommandSpecs(options).find((spec) => commandNames(spec).includes(normalized)) ?? null;
+}
+
+function usage(commandName = "") {
+  const requestedCommand = String(commandName ?? "").trim();
+  if (requestedCommand) {
+    return commandUsage(requestedCommand);
+  }
+  const lines = [
+    "realbrowser",
+    "",
+    "Usage:",
+    "  realbrowser [global flags] <command> [args]",
+    "  realbrowser help <command>",
+    "",
+    "Common examples:",
+    "  realbrowser status",
+    "  realbrowser claim https://ninzap.dev --handle-name ninzap --json",
+    "  realbrowser --handle ninzap screenshot tmp/ninzap.png",
+    "  realbrowser mobile-screenshot https://ninzap.dev tmp/ninzap-mobile.png --viewport 390x844",
+    "  realbrowser handles",
+    "",
+    "Commands:",
+  ];
+  for (const group of CLI_COMMAND_GROUPS) {
+    lines.push("", `${group.title}:`);
+    for (const command of group.commands) {
+      const aliases = command.aliases?.length ? ` (${command.aliases.join(", ")})` : "";
+      lines.push(`  ${command.name}${aliases}`);
+      lines.push(`      ${command.summary}`);
+    }
+  }
+  lines.push(
+    "",
+    "Global flags:",
+    ...CLI_GLOBAL_FLAGS.map((flag) => `  ${flag}`),
+    "",
+    "Use `realbrowser help <command>` for command-specific syntax.",
+  );
+  return lines.join("\n");
+}
+
+function commandUsage(commandName) {
+  const spec = commandSpecFor(commandName, { includeHidden: true });
+  if (!spec) {
+    return `Unknown command: ${commandName}\n\n${usage()}`;
+  }
+  const lines = [
+    spec.name,
+    "",
+    "Usage:",
+    `  ${spec.usage}`,
+  ];
+  if (spec.aliases?.length) {
+    lines.push("", `Aliases: ${spec.aliases.join(", ")}`);
+  }
+  if (spec.summary) {
+    lines.push("", spec.summary);
+  }
+  lines.push("", "Global flags:", ...CLI_GLOBAL_FLAGS.map((flag) => `  ${flag}`));
+  return lines.join("\n");
+}
+
+function validateCommandArgs(commandName, args) {
+  const spec = commandSpecFor(commandName, { includeHidden: true });
+  const minArgs = spec?.minArgs ?? 0;
+  if (args.length < minArgs) {
+    throw usageError(`${commandName} requires ${minArgs} argument${minArgs === 1 ? "" : "s"}.`);
+  }
+}
+
+const FLAG_VALUE_NAMES = new Set([
+  "-d",
+  "-o",
+  "--backend",
+  "--browser",
+  "--browser-url",
+  "--cdp-url",
+  "--color-scheme",
+  "--cpu",
+  "--depth",
+  "--download-dir",
+  "--duration",
+  "--filter",
+  "--format",
+  "--geolocation",
+  "--handle",
+  "--handle-name",
+  "--handle-out",
+  "--har",
+  "--limit",
+  "--max-bytes",
+  "--max-chars",
+  "--max-labels",
+  "--max-nodes",
+  "--max-side",
+  "--mode",
+  "--name",
+  "--out",
+  "--output",
+  "--page",
+  "--profile",
+  "--quality",
+  "--request-file",
+  "--response-file",
+  "--return",
+  "--session",
+  "--state-file",
+  "--submit",
+  "--timeout",
+  "--trace",
+  "--uid",
+  "--user-agent",
+  "--viewport",
+]);
+
+const OPTIONAL_VALUE_FLAGS = new Set(["--network"]);
+
+const BOOLEAN_FLAG_NAMES = new Set([
+  "-a",
+  "-h",
+  "-i",
+  "-q",
+  "--activate-session",
+  "--all-browser-sessions",
+  "--all-session",
+  "--all-sessions",
+  "--allow-attach",
+  "--anonymous",
+  "--annotate",
+  "--attach",
+  "--bring-to-front",
+  "--clean-profile",
+  "--cleanup-remote-debugging",
+  "--clear",
+  "--compact",
+  "--dedicated",
+  "--deep",
+  "--disable-remote-debugging",
+  "--dismiss-banner",
+  "--efficient",
+  "--errors",
+  "--failed",
+  "--force",
+  "--front",
+  "--full",
+  "--full-page",
+  "--help",
+  "--ignore-active-session",
+  "--interactive",
+  "--isolated",
+  "--json",
+  "--keep-anonymous",
+  "--keep-isolated",
+  "--labels",
+  "--no-active-session",
+  "--no-dismiss-banner",
+  "--no-fallback",
+  "--no-network",
+  "--no-normalize",
+  "--no-reload",
+  "--no-screenshot",
+  "--no-select",
+  "--no-summary",
+  "--no-activate-session",
+  "--normalize",
+  "--preserve",
+  "--quiet",
+  "--raw",
+  "--raw-size",
+  "--reload",
+  "--screenshot",
+  "--select",
+  "--summary",
+  "--turn-off-remote-debugging",
+  "--values",
+  "--verbose",
+  "--version",
+]);
+
+const COMMAND_ARGUMENT_OPTION_TOKENS = new Set([
+  "--accept",
+  "--dismiss",
+  "--domcontentloaded",
+  "--load",
+  "--networkidle",
+]);
+
+const KNOWN_FLAG_NAMES = new Set([
+  ...FLAG_VALUE_NAMES,
+  ...OPTIONAL_VALUE_FLAGS,
+  ...BOOLEAN_FLAG_NAMES,
+]);
+
+function cliError(message, code = "error", exitCode = 1) {
+  const error = new Error(message);
+  error.code = code;
+  error.exitCode = exitCode;
+  return error;
+}
+
+function usageError(message) {
+  return cliError(message, "usage", 2);
+}
+
+function flagName(token) {
+  const text = String(token ?? "");
+  const equalsIndex = text.indexOf("=");
+  return equalsIndex === -1 ? text : text.slice(0, equalsIndex);
+}
+
+function isOptionLike(token) {
+  const text = String(token ?? "");
+  return text.startsWith("--") || /^-[A-Za-z]/.test(text);
+}
+
+function outputFlagsFromArgv(argv) {
+  const output = process.env.REALBROWSER_OUTPUT;
+  return {
+    json: argv.includes("--json"),
+    quiet: argv.includes("-q") || argv.includes("--quiet") || output === "quiet",
+    raw: argv.includes("--raw") || output === "raw",
+    verbose: argv.includes("--verbose") || output === "verbose",
+  };
+}
+
+function validateArgv(argv) {
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--") {
+      return;
+    }
+    if (!isOptionLike(arg) || COMMAND_ARGUMENT_OPTION_TOKENS.has(arg)) {
+      continue;
+    }
+    const name = flagName(arg);
+    if (!KNOWN_FLAG_NAMES.has(name)) {
+      throw usageError(`Unknown flag: ${name}`);
+    }
+    if (FLAG_VALUE_NAMES.has(name)) {
+      if (arg.includes("=")) {
+        if (arg.slice(arg.indexOf("=") + 1) === "") {
+          throw usageError(`${name} requires a value.`);
+        }
+        continue;
+      }
+      const next = argv[index + 1];
+      if (next === undefined || isOptionLike(next)) {
+        throw usageError(`${name} requires a value.`);
+      }
+      index += 1;
+    }
+  }
+}
+
+function parseHelpArgv(argv) {
+  const flags = {
+    json: false,
+    deep: false,
+    full: false,
+    verbose: false,
+    ...outputFlagsFromArgv(argv),
+    help: true,
+  };
+  const positional = [];
+  for (const token of argv) {
+    if (token === "--") {
+      break;
+    }
+    if (token === "help" || !isOptionLike(token)) {
+      positional.push(token);
+    }
+  }
+  if (positional[0] === "help") {
+    return { command: "help", args: positional[1] ? [positional[1]] : [], flags };
+  }
+  return { command: positional[0] ?? "help", args: [], flags };
 }
 
 function parseArgv(argv) {
+  const wantsHelp = argv.includes("--help") || argv.includes("-h") || argv[0] === "help";
+  if (wantsHelp) {
+    return parseHelpArgv(argv);
+  }
+  if (argv.includes("--version")) {
+    return {
+      command: "version",
+      args: [],
+      flags: {
+        json: false,
+        deep: false,
+        full: false,
+        verbose: false,
+        ...outputFlagsFromArgv(argv),
+        version: true,
+      },
+    };
+  }
+  validateArgv(argv);
   const args = [];
   const flags = { json: false, deep: false, full: false, verbose: false };
   for (let index = 0; index < argv.length; index += 1) {
@@ -371,6 +720,10 @@ function parseArgv(argv) {
     if (arg === "--") {
       args.push(...argv.slice(index + 1));
       break;
+    } else if (arg === "-h" || arg === "--help") {
+      flags.help = true;
+    } else if (arg === "--version") {
+      flags.version = true;
     } else if (arg === "--json") {
       flags.json = true;
     } else if (arg === "-q" || arg === "--quiet") {
@@ -509,7 +862,15 @@ function parseArgv(argv) {
     } else if (arg === "--no-reload") {
       flags.reload = false;
     } else if (arg === "--network") {
-      flags.network = true;
+      const next = argv[index + 1];
+      if (next !== undefined && !isOptionLike(next)) {
+        flags.network = next;
+        index += 1;
+      } else {
+        flags.network = true;
+      }
+    } else if (arg?.startsWith("--network=")) {
+      flags.network = arg.slice("--network=".length);
     } else if (arg === "--no-network") {
       flags.network = false;
     } else if (arg === "--duration") {
@@ -620,10 +981,6 @@ function parseArgv(argv) {
       flags.submit = arg.slice("--submit=".length);
     } else if (arg === "--values") {
       flags.values = true;
-    } else if (arg === "--network") {
-      flags.network = argv[++index];
-    } else if (arg?.startsWith("--network=")) {
-      flags.network = arg.slice("--network=".length);
     } else if (arg === "--cpu") {
       flags.cpu = argv[++index];
     } else if (arg?.startsWith("--cpu=")) {
@@ -652,6 +1009,10 @@ function parseArgv(argv) {
       flags.downloadDir = argv[++index];
     } else if (arg?.startsWith("--download-dir=")) {
       flags.downloadDir = arg.slice("--download-dir=".length);
+    } else if (COMMAND_ARGUMENT_OPTION_TOKENS.has(arg)) {
+      args.push(arg);
+    } else if (isOptionLike(arg)) {
+      throw usageError(`Unknown flag: ${flagName(arg)}`);
     } else {
       args.push(arg);
     }
@@ -662,7 +1023,9 @@ function parseArgv(argv) {
     if (envOutput === "verbose") flags.verbose = true;
     if (envOutput === "quiet") flags.quiet = true;
   }
-  return { command: args[0] ?? "help", args: args.slice(1), flags };
+  let command = args[0] ?? "help";
+  let commandArgs = args.slice(1);
+  return { command, args: commandArgs, flags };
 }
 
 function stateFileFromFlags(flags = {}) {
@@ -884,60 +1247,11 @@ async function validateHandleTarget(handle) {
 }
 
 function handleAwareCommands() {
-  return new Set([
-    "observe",
-    "navigate",
-    "goto",
-    "back",
-    "forward",
-    "reload",
-    "snapshot",
-    "accessibility",
-    "click",
-    "hover",
-    "drag",
-    "type",
-    "fill",
-    "fill-form",
-    "press",
-    "click-coords",
-    "highlight",
-    "upload",
-    "wait",
-    "scroll",
-    "viewport",
-    "emulate",
-    "useragent",
-    "cookie",
-    "dialog",
-    "dialog-accept",
-    "dialog-dismiss",
-    "eval",
-    "js",
-    "text",
-    "html",
-    "links",
-    "forms",
-    "cookies",
-    "storage",
-    "perf",
-    "url",
-    "css",
-    "attrs",
-    "is",
-    "console",
-    "capture-console",
-    "network",
-    "capture-network",
-    "errors",
-    "requests",
-    "screenshot",
-    "download",
-    "handoff",
-    "resume",
-    "trace",
-    "mobile-screenshot",
-  ]);
+  return new Set(
+    allCliCommandSpecs()
+      .filter((spec) => spec.handle)
+      .flatMap((spec) => commandNames(spec)),
+  );
 }
 
 async function applyHandleToFlags(command, flags = {}) {
@@ -1452,11 +1766,39 @@ function printResult(value, flagsOrJson = false) {
   console.log(JSON.stringify(value, null, 2));
 }
 
+function printCliError(error, flags = {}) {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = error?.code ?? "error";
+  if (flags.json) {
+    console.error(JSON.stringify({ error: { code, message } }, null, 2));
+    return;
+  }
+  console.error(message);
+  if (code === "usage") {
+    console.error("Use `realbrowser --help` or `realbrowser help <command>`.");
+  }
+}
+
 async function runCli() {
   const parsed = parseArgv(process.argv.slice(2));
   const { command, args, flags } = parsed;
-  if (command === "help" || command === "--help" || command === "-h") {
-    console.log(usage());
+  if (flags.version || command === "version") {
+    printResult({ text: CLI_VERSION, version: CLI_VERSION }, flags);
+    return;
+  }
+  if (command === "help") {
+    const requestedCommand = args[0] ?? "";
+    if (requestedCommand && !commandSpecFor(requestedCommand, { includeHidden: true })) {
+      throw usageError(`Unknown command: ${requestedCommand}`);
+    }
+    printResult({ text: usage(requestedCommand) }, flags);
+    return;
+  }
+  if (flags.help) {
+    if (!commandSpecFor(command, { includeHidden: true })) {
+      throw usageError(`Unknown command: ${command}`);
+    }
+    printResult({ text: usage(command) }, flags);
     return;
   }
   if (command === "self-test") {
@@ -1467,6 +1809,10 @@ async function runCli() {
     await runDaemon();
     return;
   }
+  if (!commandSpecFor(command, { includeHidden: true })) {
+    throw usageError(`Unknown command: ${command}`);
+  }
+  validateCommandArgs(command, args);
 
   if (command === "profiles" || command === "profile-list" || command === "list-profiles") {
     const profiles = await listBrowserProfiles({ query: args[0], browser: flags.browser });
@@ -1577,9 +1923,13 @@ async function runCli() {
         await stopState(session.state).catch(() => {});
       }
       await clearActiveSessionName();
-      console.log(sessions.length > 0
-        ? `stopped ${sessions.length} realbrowser session${sessions.length === 1 ? "" : "s"}`
-        : "No running realbrowser sessions found.");
+      printResult({
+        text: sessions.length > 0
+          ? `stopped ${sessions.length} realbrowser session${sessions.length === 1 ? "" : "s"}`
+          : "No running realbrowser sessions found.",
+        stopped: sessions.map((session) => publicSessionInfo(session)),
+        count: sessions.length,
+      }, flags);
       return;
     }
     const selectedStateFile = stateFileFromFlags(flags);
@@ -1601,7 +1951,11 @@ async function runCli() {
       if (flags.cleanupRemoteDebugging) {
         lines.push("No daemon is available for automatic cleanup; use Chrome's settings UI, or run `realbrowser cleanup-remote-debugging --allow-attach` if starting a fresh permission-gated attach is acceptable.");
       }
-      console.log(lines.filter(Boolean).join("\n"));
+      printResult({
+        text: lines.filter(Boolean).join("\n"),
+        running: false,
+        bannerDismissal,
+      }, flags);
       return;
     }
     const healthBody = await health(state).catch(() => null);
@@ -1628,7 +1982,12 @@ async function runCli() {
         ? `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", ${BANNER_X_INSTRUCTION}`
         : "",
     ].filter(Boolean);
-    console.log(lines.join("\n"));
+    printResult({
+      text: lines.join("\n"),
+      stoppedPid: state.pid,
+      cleanup,
+      bannerDismissal,
+    }, flags);
     return;
   }
 
@@ -3411,7 +3770,7 @@ class McpClient {
       this.request("initialize", {
         protocolVersion: "2025-06-18",
         capabilities: {},
-        clientInfo: { name: "realbrowser", version: "0.1.0" },
+        clientInfo: { name: "realbrowser", version: CLI_VERSION },
       }),
       MCP_START_TIMEOUT_MS,
       "MCP initialize timed out",
@@ -6096,7 +6455,7 @@ function buildHarFromNetworkCapture(capture) {
   return {
     log: {
       version: "1.2",
-      creator: { name: "realbrowser", version: "0.1.0" },
+      creator: { name: "realbrowser", version: CLI_VERSION },
       pages: [{
         startedDateTime: new Date(timeOrigin).toISOString(),
         id: "page_1",
@@ -7171,7 +7530,7 @@ function waitForNetworkIdleFunction(timeoutMs) {
 
 function requireArgs(command, args, count) {
   if (args.length < count) {
-    throw new Error(`${command} requires ${count} argument${count === 1 ? "" : "s"}`);
+    throw usageError(`${command} requires ${count} argument${count === 1 ? "" : "s"}`);
   }
 }
 
@@ -7485,6 +7844,24 @@ function runSelfTest() {
 
   const parsedJson = parseArgv(["chain", '[["type","hello world"],["press","Enter"]]']);
   assertSelfTest(parsedJson.args[0].includes("hello world"), "parser preserves JSON arguments with spaces");
+  const parsedClaimHelp = parseArgv(["claim", "--help"]);
+  assertSelfTest(parsedClaimHelp.command === "claim" && parsedClaimHelp.flags.help === true, "parser supports subcommand help flags");
+  const parsedMalformedClaimHelp = parseArgv(["claim", "--session", "--help"]);
+  assertSelfTest(parsedMalformedClaimHelp.command === "claim" && parsedMalformedClaimHelp.flags.help === true, "help stays side-effect-free after malformed flags");
+  const parsedHelpCommand = parseArgv(["help", "claim"]);
+  assertSelfTest(parsedHelpCommand.command === "help" && parsedHelpCommand.args[0] === "claim", "parser supports help subcommand");
+  const parsedVersion = parseArgv(["--version"]);
+  assertSelfTest(parsedVersion.flags.version === true, "parser supports version flag");
+  assertSelfTestThrows(() => parseArgv(["claim", "--hanlde", "ninzap"]), "unknown flags fail before daemon startup");
+  assertSelfTestThrows(() => parseArgv(["claim", "--session"]), "missing flag values fail before daemon startup");
+  const parsedWaitNetworkIdle = parseArgv(["wait", "--networkidle"]);
+  assertSelfTest(parsedWaitNetworkIdle.args[0] === "--networkidle", "parser preserves wait readiness tokens");
+  const parsedEmulateNetwork = parseArgv(["emulate", "--network", "Offline"]);
+  assertSelfTest(parsedEmulateNetwork.flags.network === "Offline", "parser supports emulate network values");
+  assertSelfTestThrows(() => validateCommandArgs("click", []), "missing positional args fail before daemon startup");
+  validateCommandArgs("click", ["uid-1"]);
+  assertSelfTest(handleAwareCommands().has("goto"), "handle-aware command metadata includes aliases");
+  assertSelfTest(!handleAwareCommands().has("select"), "page-selection commands do not implicitly consume handles");
 
   const autoControl = browserControlStatus({ running: true, mode: AUTO_MODE, mcpConnected: true });
   assertSelfTest(autoControl.chromeBannerExpectedNow === true, "browser control reports active Chrome banner");
@@ -7564,7 +7941,16 @@ function assertSelfTest(condition, message) {
   }
 }
 
+function assertSelfTestThrows(fn, message) {
+  try {
+    fn();
+  } catch {
+    return;
+  }
+  throw new Error(`self-test failed: ${message}`);
+}
+
 runCli().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
+  printCliError(error, outputFlagsFromArgv(process.argv.slice(2)));
+  process.exitCode = error?.exitCode ?? 1;
 });
