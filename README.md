@@ -15,7 +15,7 @@ The default Codex browser automation path is useful, but it is not enough for we
   DevTools HTTP where possible and one persistent CDP socket per daemon when a
   WebSocket is needed.
 - A dedicated profile fallback at `~/.realbrowser/profile`.
-- Short tab targets for daemon sessions, tab listing/selection, navigation, compact observations, visible text blocks, efficient snapshots, clicks, typing, forms, JavaScript evaluation, capped console and network inspection, OpenClaw-style normalized screenshots, annotated labels, pre-armed dialog handling, user-agent emulation, and download interception.
+- Short tab targets for daemon sessions, tab listing/selection, navigation, compact observations, visible content cards/text blocks, efficient snapshots, clicks, typing, forms, JavaScript evaluation, capped console and network inspection, OpenClaw-style normalized screenshots, annotated labels, pre-armed dialog handling, user-agent emulation, and download interception.
 
 ## Why Not Just Playwright?
 
@@ -162,8 +162,8 @@ Stopping or detaching realbrowser closes its daemon/MCP connection. If Chrome st
 Realbrowser is designed to keep Codex token use low:
 
 - Use `observe` for the first page read.
-- Use `blocks --limit <n>` for social feeds, search results, and dashboards
-  where full-page text is too noisy.
+- Use `posts --limit <n>` for feed-like content, and `blocks --limit <n>`
+  for search results and dashboards where full-page text is too noisy.
 - Use `wait <text>` or readiness waits instead of shell sleeps.
 - Use profile/endpoint sessions when possible; cheap operations use one
   persistent direct-CDP socket before MCP. Reuse the endpoint-scoped session for
@@ -173,6 +173,8 @@ Realbrowser is designed to keep Codex token use low:
 - Use `snapshot --labels` or `screenshot --labels` for annotated screenshots.
 - `open` and `newtab` open background tabs by default; pass `--front` only for an explicit visual handoff.
 - Use compact targets from `tabs`/`find-tab` such as `t1` instead of raw target ids.
+- Use `links --filter/--text-filter/--href-filter --visible` when you need a
+  small link set instead of full-page link dumps.
 - Use `console --errors --limit 20` and `network --failed --limit 30`.
 - Use project-specific `--handle-out tmp/realbrowser-handles/<task>.json`
   paths for parallel Codex tabs. Existing handle files are not overwritten

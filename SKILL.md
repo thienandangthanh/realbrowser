@@ -32,7 +32,7 @@ For authenticated browsing in the user's real Chrome profile, optimize for one
 approved connection and one compact command stream. Search/reuse the existing
 session or tab first; if a new tab is required, open it through
 `open --profile <id> <url> --select --no-fallback`. Then use `chain` with
-`goto`, `wait`, and `blocks`/`text` instead of shell `sleep` plus broad
+`goto`, `wait`, and `posts`/`blocks`/`text` instead of shell `sleep` plus broad
 `tabs --json` dumps. Profile CDP discovery tries HTTP first and falls back to
 the profile's browser WebSocket only through the persistent daemon when
 Chrome's `/json/*` endpoints are not available. Do not create transient raw
@@ -150,13 +150,15 @@ snapshots:
 ```bash
 "$REALBROWSER_CLI" profiles "work@example.com" --browser chrome
 "$REALBROWSER_CLI" open --profile "chrome:Default" "https://social.example.com/" --select --no-fallback --timeout 15000 --quiet
-"$REALBROWSER_CLI" chain '[["goto","https://social.example.com/groups/example-group"],["wait","Example Group","--timeout","15000"],["blocks","--limit","8","--max-chars","6000"]]' --return final
+"$REALBROWSER_CLI" chain '[["goto","https://social.example.com/groups/example-group"],["wait","Example Group","--visible","--timeout","15000"],["posts","--limit","1","--max-chars","2000"]]' --return final
 ```
 
-Use `blocks` first for feeds because it returns visible content blocks in
-screen order. Fall back to targeted `js` only when the page's DOM structure
-needs custom extraction. `chain` includes per-step durations in JSON/trace and
-summary output; use that instead of shell-level timing when analyzing speed.
+Use `posts` first for feed-like pages because it returns compact visible
+content cards in screen order. Use `blocks` for generic dashboards, search
+results, and pages that are not feed-shaped. Fall back to targeted `js` only
+when the page's DOM structure needs custom extraction. `chain` includes per-step
+durations in JSON/trace and summary output; use that instead of shell-level
+timing when analyzing speed.
 
 Use the stable profile id when a human name is ambiguous. For example, a first name may match more than one account; `chrome:Profile 4`, the account email, or another stable profile identifier is safer. `--select` opens the tab with Chrome's profile selector, waits for a matching debuggable tab, attaches to the endpoint, and selects the page. If `--select` reports no endpoint, stop and ask the user to enable Chrome remote debugging for that profile instead of falling back to the dedicated profile.
 
@@ -352,7 +354,7 @@ REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dis
 - `click-coords <x> <y> [--page <id>]`: click the element at viewport coordinates when refs are not enough.
 - `highlight <uid|selector> [--page <id>]`: temporarily highlight what a ref or selector resolves to.
 - `upload <uid> <file> [--page <id>]`: upload a local file through a file input ref.
-- `wait <text> [more text...] [--timeout <ms>] [--page <id>]`: wait until one text value appears. Use `wait --load`, `wait --domcontentloaded`, or `wait --networkidle` for page readiness checks.
+- `wait <text> [more text...] [--visible] [--selector <css>] [--timeout <ms>] [--page <id>]`: wait until one text value appears, optionally scoped to a selector and visible text. Use `wait --selector <css> --visible` for element readiness, or `wait --load`, `wait --domcontentloaded`, and `wait --networkidle` for page readiness checks.
 - `scroll [selector|uid] [--page <id>]`: scroll a selector/ref into view, or scroll to bottom.
 - `viewport <WxH|reset> [--page <id>]`: emulate viewport size without resizing the real Chrome window, or clear emulation.
 - `mobile-screenshot [url] [path] [--viewport <WxH>] [--handle <path-or-name>] [--handle-out <path>] [--force]`: page-scoped mobile screenshot flow with viewport, network-idle wait, raw-size capture, and PNG dimension verification. Existing handle output files are not overwritten unless `--force` is passed.
@@ -360,9 +362,11 @@ REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dis
 - `useragent <ua|reset>`: gstack-compatible shortcut for `emulate --user-agent`.
 - `cookie <name=value>`: set a cookie on the current page path.
 - `dialog arm accept|dismiss [text]`, `dialog --accept|--dismiss [text]`, `dialog-accept [text]`, `dialog-dismiss`: pre-arm the next alert/confirm/prompt in the current page. Use `dialog list` to read captured dialog records, or `dialog current accept|dismiss` to handle a dialog that is already open.
-- `eval <js>` / `js <js> [--page <id>]`: run JavaScript in the page. Expressions are wrapped automatically. Output is capped unless `--raw` is passed.
-- `text`, `html`, `links`, `forms`, `cookies`, `storage`, `perf`, `url`: fast read helpers backed by page JavaScript. Use `--limit`, `--max-chars`, and `--out <path>` for large pages. `cookies` and `storage` redact values unless `--values` is passed.
-- `blocks [selector] [--limit <n>] [--max-chars <n>] [--out <path>]`: fast read helper for compact visible text blocks sorted top-to-bottom. Use it for social feeds, dashboards, search results, and pages where full `text` is too noisy. Pass a selector such as `[role=article]` when the page has a known content container.
+- `eval <js>` / `js <js> [--page <id>]`: run JavaScript in the page. Expressions are wrapped automatically. Output is capped by `--max-chars`; use `--out <path>` for large raw results.
+- `text`, `html`, `forms`, `cookies`, `storage`, `perf`, `url`: fast read helpers backed by page JavaScript. Use `--limit`, `--max-chars`, and `--out <path>` for large pages. `cookies` and `storage` redact values unless `--values` is passed.
+- `links [selector|uid] [--limit <n>] [--filter <text>] [--text-filter <text>] [--href-filter <text>] [--visible]`: read deduped links, with filtering and visibility applied inside the page before output.
+- `posts [selector] [--limit <n>] [--max-chars <n>] [--out <path>]`: fast read helper for compact visible feed/content cards sorted top-to-bottom. It extracts likely author/time/body fields without site-specific scraping.
+- `blocks [selector] [--limit <n>] [--max-chars <n>] [--fallback-text] [--out <path>]`: fast read helper for compact visible text blocks sorted top-to-bottom. Use it for dashboards, search results, and pages where full `text` is too noisy. It no longer falls back to whole-page text unless `--fallback-text` is explicit.
 - `css <selector|uid> <property>`, `attrs <selector|uid>`, `is <state> <selector|uid>`: inspect elements by CSS selector or snapshot uid.
 - `console [get <msgid>] [--errors] [--filter <text>] [--limit <n>] [--clear] [--preserve]`: list capped console messages, or fetch one message by id. `--clear` hides already-seen lines for the current daemon. Use `capture-console --out` when the user needs logs copied into a durable artifact for debugging.
 - `network [get <reqid>] [--failed] [--filter <text>] [--limit <n>] [--clear] [--preserve] [--request-file path] [--response-file path]`: list capped network requests, or fetch one request by id. Use files for large request/response bodies.
@@ -386,7 +390,7 @@ Global flags:
 - `--json`: print raw JSON responses.
 - `--quiet`: print only the shortest useful value when available.
 - `--verbose`: raise output caps and request more detail. Use when the compact result is missing useful context.
-- `--raw`: bypass realbrowser compaction and print the underlying adapter response. Use when the user asks for full output.
+- `--raw`: bypass normal formatting and print the underlying adapter response. Read and eval commands still honor `--max-chars`; use `--out <path>` for large output.
 - `--mcp` / `--no-fast`: bypass direct CDP fast paths for this command and force the Chrome DevTools MCP path when available. Use this only when debugging the adapter or when exact MCP page ids are required.
 - `--mode compact|normal|verbose|raw`: output mode shortcut. `REALBROWSER_OUTPUT=verbose|raw|quiet` can set the default for a command or session.
 - `--`: stop option parsing. Use before literal text or JavaScript that begins with a known flag, such as `type -- --raw`.
@@ -424,7 +428,7 @@ Global flags:
 5. If the user asks for console logs, JavaScript errors, or "what is the render problem", use `capture-console <url> --anonymous --out <file>` for clean-state checks or `select-tab`/`--profile` plus `capture-console --reload --out <file>` for authenticated checks. Feed the JSON artifact back into analysis.
 6. If a specific signed-in profile matters and no suitable tab is open, run `profiles`, choose a stable id, and open the target URL with `open --profile <id> <url> --select --no-fallback --timeout 15000`. Stop if no DevTools endpoint is available; do not fall back to the dedicated profile when cookies/login state are required.
 7. Use `tabs` before opening new pages if prior attempts may have left tabs around.
-8. Use `observe` first for page state; use `blocks` first for feed/search-result content; use `snapshot --efficient` only when you need clickable `uid` refs.
+8. Use `observe` first for page state; use `posts` first for feed-like content, `blocks` for search results or dashboards, and `snapshot --efficient` only when you need clickable `uid` refs.
 9. Act only on current snapshot `uid` refs.
 10. After navigation, modal changes, or form submission, run `observe` or `snapshot --efficient` again before the next action.
 11. If a `uid` is stale, snapshot once and retry with the new ref.
@@ -438,7 +442,7 @@ Global flags:
 - Prefer `observe`, `snapshot --efficient`, `console --errors --limit 20`, and `network --failed --limit 30`.
 - Prefer `chain --return final` for "navigate, wait, read" flows; it avoids extra process round trips, keeps only the useful final result in context, and records durations for speed review.
 - Prefer `wait <text>` or readiness waits over shell `sleep`. `wait <text>` polls in the page through the fast CDP path when a CDP endpoint is available.
-- Prefer `blocks --limit <n>` over full-page `text` for feeds and search results.
+- Prefer `posts --limit <n>` for feed-like content and `blocks --limit <n>` for search results or dashboards over full-page `text`.
 - Prefer direct CDP-backed endpoint/profile sessions for cheap reads and navigation. Use `--mcp` only when you need to compare against Chrome DevTools MCP behavior.
 - Do not call raw/full snapshot by default. If the user asks for verbose or full output, use `--verbose`, `--raw`, `REALBROWSER_OUTPUT=verbose`, `REALBROWSER_OUTPUT=raw`, or `--out <path>`.
 - On Windows PowerShell, set full-output mode with `$env:REALBROWSER_OUTPUT = "raw"` before running `scripts\realbrowser.ps1`, then remove it with `Remove-Item Env:\REALBROWSER_OUTPUT`.

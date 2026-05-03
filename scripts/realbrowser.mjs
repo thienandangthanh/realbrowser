@@ -27,10 +27,14 @@ const PACKAGE_SPEC = process.env.REALBROWSER_MCP_PACKAGE ?? "chrome-devtools-mcp
 const CLI_VERSION = "0.1.0";
 const SCRIPT_HASH = crypto.createHash("sha256").update(fs.readFileSync(SCRIPT_PATH)).digest("hex").slice(0, 16);
 const DAEMON_CAPABILITIES = Object.freeze([
+  "bounded-raw-output",
   "chain-step-durations",
+  "content-posts",
   "endpoint-session-manager",
+  "filtered-links",
   "page-local-wait",
   "persistent-cdp-ws-target-list",
+  "visible-wait",
   "visible-blocks",
 ]);
 const AUTO_MODE = "auto";
@@ -313,7 +317,7 @@ const CLI_COMMAND_GROUPS = [
       { name: "click-coords", usage: "realbrowser click-coords <x> <y> [--page <id>]", summary: "Click screen coordinates.", handle: true, minArgs: 2 },
       { name: "highlight", usage: "realbrowser highlight <uid|selector> [--page <id>]", summary: "Highlight a target.", handle: true, minArgs: 1 },
       { name: "upload", usage: "realbrowser upload <uid> <file> [--page <id>]", summary: "Upload a file.", handle: true, minArgs: 2 },
-      { name: "wait", usage: "realbrowser wait <text>|--load|--domcontentloaded|--networkidle [--timeout <ms>] [--page <id>]", summary: "Wait for text or page readiness.", handle: true, minArgs: 1 },
+      { name: "wait", usage: "realbrowser wait [<text>|--load|--domcontentloaded|--networkidle] [--visible] [--selector <css>] [--timeout <ms>] [--page <id>]", summary: "Wait for text, visible content, selector, or page readiness.", handle: true },
       { name: "scroll", usage: "realbrowser scroll [selector|uid] [--page <id>]", summary: "Scroll the page or target.", handle: true },
       { name: "viewport", aliases: ["resize"], usage: "realbrowser viewport <WxH|reset> [--page <id>]", summary: "Set or reset viewport size.", handle: true, minArgs: 1 },
     ],
@@ -321,11 +325,12 @@ const CLI_COMMAND_GROUPS = [
   {
     title: "Inspection and diagnostics",
     commands: [
-      { name: "eval", aliases: ["js"], usage: "realbrowser eval <js> [--page <id>] [--json]", summary: "Run JavaScript in the page.", handle: true, minArgs: 1 },
+      { name: "eval", aliases: ["js"], usage: "realbrowser eval <js> [--page <id>] [--max-chars <n>] [--out <path>] [--raw] [--json]", summary: "Run JavaScript in the page.", handle: true, minArgs: 1 },
       { name: "text", usage: "realbrowser text [selector|uid] [--page <id>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read text.", handle: true },
-      { name: "blocks", aliases: ["visible-blocks"], usage: "realbrowser blocks [selector] [--page <id>] [--limit <n>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read compact visible text blocks.", handle: true },
+      { name: "blocks", aliases: ["visible-blocks"], usage: "realbrowser blocks [selector] [--page <id>] [--limit <n>] [--max-chars <n>] [--fallback-text] [--out <path>] [--raw]", summary: "Read compact visible text blocks.", handle: true },
+      { name: "posts", aliases: ["feed", "content-blocks"], usage: "realbrowser posts [selector] [--page <id>] [--limit <n>] [--max-chars <n>] [--out <path>] [--json]", summary: "Read compact visible feed/content posts.", handle: true },
       { name: "html", usage: "realbrowser html [selector|uid] [--page <id>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read HTML.", handle: true },
-      { name: "links", usage: "realbrowser links [selector|uid] [--page <id>] [--limit <n>] [--json]", summary: "Read links.", handle: true },
+      { name: "links", usage: "realbrowser links [selector|uid] [--page <id>] [--limit <n>] [--filter <text>] [--text-filter <text>] [--href-filter <text>] [--visible] [--json]", summary: "Read links.", handle: true },
       { name: "forms", usage: "realbrowser forms [selector|uid] [--page <id>] [--json]", summary: "Read forms.", handle: true },
       { name: "cookies", usage: "realbrowser cookies [--page <id>] [--json]", summary: "Read cookies.", handle: true },
       { name: "storage", usage: "realbrowser storage [--page <id>] [--json]", summary: "Read storage.", handle: true },
@@ -538,14 +543,17 @@ const FLAG_VALUE_NAMES = new Set([
   "--request-file",
   "--response-file",
   "--return",
+  "--selector",
   "--session",
   "--state-file",
   "--submit",
+  "--text-filter",
   "--timeout",
   "--trace",
   "--uid",
   "--user-agent",
   "--viewport",
+  "--href-filter",
 ]);
 
 const OPTIONAL_VALUE_FLAGS = new Set(["--network"]);
@@ -576,6 +584,7 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--efficient",
   "--errors",
   "--failed",
+  "--fallback-text",
   "--force",
   "--front",
   "--full",
@@ -592,6 +601,7 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--no-active-session",
   "--no-dismiss-banner",
   "--no-fallback",
+  "--no-fallback-text",
   "--no-fast",
   "--no-network",
   "--no-normalize",
@@ -614,6 +624,7 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--turn-off-remote-debugging",
   "--values",
   "--verbose",
+  "--visible",
   "--version",
 ]);
 
@@ -796,6 +807,24 @@ function parseArgv(argv) {
       flags.filter = argv[++index];
     } else if (arg?.startsWith("--filter=")) {
       flags.filter = arg.slice("--filter=".length);
+    } else if (arg === "--text-filter") {
+      flags.textFilter = argv[++index];
+    } else if (arg?.startsWith("--text-filter=")) {
+      flags.textFilter = arg.slice("--text-filter=".length);
+    } else if (arg === "--href-filter") {
+      flags.hrefFilter = argv[++index];
+    } else if (arg?.startsWith("--href-filter=")) {
+      flags.hrefFilter = arg.slice("--href-filter=".length);
+    } else if (arg === "--selector") {
+      flags.selector = argv[++index];
+    } else if (arg?.startsWith("--selector=")) {
+      flags.selector = arg.slice("--selector=".length);
+    } else if (arg === "--visible") {
+      flags.visible = true;
+    } else if (arg === "--fallback-text") {
+      flags.fallbackText = true;
+    } else if (arg === "--no-fallback-text") {
+      flags.fallbackText = false;
     } else if (arg === "--clear") {
       flags.clear = true;
     } else if (arg === "--failed") {
@@ -2026,9 +2055,32 @@ function daemonSupports(state, capability) {
 
 function requiredCapabilitiesForCommand(command, args = []) {
   switch (command) {
+    case "wait":
+      return args.includes("--visible") || args.includes("--selector") || args.some((arg) => String(arg).startsWith("--selector="))
+        ? new Set(["visible-wait"])
+        : new Set();
+    case "eval":
+    case "js":
+    case "text":
+    case "html":
+    case "url":
+    case "forms":
+    case "cookies":
+    case "storage":
+    case "perf":
+    case "css":
+    case "attrs":
+    case "is":
+      return args.includes("--raw") ? new Set(["bounded-raw-output"]) : new Set();
     case "blocks":
     case "visible-blocks":
       return new Set(["visible-blocks"]);
+    case "posts":
+    case "feed":
+    case "content-blocks":
+      return new Set(["content-posts"]);
+    case "links":
+      return new Set(["filtered-links"]);
     default:
       return new Set();
   }
@@ -2037,6 +2089,29 @@ function requiredCapabilitiesForCommand(command, args = []) {
 function requiredCapabilitiesForPayload(payload) {
   const command = payload?.command;
   const required = requiredCapabilitiesForCommand(command, payload?.args ?? []);
+  const flags = payload?.flags ?? {};
+  if ((command === "wait") && (flags.visible || flags.selector)) {
+    required.add("visible-wait");
+  }
+  if (
+    (
+      command === "eval" ||
+      command === "js" ||
+      command === "text" ||
+      command === "html" ||
+      command === "url" ||
+      command === "forms" ||
+      command === "cookies" ||
+      command === "storage" ||
+      command === "perf" ||
+      command === "css" ||
+      command === "attrs" ||
+      command === "is"
+    ) &&
+    flags.raw
+  ) {
+    required.add("bounded-raw-output");
+  }
   if (command !== "chain") {
     return required;
   }
@@ -5507,7 +5582,6 @@ class BrowserDaemon {
           filePath: path.resolve(args[1]),
         });
       case "wait":
-        requireArgs(command, args, 1);
         return await this.handleWait(args, flags);
       case "scroll":
         return await this.handleScroll(args, flags);
@@ -5537,6 +5611,9 @@ class BrowserDaemon {
       case "text":
       case "blocks":
       case "visible-blocks":
+      case "posts":
+      case "feed":
+      case "content-blocks":
       case "html":
       case "links":
       case "forms":
@@ -6347,7 +6424,7 @@ class BrowserDaemon {
     if (this.shouldUseFastCdp(flags) && !flags.uid) {
       try {
         const result = await this.evaluateCdpFunction(buildEvalFunction(args.join(" ")), flags);
-        return flags.raw ? result : compactTextResult(result, flags, DEFAULT_READ_MAX_CHARS);
+        return flags.raw ? await formatRawResult("eval", result, flags) : compactTextResult(result, flags, DEFAULT_READ_MAX_CHARS);
       } catch {
         // Fall through to MCP. --no-fallback only disables dedicated-profile fallback.
       }
@@ -6358,7 +6435,7 @@ class BrowserDaemon {
       pageId,
       ...(flags.uid ? { args: [flags.uid] } : {}),
     });
-    return flags.raw ? result : compactTextResult(result, flags, DEFAULT_READ_MAX_CHARS);
+    return flags.raw ? await formatRawResult("eval", result, flags) : compactTextResult(result, flags, DEFAULT_READ_MAX_CHARS);
   }
 
   async resolvePageId(flags = {}) {
@@ -6481,10 +6558,10 @@ class BrowserDaemon {
   }
 
   async handleRead(command, args, flags = {}) {
-    const target = args[0];
+    const target = args[0] ?? flags.selector;
     const rawResult = async (fn, selectorOrUid = undefined) => {
       const result = await this.evaluateFunction(fn, flags, selectorOrUid);
-      return flags.raw ? result : await formatReadResult(command, result, flags);
+      return flags.raw ? await formatRawResult(command, result, flags) : await formatReadResult(command, result, flags);
     };
     switch (command) {
       case "url":
@@ -6504,7 +6581,14 @@ class BrowserDaemon {
       case "blocks":
       case "visible-blocks":
         return await rawResult(
-          visibleBlocksFunction(target),
+          visibleBlocksFunction(target, { fallbackText: flags.fallbackText === true }),
+          target,
+        );
+      case "posts":
+      case "feed":
+      case "content-blocks":
+        return await rawResult(
+          visibleContentPostsFunction(target),
           target,
         );
       case "html":
@@ -6514,9 +6598,8 @@ class BrowserDaemon {
         );
       case "links":
         return await rawResult(
-          `() => [...document.querySelectorAll("a[href]")]
-            .map((a) => ({ text: (a.textContent || "").trim().slice(0, 120), href: a.href }))
-            .filter((link) => link.text && link.href)`,
+          target ? selectorOrUidFunction(target, linkReadBodyFunction(flags)) : linksReadFunction(flags),
+          target,
         );
       case "forms":
         return await rawResult(
@@ -6757,8 +6840,20 @@ class BrowserDaemon {
         flags,
       );
     }
+    if (flags.selector && args.length === 0) {
+      return await this.evaluateFunction(
+        waitForSelectorFunction(flags.selector, timeout, { visible: Boolean(flags.visible) }),
+        flags,
+      );
+    }
+    if (args.length === 0) {
+      throw new Error("wait expects text, --selector <css>, --load, --domcontentloaded, or --networkidle");
+    }
     return await this.evaluateFunction(
-      waitForTextFunction(args.join(" "), timeout),
+      waitForTextFunction(args.join(" "), timeout, {
+        visible: Boolean(flags.visible),
+        selector: flags.selector,
+      }),
       flags,
     );
   }
@@ -8007,7 +8102,10 @@ async function formatReadResult(command, result, flags = {}) {
   let displayedValue = rawValue;
   if ((command === "blocks" || command === "visible-blocks") && Array.isArray(rawValue)) {
     displayedValue = rawValue.slice(0, limit);
-    fullText = displayedValue.map(formatVisibleBlock).join("\n\n");
+    fullText = displayedValue.length ? displayedValue.map(formatVisibleBlock).join("\n\n") : "(no visible blocks)";
+  } else if ((command === "posts" || command === "feed" || command === "content-blocks") && Array.isArray(rawValue)) {
+    displayedValue = rawValue.slice(0, limit);
+    fullText = displayedValue.length ? displayedValue.map(formatVisiblePost).join("\n\n") : "(no visible content posts)";
   } else if (Array.isArray(rawValue)) {
     displayedValue = rawValue.slice(0, limit);
     fullText = formatValue(displayedValue);
@@ -8043,6 +8141,36 @@ async function formatReadResult(command, result, flags = {}) {
   };
 }
 
+async function formatRawResult(command, result, flags = {}) {
+  const rawText = String(result?.text ?? formatValue(result ?? ""));
+  const outPath = flags.out ?? flags.output;
+  if (outPath) {
+    await writeTextFile(outPath, `${rawText}\n`);
+  }
+  const maxChars = parsePositiveInteger(
+    flags.maxChars ?? (flags.verbose ? "40000" : String(DEFAULT_READ_MAX_CHARS)),
+    "max-chars",
+  );
+  const truncated = truncateText(rawText, maxChars);
+  const suffix = [];
+  if (truncated.truncated) {
+    suffix.push(`[...TRUNCATED raw output - use --max-chars or --out]`);
+  }
+  if (outPath) {
+    suffix.push(`out: ${outPath}`);
+  }
+  return {
+    text: [truncated.text, ...suffix].filter(Boolean).join("\n"),
+    structuredContent: {
+      command,
+      raw: true,
+      chars: rawText.length,
+      truncated: truncated.truncated,
+      ...(outPath ? { out: outPath } : {}),
+    },
+  };
+}
+
 function formatVisibleBlock(block, index) {
   const label = block?.role || block?.tag || "block";
   const geometry = [
@@ -8055,12 +8183,33 @@ function formatVisibleBlock(block, index) {
   return `${header}\n${String(block?.text ?? "").trim()}`.trim();
 }
 
+function formatVisiblePost(post, index) {
+  const parts = [
+    `[${index + 1}] post`,
+    Number.isFinite(post?.top) ? `top=${Math.round(post.top)}` : "",
+    Number.isFinite(post?.height) ? `h=${Math.round(post.height)}` : "",
+    post?.source ? `source=${post.source}` : "",
+    post?.selector ? post.selector : "",
+  ].filter(Boolean);
+  const header = parts.join(" ");
+  const meta = [
+    post?.author ? `author: ${post.author}` : "",
+    post?.time ? `time: ${post.time}` : "",
+  ].filter(Boolean).join("\n");
+  const body = String(post?.body || post?.text || "").trim();
+  return [header, meta, body].filter(Boolean).join("\n").trim();
+}
+
 function defaultLimitForReadCommand(command) {
   switch (command) {
     case "links":
       return "100";
     case "forms":
       return "20";
+    case "posts":
+    case "feed":
+    case "content-blocks":
+      return "5";
     case "blocks":
     case "visible-blocks":
       return "12";
@@ -8236,9 +8385,11 @@ function observePageFunction({ limit, maxChars, selector }) {
   }`;
 }
 
-function visibleBlocksFunction(selector = undefined) {
+function visibleBlocksFunction(selector = undefined, options = {}) {
+  const allowFallbackText = options.fallbackText === true;
   return `() => {
     const explicitSelector = ${selector ? JSON.stringify(selector) : "null"};
+    const allowFallbackText = ${allowFallbackText ? "true" : "false"};
     const visible = (el) => {
       if (!(el instanceof Element)) return false;
       const rect = el.getBoundingClientRect();
@@ -8354,7 +8505,7 @@ function visibleBlocksFunction(selector = undefined) {
       }
       if (out.length >= 50) break;
     }
-    if (out.length === 0) {
+    if (out.length === 0 && allowFallbackText) {
       const root = explicitSelector ? queryAll(explicitSelector)[0] : document.body;
       const fallbackText = cleanLines(root?.innerText || root?.textContent || "", 1200);
       if (fallbackText) {
@@ -8372,6 +8523,224 @@ function visibleBlocksFunction(selector = undefined) {
     }
     return out;
   }`;
+}
+
+function visibleContentPostsFunction(selector = undefined) {
+  return `() => {
+    const explicitSelector = ${selector ? JSON.stringify(selector) : "null"};
+    const visible = (el) => {
+      if (!(el instanceof Element)) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 80 || rect.height < 24 || rect.bottom < -innerHeight * 0.25 || rect.top > innerHeight * 3) return false;
+      const style = getComputedStyle(el);
+      return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || "1") > 0;
+    };
+    const isBoilerplateLine = (line) => {
+      const value = String(line || "").trim();
+      if (!value) return true;
+      if (value.length > 220) return false;
+      return /^(like|comment|share|reply|send|save|follow|following|more|see more|view more|show more|hide|report|translate|copy link|not now|join|joined|visit|subscribe|notifications?|write a comment|add a comment|log in|sign up)$/i.test(value) ||
+        /^\\d+\\s*(likes?|comments?|shares?|replies?|views?)$/i.test(value) ||
+        /^[·•⋯…]+$/.test(value);
+    };
+    const cleanLines = (value, max = 1800) => {
+      const seen = new Set();
+      const lines = String(value || "")
+        .replace(/\\u00a0/g, " ")
+        .split("\\n")
+        .map((line) => line.replace(/\\s+/g, " ").trim())
+        .filter((line) => line.length > 1)
+        .filter((line) => {
+          const key = line.toLowerCase();
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      return lines.join("\\n").slice(0, max).trim();
+    };
+    const cssPath = (el) => {
+      if (!(el instanceof Element)) return "";
+      const tag = el.tagName.toLowerCase();
+      if (el.id) return tag + "#" + CSS.escape(el.id);
+      const role = el.getAttribute("role");
+      const ariaPos = el.getAttribute("aria-posinset");
+      const dataPagelet = el.getAttribute("data-pagelet");
+      const testId = el.getAttribute("data-testid");
+      if (dataPagelet) return tag + '[data-pagelet="' + dataPagelet + '"]';
+      if (testId) return tag + '[data-testid="' + testId + '"]';
+      if (role && ariaPos) return tag + '[role="' + role + '"][aria-posinset="' + ariaPos + '"]';
+      if (role) return tag + '[role="' + role + '"]';
+      const parent = el.parentElement;
+      if (!parent) return tag;
+      const siblings = [...parent.children].filter((child) => child.tagName === el.tagName);
+      const index = siblings.indexOf(el) + 1;
+      return tag + (siblings.length > 1 ? ":nth-of-type(" + index + ")" : "");
+    };
+    const queryAll = (query) => {
+      try {
+        return [...document.querySelectorAll(query)];
+      } catch {
+        return [];
+      }
+    };
+    const pushCandidates = (items, source) => {
+      for (const item of items) {
+        if (item instanceof Element) {
+          candidates.push({ el: item, source });
+        }
+      }
+    };
+    const timePattern = /\\b(?:just now|today|yesterday|\\d+\\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks|mo|month|months|y|yr|yrs|year|years)\\s*ago|\\d+[smhdw]|\\d{1,2}:\\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\s+\\d{1,2})\\b/i;
+    const extractParts = (text) => {
+      const lines = text.split("\\n").map((line) => line.trim()).filter(Boolean);
+      const contentLines = lines.filter((line) => !isBoilerplateLine(line));
+      const time = contentLines.find((line) => timePattern.test(line) && line.length <= 120);
+      const author = contentLines.find((line) => {
+        if (line === time) return false;
+        if (timePattern.test(line)) return false;
+        return line.length <= 100;
+      });
+      const ignored = new Set([author, time].filter(Boolean).map((line) => line.toLowerCase()));
+      let bodyLines = contentLines.filter((line) => !ignored.has(line.toLowerCase()));
+      if (bodyLines.length === 0) {
+        bodyLines = contentLines;
+      }
+      return {
+        author,
+        time,
+        body: bodyLines.join("\\n").slice(0, 1800).trim(),
+      };
+    };
+    const candidates = [];
+    if (explicitSelector) {
+      pushCandidates(queryAll(explicitSelector), "explicit");
+    } else {
+      pushCandidates(queryAll('[role="main"] [role="article"], main [role="article"], [role="article"], article'), "article");
+      pushCandidates(queryAll('[role="feed"] > *, [aria-posinset], [data-pagelet*="FeedUnit"], [data-pagelet*="feed_unit"]'), "feed");
+      pushCandidates(queryAll('main [data-testid*="post"], main [data-testid*="feed"], [role="main"] [data-testid*="post"], [role="main"] [data-testid*="feed"]'), "testid");
+      if (candidates.length < 4) {
+        pushCandidates(queryAll('main section, [role="main"] section, main [role="group"], [role="main"] [role="group"], main > div, [role="main"] > div'), "main-child");
+      }
+      if (candidates.length < 4) {
+        const roots = queryAll('main, [role="main"]').length ? queryAll('main, [role="main"]') : [document.body].filter(Boolean);
+        for (const root of roots) {
+          const blocks = [...root.querySelectorAll('article, section, [role="article"], [role="group"], [aria-posinset], div')]
+            .filter((el) => {
+              if (!visible(el)) return false;
+              const text = cleanLines(el.innerText || el.textContent || "", 2600);
+              if (text.length < 40 || text.length > 6000) return false;
+              const lines = text.split("\\n").filter((line) => !isBoilerplateLine(line));
+              if (lines.length < 2 && text.length < 120) return false;
+              return true;
+            })
+            .slice(0, 100);
+          pushCandidates(blocks, "visible-dom");
+        }
+      }
+    }
+    const unique = [];
+    const seenElements = new Set();
+    for (const candidate of candidates) {
+      if (seenElements.has(candidate.el)) continue;
+      seenElements.add(candidate.el);
+      unique.push(candidate);
+    }
+    const entries = unique
+      .filter((candidate) => visible(candidate.el))
+      .map((candidate) => {
+        const el = candidate.el;
+        const rect = el.getBoundingClientRect();
+        const text = cleanLines(el.innerText || el.textContent || el.getAttribute("aria-label") || "", 2400);
+        const parts = extractParts(text);
+        return {
+          tag: el.tagName.toLowerCase(),
+          role: el.getAttribute("role") || undefined,
+          source: candidate.source,
+          selector: cssPath(el),
+          top: Math.round(rect.top + scrollY),
+          left: Math.round(rect.left + scrollX),
+          height: Math.round(rect.height),
+          author: parts.author,
+          time: parts.time,
+          body: parts.body || text,
+          text,
+        };
+      })
+      .filter((entry) => entry.text.length >= 30 && (entry.body || entry.text).length >= 20)
+      .sort((a, b) => a.top - b.top || a.height - b.height || a.left - b.left || a.text.length - b.text.length);
+    const out = [];
+    for (const entry of entries) {
+      const normalized = entry.text.toLowerCase();
+      const duplicate = out.some((previous) => {
+        const previousText = previous.text.toLowerCase();
+        return previousText === normalized ||
+          (normalized.length > 80 && previousText.includes(normalized)) ||
+          (previousText.length > 80 && normalized.includes(previousText));
+      });
+      if (!duplicate) {
+        out.push(entry);
+      }
+      if (out.length >= 30) break;
+    }
+    return out;
+  }`;
+}
+
+function linkReadOptionsFromFlags(flags = {}) {
+  return {
+    filter: normalizeOptionalString(flags.filter),
+    textFilter: normalizeOptionalString(flags.textFilter),
+    hrefFilter: normalizeOptionalString(flags.hrefFilter),
+    visible: Boolean(flags.visible),
+    limit: Math.min(parsePositiveInteger(flags.limit ?? defaultLimitForReadCommand("links"), "limit"), 2000),
+  };
+}
+
+function linkCollectorScript(rootExpression, flags = {}) {
+  const options = linkReadOptionsFromFlags(flags);
+  return `{
+    const root = ${rootExpression};
+    if (!root) throw new Error("Link root not found");
+    const options = ${JSON.stringify(options)};
+    const lower = (value) => String(value || "").toLowerCase();
+    const visible = (el) => {
+      if (!(el instanceof Element)) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0 || rect.bottom < 0 || rect.top > innerHeight * 2) return false;
+      const style = getComputedStyle(el);
+      return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || "1") > 0;
+    };
+    const cleanText = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const anchors = [...root.querySelectorAll("a[href]")];
+    const out = [];
+    const seen = new Set();
+    const generalFilter = lower(options.filter);
+    const textFilter = lower(options.textFilter);
+    const hrefFilter = lower(options.hrefFilter);
+    for (const anchor of anchors) {
+      if (options.visible && !visible(anchor)) continue;
+      const text = cleanText(anchor.innerText || anchor.textContent || anchor.getAttribute("aria-label") || anchor.getAttribute("title"));
+      const href = anchor.href || anchor.getAttribute("href") || "";
+      const combined = lower(text + " " + href);
+      if (generalFilter && !combined.includes(generalFilter)) continue;
+      if (textFilter && !lower(text).includes(textFilter)) continue;
+      if (hrefFilter && !lower(href).includes(hrefFilter)) continue;
+      const key = lower(text + "\\n" + href);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ text, href });
+      if (options.limit > 0 && out.length >= options.limit) break;
+    }
+    return out;
+  }`;
+}
+
+function linksReadFunction(flags = {}) {
+  return `() => ${linkCollectorScript("document", flags)}`;
+}
+
+function linkReadBodyFunction(flags = {}) {
+  return `(el) => ${linkCollectorScript("el", flags)}`;
 }
 
 function parseJsonArg(raw, label) {
@@ -8575,7 +8944,16 @@ function withScreenshotCaptureInfo(result, info) {
 }
 
 function extractJsonFromToolText(text) {
-  const match = String(text).match(/```json\n([\s\S]*?)\n```/);
+  const raw = String(text ?? "");
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      // Fall through to fenced JSON extraction.
+    }
+  }
+  const match = raw.match(/```json\n([\s\S]*?)\n```/);
   if (!match) return null;
   try {
     return JSON.parse(match[1]);
@@ -8965,22 +9343,76 @@ function waitForReadyStateFunction(targetState, timeoutMs) {
   }`;
 }
 
-function waitForTextFunction(text, timeoutMs) {
+function waitForSelectorFunction(selector, timeoutMs, options = {}) {
   return `async () => {
-    const needle = ${JSON.stringify(String(text ?? ""))};
+    const selector = ${JSON.stringify(String(selector ?? ""))};
+    const requireVisible = ${options.visible ? "true" : "false"};
     const deadline = Date.now() + ${timeoutMs};
-    const readText = () => {
-      const root = document.body || document.documentElement;
-      return String(root?.innerText || root?.textContent || "");
+    const visible = (el) => {
+      if (!(el instanceof Element)) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const style = getComputedStyle(el);
+      return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || "1") > 0;
     };
     while (Date.now() <= deadline) {
-      const haystack = readText();
-      if (haystack.includes(needle)) {
-        return { matched: needle, readyState: document.readyState, url: location.href };
+      const el = document.querySelector(selector);
+      if (el && (!requireVisible || visible(el))) {
+        const rect = el.getBoundingClientRect();
+        return {
+          matched: selector,
+          visible: visible(el),
+          tag: el.tagName.toLowerCase(),
+          text: String(el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 160) || undefined,
+          top: Math.round(rect.top + scrollY),
+          readyState: document.readyState,
+          url: location.href,
+        };
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    throw new Error("Timed out waiting for text: " + needle);
+    throw new Error("Timed out waiting for " + (requireVisible ? "visible selector: " : "selector: ") + selector);
+  }`;
+}
+
+function waitForTextFunction(text, timeoutMs, options = {}) {
+  return `async () => {
+    const needle = ${JSON.stringify(String(text ?? ""))};
+    const selector = ${options.selector ? JSON.stringify(String(options.selector)) : "null"};
+    const requireVisible = ${options.visible ? "true" : "false"};
+    const deadline = Date.now() + ${timeoutMs};
+    const visible = (el) => {
+      if (!(el instanceof Element)) return false;
+      if (el === document.body || el === document.documentElement) return true;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const style = getComputedStyle(el);
+      return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || "1") > 0;
+    };
+    const roots = () => {
+      if (selector) {
+        const root = document.querySelector(selector);
+        return root ? [root] : [];
+      }
+      return [document.body || document.documentElement].filter(Boolean);
+    };
+    while (Date.now() <= deadline) {
+      for (const root of roots()) {
+        if (requireVisible && !visible(root)) continue;
+        const haystack = String((requireVisible ? root.innerText : (root.innerText || root.textContent)) || "");
+        if (haystack.includes(needle)) {
+          return {
+            matched: needle,
+            selector: selector || undefined,
+            visible: requireVisible ? true : undefined,
+            readyState: document.readyState,
+            url: location.href,
+          };
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("Timed out waiting for " + (requireVisible ? "visible text: " : "text: ") + needle);
   }`;
 }
 
@@ -9175,6 +9607,26 @@ async function runSelfTest() {
 
   const truncated = truncateText("abcdef", 3);
   assertSelfTest(truncated.truncated && truncated.text.includes("abc"), "truncateText truncates");
+  assertSelfTest(extractJsonFromToolText('[{"text":"one"}]')?.[0]?.text === "one", "plain JSON tool text is parsed");
+  const rawCompacted = await formatRawResult("eval", { text: "abcdef" }, { maxChars: "3", raw: true });
+  assertSelfTest(rawCompacted.text.includes("TRUNCATED raw output"), "raw output is capped by max-chars");
+
+  assertSelfTest(
+    visibleBlocksFunction(undefined, { fallbackText: false }).includes("allowFallbackText = false"),
+    "visible blocks can disable fallback text",
+  );
+  assertSelfTest(
+    visibleBlocksFunction(undefined, { fallbackText: true }).includes("allowFallbackText = true"),
+    "visible blocks can opt into fallback text",
+  );
+  new Function(`return ${visibleContentPostsFunction()}`)();
+  new Function(`return ${linksReadFunction({ filter: "docs", limit: "3", visible: true })}`)();
+  new Function(`return ${linkReadBodyFunction({ textFilter: "docs", hrefFilter: "guide" })}`)();
+  new Function(`return ${waitForSelectorFunction("main", 1000, { visible: true })}`)();
+  assertSelfTest(
+    waitForTextFunction("Example Group", 1000, { visible: true, selector: "main" }).includes("visible text"),
+    "wait text supports visible scoped reads",
+  );
 
   const hidden = new Set();
   const first = compactLineResult(
@@ -9214,6 +9666,13 @@ async function runSelfTest() {
   const parsedProfileOpenSelect = parseArgv(["open", "https://example.com", "--profile", "chrome:Profile 4", "--select", "--timeout", "15000"]);
   assertSelfTest(parsedProfileOpenSelect.flags.select === true, "parser handles profile open select flag");
   assertSelfTest(parsedProfileOpenSelect.flags.timeout === "15000", "parser preserves profile open select timeout");
+  const parsedLinkFilters = parseArgv(["links", "--text-filter", "OpenClaw", "--href-filter=groups", "--visible", "--limit", "3"]);
+  assertSelfTest(parsedLinkFilters.flags.textFilter === "OpenClaw", "parser handles links text-filter flag");
+  assertSelfTest(parsedLinkFilters.flags.hrefFilter === "groups", "parser handles links href-filter flag");
+  assertSelfTest(parsedLinkFilters.flags.visible === true, "parser handles visible flag");
+  const parsedSelectorWait = parseArgv(["wait", "--selector", "main", "--visible", "--timeout", "1500"]);
+  assertSelfTest(parsedSelectorWait.flags.selector === "main", "parser handles selector wait flag");
+  assertSelfTest(parsedSelectorWait.flags.visible === true, "parser handles visible wait flag");
   const parsedAnonymousOpen = parseArgv(["open", "https://example.com", "--anonymous", "--select"]);
   assertSelfTest(parsedAnonymousOpen.flags.anonymous === true, "parser handles anonymous flag");
   assertSelfTest(parsedAnonymousOpen.flags.select === true, "parser handles anonymous select flag");
@@ -9505,6 +9964,18 @@ async function runSelfTest() {
   assertSelfTest(
     requiredCapabilitiesForPayload({ command: "chain", args: ['[["wait","Example Group"],["blocks","--limit","5"]]'] }).has("visible-blocks"),
     "daemon capability check inspects chain steps",
+  );
+  assertSelfTest(
+    requiredCapabilitiesForPayload({ command: "chain", args: ['[["wait","Example Group","--visible"],["posts","--limit","1"]]'] }).has("content-posts"),
+    "daemon capability check inspects compact post chain steps",
+  );
+  assertSelfTest(
+    requiredCapabilitiesForPayload({ command: "wait", args: [], flags: { selector: "main", visible: true } }).has("visible-wait"),
+    "daemon capability check covers visible selector waits",
+  );
+  assertSelfTest(
+    requiredCapabilitiesForPayload({ command: "js", args: ["document.body.innerText"], flags: { raw: true } }).has("bounded-raw-output"),
+    "daemon capability check covers bounded raw eval output",
   );
   assertSelfTestThrows(
     () => assertDaemonSupportsPayload({ pid: 1, session: "old" }, { command: "blocks", args: [] }),
