@@ -1634,6 +1634,46 @@ function shouldReuseExistingRealProfileSession(flags = {}) {
   return true;
 }
 
+function realProfileEndpointFromFlags(flags = {}) {
+  return (
+    flags.browserUrl ??
+    flags.cdpUrl ??
+    process.env.REALBROWSER_BROWSER_URL ??
+    process.env.REALBROWSER_CDP_URL ??
+    ""
+  ).trim();
+}
+
+function shouldUseRealProfileAttachLock(flags = {}) {
+  if (desiredMode(flags) !== AUTO_MODE) {
+    return false;
+  }
+  return (
+    shouldReuseExistingRealProfileSession(flags) || Boolean(realProfileEndpointFromFlags(flags))
+  );
+}
+
+function applyEndpointScopedRealProfileSession(flags = {}) {
+  if (desiredMode(flags) !== AUTO_MODE) {
+    return;
+  }
+  if (
+    flags.session ||
+    flags.stateFile ||
+    flags.handle ||
+    process.env.REALBROWSER_SESSION ||
+    process.env.REALBROWSER_STATE_FILE ||
+    process.env.REALBROWSER_HANDLE
+  ) {
+    return;
+  }
+  const endpoint = realProfileEndpointFromFlags(flags);
+  if (!endpoint) {
+    return;
+  }
+  flags.session = autoSessionNameForBrowserTab({ browserUrl: endpoint });
+}
+
 async function reuseExistingRealProfileSession(flags = {}) {
   if (!shouldReuseExistingRealProfileSession(flags)) {
     return null;
@@ -1665,7 +1705,7 @@ async function reuseExistingRealProfileSession(flags = {}) {
 }
 
 async function ensureDaemon(flags = {}) {
-  if (!shouldReuseExistingRealProfileSession(flags)) {
+  if (!shouldUseRealProfileAttachLock(flags)) {
     return await ensureDaemonUnlocked(flags);
   }
   const release = await acquireLock(REAL_PROFILE_ATTACH_LOCK_FILE);
@@ -2083,8 +2123,9 @@ async function runCli() {
   }
 
   await applyHandleToFlags(command, flags);
-  await reuseExistingRealProfileSession(flags);
   await resolveProfileForAutomation(flags);
+  applyEndpointScopedRealProfileSession(flags);
+  await reuseExistingRealProfileSession(flags);
 
   const state = await ensureDaemon(flags);
   const response = await daemonRpc(state, daemonPayloadForCommand(command, args, flags, state));
@@ -2207,8 +2248,9 @@ function formatClaimText(handle) {
 
 async function claimPageHandle(args, flags = {}) {
   const targetUrl = args[0] ?? "";
-  await reuseExistingRealProfileSession(flags);
   await resolveProfileForAutomation(flags);
+  applyEndpointScopedRealProfileSession(flags);
+  await reuseExistingRealProfileSession(flags);
   const state = await ensureDaemon(flags);
   if (targetUrl) {
     const openFlags = { ...flags, select: true };
@@ -2318,8 +2360,9 @@ async function mobileScreenshot(args, flags = {}) {
   const outputPath = path.resolve(args[1] ?? defaultMobileScreenshotPath());
   const viewport = parseViewportSize(flags.viewport ?? "390x844");
   await applyHandleToFlags("mobile-screenshot", flags);
-  await reuseExistingRealProfileSession(flags);
   await resolveProfileForAutomation(flags);
+  applyEndpointScopedRealProfileSession(flags);
+  await reuseExistingRealProfileSession(flags);
   const state = await ensureDaemon(flags);
 
   let page = null;
@@ -2950,6 +2993,10 @@ async function openUrlInBrowserProfile(url, profileQuery, flags = {}) {
   if (flags.select && !profile.devtoolsHttpUrl && !profile.devtoolsWsEndpoint) {
     throw new Error(`Profile ${profile.id} is not exposing a DevTools endpoint, so realbrowser cannot auto-select the new tab. Enable Chrome remote debugging in that profile, or run without --select to only open the tab.`);
   }
+  const existingSessionOpen = await openUrlInRunningProfileSession(profile, url, flags);
+  if (existingSessionOpen) {
+    return existingSessionOpen;
+  }
   const launch = await launchBrowserProfile(profile, url, flags);
   const selected = flags.select
     ? await waitAndSelectBrowserTab(url, {
@@ -2970,6 +3017,113 @@ async function openUrlInBrowserProfile(url, profileQuery, flags = {}) {
     profile: publicProfileInfo(profile),
     launch,
     selected,
+  };
+}
+
+function endpointForBrowserProfile(profile) {
+  return browserTabEndpoints([profile], {})[0] ?? null;
+}
+
+function comparablePageUrl(value) {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return "";
+  }
+  try {
+    const parsed = new URL(text);
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/u, "");
+  } catch {
+    return text.replace(/\/$/u, "");
+  }
+}
+
+function pageUrlMatchesRequest(pageUrl, requestedUrl) {
+  const page = comparablePageUrl(pageUrl);
+  const requested = comparablePageUrl(requestedUrl);
+  return Boolean(page && requested && page === requested);
+}
+
+function newestPage(pages) {
+  return [...pages].sort((a, b) => Number(a.id) - Number(b.id)).at(-1) ?? null;
+}
+
+function openedPageCandidate(beforePages, afterPages, requestedUrl) {
+  const beforeIds = new Set(beforePages.map((page) => String(page.id)));
+  const newPages = afterPages.filter((page) => !beforeIds.has(String(page.id)));
+  const matchingNewPages = newPages.filter((page) => pageUrlMatchesRequest(page.url, requestedUrl));
+  if (matchingNewPages.length > 0) {
+    return newestPage(matchingNewPages);
+  }
+  if (newPages.length === 1) {
+    return newPages[0];
+  }
+  const matchingPages = afterPages.filter((page) => pageUrlMatchesRequest(page.url, requestedUrl));
+  return newestPage(matchingPages);
+}
+
+async function openUrlInRunningProfileSession(profile, url, flags = {}) {
+  const endpoint = endpointForBrowserProfile(profile);
+  if (!endpoint) {
+    return null;
+  }
+  const endpointSession = await runningEndpointSession(endpoint);
+  if (!endpointSession) {
+    return null;
+  }
+  const beforePages = parseListPagesResult(await daemonRpc(endpointSession.state, {
+    command: "tabs",
+    args: [],
+    flags: {},
+  }));
+  const openFlags = {
+    ...(flags.timeout ? { timeout: flags.timeout } : {}),
+    front: Boolean(flags.front),
+    select: Boolean(flags.select),
+  };
+  const opened = await daemonRpc(endpointSession.state, {
+    command: "tool",
+    args: backgroundNewPageArgs(url, openFlags),
+    flags: openFlags,
+  });
+  const afterPages = parseListPagesResult(await daemonRpc(endpointSession.state, {
+    command: "tabs",
+    args: [],
+    flags: {},
+  }));
+  const page = openedPageCandidate(beforePages, afterPages, url);
+  const selected = flags.select && page
+    ? await daemonRpc(endpointSession.state, {
+      command: "select",
+      args: [String(page.id)],
+      flags: { front: Boolean(flags.front) },
+    })
+    : null;
+  if (flags.select && shouldActivateSession(flags)) {
+    await writeActiveSessionName(endpointSession.name);
+  }
+  return {
+    text: [
+      `Opened ${url} in running realbrowser session ${endpointSession.name} for ${profile.browserName} profile ${profile.profileDirectory} (${profile.displayName}).`,
+      page ? `Page: ${page.id} ${page.url}` : "Opened page, but could not identify the new page id. Run `realbrowser tabs` to select it manually.",
+      selected?.text,
+      flags.select ? `Activated session: ${endpointSession.name}` : "",
+      profile.devtoolsHttpUrl
+        ? `Debug endpoint reused: ${profile.devtoolsHttpUrl}${profile.devtoolsScope === "browser" ? " (browser-level)" : ""}.`
+        : "",
+    ].filter(Boolean).join("\n"),
+    quiet: page ? String(page.id) : endpointSession.name,
+    profile: publicProfileInfo(profile),
+    launch: {
+      command: "realbrowser-session",
+      args: ["new_page", url],
+      session: endpointSession.name,
+      pid: endpointSession.pid,
+    },
+    opened,
+    page,
+    selected,
+    session: endpointSession.name,
   };
 }
 
@@ -2996,7 +3150,14 @@ async function findBrowserTabs(options = {}) {
   const profiles = await listBrowserProfiles({ browser: options.browser });
   const endpoints = browserTabEndpoints(profiles, options);
   const tabs = [];
+  const endpointSessionNames = new Set();
   for (const endpoint of endpoints) {
+    const endpointSession = await runningEndpointSession(endpoint);
+    if (endpointSession) {
+      endpointSessionNames.add(endpointSession.name);
+      tabs.push(...await tabsForKnownSession(endpointSession, { endpoint }));
+      continue;
+    }
     const targets = await fetchCdpTargetList(endpoint).catch(() => []);
     for (const target of targets) {
       if (target?.type && target.type !== "page") {
@@ -3017,9 +3178,11 @@ async function findBrowserTabs(options = {}) {
     }
   }
   if (options.allSessions || options.session || options.stateFile) {
-    tabs.push(...await findSessionTabs(options));
+    tabs.push(...await findSessionTabs(options, { skipSessionNames: endpointSessionNames }));
   }
-  const filtered = options.query ? tabs.filter((tab) => browserTabMatchesQuery(tab, options.query)) : tabs;
+  const filtered = options.query
+    ? dedupeBrowserTabs(tabs).filter((tab) => browserTabMatchesQuery(tab, options.query))
+    : dedupeBrowserTabs(tabs);
   return filtered.sort((a, b) => (
     (a.sessionName || "").localeCompare(b.sessionName || "") ||
     (a.url || "").localeCompare(b.url || "") ||
@@ -3027,10 +3190,86 @@ async function findBrowserTabs(options = {}) {
   ));
 }
 
-async function findSessionTabs(options = {}) {
+async function runningSessionByName(name) {
+  const normalizedName = String(name ?? "").trim();
+  if (!normalizedName) {
+    return null;
+  }
+  const stateFile = stateFileForSessionName(normalizedName);
+  const state = await readJson(stateFile);
+  if (!state || !isProcessAlive(state.pid)) {
+    return null;
+  }
+  const healthBody = await health(state).catch(() => null);
+  if (!healthBody?.ok) {
+    return null;
+  }
+  return {
+    name: state.session ?? normalizedName,
+    stateFile,
+    pid: state.pid,
+    startedAt: state.startedAt,
+    mode: healthBody.mode ?? modeFromState(state) ?? "unknown",
+    noFallback: healthBody.noFallback ?? noFallbackFromState(state),
+    mcpConnected: Boolean(healthBody.mcpConnected),
+    active: false,
+    state,
+  };
+}
+
+async function runningEndpointSession(endpoint) {
+  const sessionName = autoSessionNameForBrowserTab({
+    browserUrl: endpoint.wsEndpoint ?? endpoint.httpUrl,
+  });
+  const session = await runningSessionByName(sessionName);
+  if (!session || !isRealProfileSessionMode(session.mode)) {
+    return null;
+  }
+  return session;
+}
+
+async function tabsForKnownSession(session, context = {}) {
+  const pagesResult = await daemonRpc(session.state, {
+    command: "tabs",
+    args: [],
+    flags: {},
+  }).catch(() => null);
+  if (!pagesResult) {
+    return [];
+  }
+  const endpoint = context.endpoint ?? null;
+  const pages = parseListPagesResult(pagesResult);
+  return pages.map((page) => ({
+    id: `${session.name}:${page.id}`,
+    targetId: String(page.id),
+    browserUrl: endpoint?.httpUrl ?? `session:${session.name}`,
+    browserWsEndpoint: endpoint?.wsEndpoint ?? null,
+    endpointHttpUrl: endpoint?.httpUrl ?? null,
+    webSocketDebuggerUrl: null,
+    url: page.url,
+    title: page.selected ? "(selected)" : "",
+    source: "session",
+    sessionName: session.name,
+    stateFile: session.stateFile,
+    mode: session.mode,
+    browserNames: endpoint?.browserNames ?? [],
+    profileIds: endpoint?.profileIds ?? [],
+    profileNames: [
+      ...(endpoint?.profileNames ?? []),
+      `session:${session.name}`,
+      session.mode,
+    ].filter(Boolean),
+  }));
+}
+
+async function findSessionTabs(options = {}, context = {}) {
   const sessionFilter = String(options.session ?? "").trim();
   const stateFileFilter = options.stateFile ? path.resolve(options.stateFile) : "";
+  const skipSessionNames = context.skipSessionNames ?? new Set();
   const sessions = (await listKnownSessions(options)).filter((session) => {
+    if (skipSessionNames.has(session.name)) {
+      return false;
+    }
     if (options.allSessions || (!sessionFilter && !stateFileFilter)) {
       return true;
     }
@@ -3041,31 +3280,41 @@ async function findSessionTabs(options = {}) {
   });
   const tabs = [];
   for (const session of sessions) {
-    const pagesResult = await daemonRpc(session.state, { command: "tabs", args: [], flags: {} }).catch(() => null);
-    if (!pagesResult) {
-      continue;
-    }
-    const pages = parseListPagesResult(pagesResult);
-    for (const page of pages) {
-      tabs.push({
-        id: `${session.name}:${page.id}`,
-        targetId: String(page.id),
-        browserUrl: `session:${session.name}`,
-        browserWsEndpoint: null,
-        webSocketDebuggerUrl: null,
-        url: page.url,
-        title: page.selected ? "(selected)" : "",
-        source: "session",
-        sessionName: session.name,
-        stateFile: session.stateFile,
-        mode: session.mode,
-        browserNames: [],
-        profileIds: [],
-        profileNames: [`session:${session.name}`, session.mode].filter(Boolean),
-      });
-    }
+    tabs.push(...await tabsForKnownSession(session));
   }
   return tabs;
+}
+
+function browserTabDedupeKey(tab) {
+  const endpoint = normalizeCdpHttpUrl(tab.endpointHttpUrl ?? (
+    tab.source === "session" ? "" : tab.browserUrl
+  ));
+  if (!endpoint || !tab.url) {
+    return "";
+  }
+  return `${endpoint}\n${tab.url}`;
+}
+
+function dedupeBrowserTabs(tabs) {
+  const byKey = new Map();
+  const out = [];
+  for (const tab of tabs) {
+    const key = browserTabDedupeKey(tab);
+    if (!key) {
+      out.push(tab);
+      continue;
+    }
+    const existingIndex = byKey.get(key);
+    if (existingIndex === undefined) {
+      byKey.set(key, out.length);
+      out.push(tab);
+      continue;
+    }
+    if (out[existingIndex]?.source !== "session" && tab.source === "session") {
+      out[existingIndex] = tab;
+    }
+  }
+  return out;
 }
 
 function browserTabEndpoints(profiles, options = {}) {
@@ -3153,24 +3402,27 @@ function normalizeCdpWsEndpoint(value) {
 }
 
 async function fetchCdpTargetList(endpoint) {
-  if (endpoint.wsEndpoint) {
-    const client = new CdpClient(endpoint.wsEndpoint);
-    await client.connect();
-    try {
-      const result = await client.request("Target.getTargets", {});
-      return Array.isArray(result?.targetInfos) ? result.targetInfos : [];
-    } finally {
-      client.close();
+  if (endpoint.httpUrl) {
+    const response = await fetch(`${endpoint.httpUrl.replace(/\/$/u, "")}/json/list`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!response.ok) {
+      throw new Error(`CDP target list failed for ${endpoint.httpUrl}: HTTP ${response.status}`);
     }
+    const body = await response.json();
+    return Array.isArray(body) ? body : [];
   }
-  const response = await fetch(`${endpoint.httpUrl.replace(/\/$/u, "")}/json/list`, {
-    signal: AbortSignal.timeout(2000),
-  });
-  if (!response.ok) {
-    throw new Error(`CDP target list failed for ${endpoint.httpUrl}: HTTP ${response.status}`);
+  if (!endpoint.wsEndpoint) {
+    return [];
   }
-  const body = await response.json();
-  return Array.isArray(body) ? body : [];
+  const client = new CdpClient(endpoint.wsEndpoint);
+  await client.connect();
+  try {
+    const result = await client.request("Target.getTargets", {});
+    return Array.isArray(result?.targetInfos) ? result.targetInfos : [];
+  } finally {
+    client.close();
+  }
 }
 
 function browserTabMatchesQuery(tab, query) {
@@ -3217,6 +3469,31 @@ function selectBrowserTabCandidate(tabs, query) {
   return null;
 }
 
+function isAbsoluteUrl(value) {
+  try {
+    const parsed = new URL(String(value ?? ""));
+    return Boolean(parsed.protocol && parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function pageCandidatesForBrowserTab(pages, tab, query) {
+  const idMatches = pages.filter((page) => String(page.id) === String(tab.targetId));
+  if (idMatches.length > 0) {
+    return idMatches;
+  }
+  const exactUrlMatches = pages.filter((page) => page.url === tab.url);
+  if (exactUrlMatches.length > 0) {
+    return exactUrlMatches;
+  }
+  const queryText = String(query ?? "").trim();
+  if (!queryText || isAbsoluteUrl(queryText)) {
+    return [];
+  }
+  return pages.filter((page) => page.url.includes(queryText));
+}
+
 async function selectBrowserTabForAutomation(query, flags = {}) {
   const tabs = await findBrowserTabs({
     query,
@@ -3244,7 +3521,7 @@ async function selectBrowserTabForAutomation(query, flags = {}) {
   const state = await ensureDaemon(attachFlags);
   const pagesResult = await daemonRpc(state, { command: "tabs", args: [], flags: {} });
   const pages = parseListPagesResult(pagesResult);
-  const candidates = pages.filter((page) => page.url === tab.url || page.url.includes(query) || tab.url.includes(page.url));
+  const candidates = pageCandidatesForBrowserTab(pages, tab, query);
   if (candidates.length !== 1) {
     return {
       text: [
@@ -3306,12 +3583,7 @@ async function selectSessionTabForAutomation(tab, query, flags = {}) {
   await health(state);
   const pagesResult = await daemonRpc(state, { command: "tabs", args: [], flags: {} });
   const pages = parseListPagesResult(pagesResult);
-  const candidates = pages.filter((page) =>
-    String(page.id) === String(tab.targetId) ||
-    page.url === tab.url ||
-    page.url.includes(query) ||
-    tab.url.includes(page.url)
-  );
+  const candidates = pageCandidatesForBrowserTab(pages, tab, query);
   if (candidates.length !== 1) {
     return {
       text: [
@@ -3388,6 +3660,7 @@ function publicBrowserTabInfo(tab) {
     targetId: tab.targetId,
     browserUrl: tab.browserUrl,
     browserWsEndpoint: tab.browserWsEndpoint,
+    endpointHttpUrl: tab.endpointHttpUrl,
     webSocketDebuggerUrl: tab.webSocketDebuggerUrl,
     title: tab.title,
     url: tab.url,
@@ -3421,11 +3694,11 @@ async function launchBrowserProfile(profile, url, flags = {}) {
   const profileArg = `--profile-directory=${profile.profileDirectory}`;
   const modeArgs = flags.anonymous ? ["--incognito"] : ["--new-tab"];
   if (process.platform === "darwin") {
-    const executable = await firstExistingPath(macBrowserExecutableCandidates(profile.source));
-    if (executable) {
-      return await spawnDetached(executable, [profileArg, ...modeArgs, url]);
-    }
-    return await spawnDetached("open", ["-a", profile.source.appName, "--args", profileArg, ...modeArgs, url]);
+    return await spawnDetached(...macBrowserProfileLaunchCommand(profile, [
+      profileArg,
+      ...modeArgs,
+      url,
+    ], flags));
   }
   if (process.platform === "win32") {
     const executable = await firstExistingPath(windowsBrowserExecutableCandidates(profile.source)) ??
@@ -3446,6 +3719,17 @@ async function launchBrowserProfile(profile, url, flags = {}) {
     throw new Error(`Cannot find a launcher for ${profile.browserName}. Open the browser manually with ${profileArg}, or pass --browser-url after enabling remote debugging.`);
   }
   return await spawnDetached(command, [profileArg, ...modeArgs, url]);
+}
+
+function macBrowserProfileLaunchCommand(profile, args, flags = {}) {
+  const openArgs = [
+    ...(flags.front ? [] : ["-g"]),
+    "-a",
+    profile.source.appName,
+    "--args",
+    ...args,
+  ];
+  return ["open", openArgs];
 }
 
 function publicProfileInfo(profile) {
@@ -3731,7 +4015,7 @@ function backgroundNewPageArgs(url, flags = {}) {
     "new_page",
     JSON.stringify({
       url,
-      background: !(flags.front || flags.select),
+      background: !flags.front,
       ...(flags.timeout ? { timeout: parsePositiveInteger(flags.timeout, "timeout") } : {}),
     }),
   ];
@@ -4927,12 +5211,12 @@ class BrowserDaemon {
             url,
           });
         }
-        return await this.selectPage(pageId, Boolean(flags.front || flags.select));
+        return await this.selectPage(pageId, Boolean(flags.front));
       }
     }
     return await this.callTool("new_page", {
       url,
-      background: !(flags.front || flags.select),
+      background: !flags.front,
     });
   }
 
@@ -4971,6 +5255,26 @@ class BrowserDaemon {
     return afterPages.find((page) => page.selected)?.id ?? afterPages.at(-1)?.id ?? null;
   }
 
+  async openPageForAutomation(url, flags = {}) {
+    const beforePages = parseListPagesResult(await this.callTool("list_pages", {}));
+    const opened = await this.callTool("new_page", {
+      url,
+      background: !flags.front,
+    });
+    const openedPages = parseListPagesResult(opened);
+    const openedPage = openedPageCandidate(beforePages, openedPages, url);
+    if (openedPage) {
+      return openedPage.id;
+    }
+    await sleep(250);
+    const afterPages = parseListPagesResult(await this.callTool("list_pages", {}));
+    const afterPage = openedPageCandidate(beforePages, afterPages, url);
+    if (afterPage) {
+      return afterPage.id;
+    }
+    throw new Error(`Opened ${url}, but could not identify the new page id.`);
+  }
+
   async handleCaptureConsole(args, flags = {}) {
     const targetUrl = args[0];
     const durationMs = parsePositiveInteger(flags.duration ?? String(DEFAULT_CONSOLE_CAPTURE_DURATION_MS), "duration");
@@ -4983,8 +5287,7 @@ class BrowserDaemon {
         ? await this.resolveAnonymousNavigationPageId(flags)
         : null;
       if (pageId === null || pageId === undefined) {
-        await this.callTool("new_page", { url: "about:blank", background: false });
-        pageId = await this.resolvePageId(flags);
+        pageId = await this.openPageForAutomation("about:blank", flags);
       }
       await this.callTool("navigate_page", {
         pageId,
@@ -5160,8 +5463,7 @@ class BrowserDaemon {
         ? await this.resolveAnonymousNavigationPageId(flags)
         : null;
       if (pageId === null || pageId === undefined) {
-        await this.callTool("new_page", { url: "about:blank", background: false });
-        pageId = await this.resolvePageId(flags);
+        pageId = await this.openPageForAutomation("about:blank", flags);
       }
       await this.evaluateFunction(clearPerformanceEntriesFunction(), { ...flags, page: String(pageId) }).catch(() => null);
       await this.callTool("navigate_page", {
@@ -7743,6 +8045,8 @@ async function runSelfTest() {
   assertSelfTest(parsedBackgroundOpen.flags.front !== true, "open defaults to background mode");
   const parsedForegroundOpen = parseArgv(["open", "https://example.com", "--front"]);
   assertSelfTest(parsedForegroundOpen.flags.front === true, "open --front opts into focus");
+  const parsedSelectOpen = parseArgv(["open", "https://example.com", "--select"]);
+  assertSelfTest(parsedSelectOpen.flags.select === true, "open --select selects for automation");
   const parsedCleanupDetach = parseArgv(["detach", "--cleanup-remote-debugging"]);
   assertSelfTest(parsedCleanupDetach.flags.cleanupRemoteDebugging === true, "parser handles cleanup remote debugging flag");
   const parsedNoFallbackOpen = parseArgv(["open", "https://example.com", "--no-fallback"]);
@@ -7837,6 +8141,59 @@ async function runSelfTest() {
   assertSelfTest(parsedForceSession.flags.force === true, "parser handles force flag");
   assertSelfTest(path.basename(sessionStateFile("tom anon")) === "tom%20anon.json", "session names map to encoded state files");
   assertSelfTest(autoSessionNameForBrowserTab({ browserUrl: "http://127.0.0.1:9222" }) === "cdp-127-0-0-1-9222", "CDP endpoints map to stable automatic session names");
+  assertSelfTest(
+    shouldUseRealProfileAttachLock({ browserUrl: "http://127.0.0.1:9222" }) === true,
+    "explicit browser endpoints use the real-profile attach lock",
+  );
+  const endpointScopedFlags = { browserUrl: "http://127.0.0.1:9222" };
+  applyEndpointScopedRealProfileSession(endpointScopedFlags);
+  assertSelfTest(
+    endpointScopedFlags.session === "cdp-127-0-0-1-9222",
+    "explicit browser endpoints map to endpoint-scoped sessions",
+  );
+  const explicitSessionEndpointFlags = {
+    browserUrl: "http://127.0.0.1:9222",
+    session: "manual",
+  };
+  applyEndpointScopedRealProfileSession(explicitSessionEndpointFlags);
+  assertSelfTest(
+    explicitSessionEndpointFlags.session === "manual",
+    "endpoint-scoped sessions respect explicit sessions",
+  );
+  const dedupedBrowserTabs = dedupeBrowserTabs([
+    {
+      id: "1:abc",
+      browserUrl: "http://127.0.0.1:9222",
+      url: "https://example.com/",
+    },
+    {
+      id: "cdp-127-0-0-1-9222:3",
+      source: "session",
+      sessionName: "cdp-127-0-0-1-9222",
+      endpointHttpUrl: "http://127.0.0.1:9222",
+      browserUrl: "session:cdp-127-0-0-1-9222",
+      url: "https://example.com/",
+    },
+  ]);
+  assertSelfTest(
+    dedupedBrowserTabs.length === 1 && dedupedBrowserTabs[0].source === "session",
+    "browser tab discovery prefers existing endpoint sessions over duplicate CDP rows",
+  );
+  const exactUrlPageCandidates = pageCandidatesForBrowserTab(
+    [
+      { id: 1, url: "https://www.facebook.com/" },
+      { id: 2, url: "https://www.facebook.com/search/groups/?q=OpenClaw%20VN" },
+    ],
+    {
+      targetId: "2",
+      url: "https://www.facebook.com/search/groups/?q=OpenClaw%20VN",
+    },
+    "https://www.facebook.com/search/groups/?q=OpenClaw%20VN",
+  );
+  assertSelfTest(
+    exactUrlPageCandidates.length === 1 && exactUrlPageCandidates[0].id === 2,
+    "absolute URL tab selection does not fuzzy-match shorter parent URLs",
+  );
   const parsedAllSessions = parseArgv(["find-tab", "ninzap.dev", "--all-sessions"]);
   assertSelfTest(parsedAllSessions.flags.allSessions === true, "parser handles all-sessions flag");
   const parsedNetworkCapture = parseArgv(["capture-network", "https://example.com", "--anonymous", "--duration", "15000", "--har", "example.har", "--reload"]);
@@ -7867,6 +8224,49 @@ async function runSelfTest() {
   ];
   assertSelfTest(selectBrowserProfile(mockProfiles, "chrome:Profile 4")?.displayName === "Tom", "profile selection supports stable id");
   assertSelfTest(selectBrowserProfile(mockProfiles, "tom@example.com")?.profileDirectory === "Profile 4", "profile selection supports account email");
+  const macBackgroundLaunch = macBrowserProfileLaunchCommand(
+    { source: { appName: "Google Chrome" } },
+    ["--profile-directory=Default", "--new-tab", "https://example.com"],
+    {},
+  );
+  assertSelfTest(
+    macBackgroundLaunch[0] === "open" && macBackgroundLaunch[1][0] === "-g",
+    "macOS profile launches default to background mode",
+  );
+  const macFrontLaunch = macBrowserProfileLaunchCommand(
+    { source: { appName: "Google Chrome" } },
+    ["--profile-directory=Default", "--new-tab", "https://example.com"],
+    { front: true },
+  );
+  assertSelfTest(
+    macFrontLaunch[0] === "open" && !macFrontLaunch[1].includes("-g"),
+    "macOS profile launches honor --front",
+  );
+  const mockProfileEndpoint = endpointForBrowserProfile({
+    id: "chrome:Default",
+    browserName: "Google Chrome",
+    profileDirectory: "Default",
+    displayName: "Person 1",
+    devtoolsHttpUrl: "http://127.0.0.1:9222",
+    devtoolsWsEndpoint: "ws://127.0.0.1:9222/devtools/browser/mock",
+  });
+  assertSelfTest(
+    mockProfileEndpoint?.httpUrl === "http://127.0.0.1:9222" &&
+      mockProfileEndpoint.wsEndpoint === "ws://127.0.0.1:9222/devtools/browser/mock",
+    "profile endpoint is normalized for running-session reuse",
+  );
+  const openedCandidate = openedPageCandidate(
+    [{ id: 1, url: "https://example.com/old" }],
+    [
+      { id: 1, url: "https://example.com/old" },
+      { id: 2, url: "https://example.com/new/" },
+    ],
+    "https://example.com/new",
+  );
+  assertSelfTest(
+    openedCandidate?.id === 2,
+    "opened page candidate tolerates trailing slash canonicalization",
+  );
   const parsedDismissDetach = parseArgv(["detach", "--dismiss-banner"]);
   assertSelfTest(parsedDismissDetach.flags.dismissBanner === true, "parser handles dismiss banner flag");
   const parsedNoDismissDetach = parseArgv(["detach", "--no-dismiss-banner"]);
@@ -7877,6 +8277,8 @@ async function runSelfTest() {
   assertSelfTest(backgroundPayload.command === "tool", "open is client-translated for old daemons");
   assertSelfTest(backgroundPayload.args[0] === "new_page", "open translation calls new_page");
   assertSelfTest(JSON.parse(backgroundPayload.args[1]).background === true, "open translation uses background by default");
+  const selectPayload = daemonPayloadForCommand(parsedSelectOpen.command, parsedSelectOpen.args, parsedSelectOpen.flags);
+  assertSelfTest(JSON.parse(selectPayload.args[1]).background === true, "open --select still opens in background");
   const foregroundPayload = daemonPayloadForCommand(parsedForegroundOpen.command, parsedForegroundOpen.args, parsedForegroundOpen.flags);
   assertSelfTest(JSON.parse(foregroundPayload.args[1]).background === false, "open --front uses foreground");
   const anonymousPayload = daemonPayloadForCommand(parsedAnonymousOpen.command, parsedAnonymousOpen.args, parsedAnonymousOpen.flags);
