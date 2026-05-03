@@ -17,6 +17,7 @@ const DEFAULT_HANDLE_DIR = path.join(os.homedir(), ".realbrowser", "handles");
 const REAL_PROFILE_ATTACH_LOCK_FILE = path.join(os.homedir(), ".realbrowser", "real-profile-attach.lock");
 const DEFAULT_PROFILE_DIR = path.join(os.homedir(), ".realbrowser", "profile");
 const DEFAULT_SCREENSHOT_DIR = path.join(os.homedir(), ".realbrowser", "screenshots");
+const DEFAULT_OUTPUT_DIR = path.join(os.homedir(), ".realbrowser", "outputs");
 const DEFAULT_DOWNLOAD_DIR = path.join(os.homedir(), ".realbrowser", "downloads");
 const DEFAULT_DOWNLOAD_SOURCE_DIR = path.join(os.homedir(), "Downloads");
 const DEFAULT_SCREENSHOT_MAX_SIDE = parseOptionalIntegerEnv("REALBROWSER_SCREENSHOT_MAX_SIDE", 2000);
@@ -46,7 +47,9 @@ const ANONYMOUS_MODE = "anonymous";
 const LABEL_OVERLAY_ATTR = "data-realbrowser-labels";
 const DEFAULT_SNAPSHOT_MAX_CHARS = 8_000;
 const DEFAULT_READ_MAX_CHARS = 12_000;
+const DEFAULT_HTML_MAX_CHARS = 3_000;
 const DEFAULT_CHAIN_STEP_MAX_CHARS = 4_000;
+const READ_STDOUT_HARD_MAX_CHARS = 40_000;
 const DEFAULT_LINE_LIMIT = 50;
 const DEFAULT_OBSERVE_LIMIT = 30;
 const DEFAULT_OBSERVE_TEXT_CHARS = 900;
@@ -419,6 +422,9 @@ const CLI_GLOBAL_FLAGS = [
   "--timeout <ms>",
   "-o, --output <path>",
   "--out <path>",
+  "--auto-out",
+  "--full-stdout",
+  "--no-auto-out",
   "--no-network",
   "--dedicated",
   "--no-fallback",
@@ -427,6 +433,7 @@ const CLI_GLOBAL_FLAGS = [
   "--cleanup-remote-debugging",
   "--dismiss-banner",
   "--allow-attach",
+  "--allow-profile-reattach",
 ];
 
 function allCliCommandSpecs({ includeHidden = false } = {}) {
@@ -575,9 +582,12 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--all-session",
   "--all-sessions",
   "--allow-attach",
+  "--allow-profile-reattach",
+  "--allow-real-profile-reattach",
   "--anonymous",
   "--annotate",
   "--attach",
+  "--auto-out",
   "--bring-to-front",
   "--clean-profile",
   "--cleanup-remote-debugging",
@@ -595,6 +605,7 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--front",
   "--full",
   "--full-page",
+  "--full-stdout",
   "--headless",
   "--headed",
   "--help",
@@ -607,6 +618,7 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--labels",
   "--mcp",
   "--no-active-session",
+  "--no-auto-out",
   "--no-dismiss-banner",
   "--no-fallback",
   "--no-fallback-text",
@@ -635,6 +647,7 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--verbose",
   "--visible",
   "--version",
+  "--unsafe-full-stdout",
 ]);
 
 const COMMAND_ARGUMENT_OPTION_TOKENS_BY_COMMAND = new Map([
@@ -683,6 +696,10 @@ function outputFlagsFromArgv(argv) {
     quiet: controlArgv.includes("-q") || controlArgv.includes("--quiet") || output === "quiet",
     raw: controlArgv.includes("--raw") || output === "raw",
     verbose: controlArgv.includes("--verbose") || output === "verbose",
+    fullStdout: controlArgv.includes("--full-stdout") ||
+      controlArgv.includes("--unsafe-full-stdout") ||
+      output === "full" ||
+      process.env.REALBROWSER_FULL_STDOUT === "1",
   };
 }
 
@@ -775,7 +792,7 @@ function parseArgv(argv) {
   }
   validateArgv(argv);
   const args = [];
-  const flags = { json: false, deep: false, full: false, verbose: false };
+  const flags = { json: false, deep: false, full: false, verbose: false, ...outputFlagsFromArgv(argv) };
   const commandName = positionalTokensFromArgv(argv)[0] ?? "";
   const allowedCommandTokens = COMMAND_ARGUMENT_OPTION_TOKENS_BY_COMMAND.get(commandName) ?? new Set();
   for (let index = 0; index < argv.length; index += 1) {
@@ -789,6 +806,12 @@ function parseArgv(argv) {
       flags.quiet = true;
     } else if (arg === "--raw") {
       flags.raw = true;
+    } else if (arg === "--full-stdout" || arg === "--unsafe-full-stdout") {
+      flags.fullStdout = true;
+    } else if (arg === "--no-auto-out") {
+      flags.autoOut = false;
+    } else if (arg === "--auto-out") {
+      flags.autoOut = true;
     } else if (arg === "--efficient") {
       flags.efficient = true;
       flags.mode = "efficient";
@@ -988,6 +1011,8 @@ function parseArgv(argv) {
       flags.dismissBanner = false;
     } else if (arg === "--allow-attach" || arg === "--attach") {
       flags.allowAttach = true;
+    } else if (arg === "--allow-profile-reattach" || arg === "--allow-real-profile-reattach") {
+      flags.allowProfileReattach = true;
     } else if (arg === "--dedicated") {
       flags.dedicated = true;
     } else if (arg === "--backend") {
@@ -1776,6 +1801,44 @@ function isRealProfileSessionMode(mode) {
   return mode === AUTO_MODE || mode === "browserUrl";
 }
 
+function allowsProfileReattach(flags = {}) {
+  return Boolean(
+    flags.allowProfileReattach ||
+    process.env.REALBROWSER_ALLOW_PROFILE_REATTACH === "1" ||
+    process.env.REALBROWSER_ALLOW_REAL_PROFILE_REATTACH === "1",
+  );
+}
+
+function allowsProfileControllerStart(flags = {}) {
+  return Boolean(
+    allowsProfileReattach(flags) ||
+    flags.allowAttach ||
+    process.env.REALBROWSER_ALLOW_PROFILE_CONTROL === "1",
+  );
+}
+
+function wouldRestartLiveRealProfileDaemon(state, flags = {}) {
+  return Boolean(
+    flags.restartDaemon &&
+    state?.pid &&
+    isProcessAlive(state.pid) &&
+    isRealProfileSessionMode(modeFromState(state)),
+  );
+}
+
+function assertRealProfileRestartAllowed(state, flags = {}) {
+  if (!wouldRestartLiveRealProfileDaemon(state, flags) || allowsProfileReattach(flags)) {
+    return;
+  }
+  const session = state?.session ?? sessionNameFromStateFile(state?.stateFile ?? "");
+  const sessionFlag = session ? ` --session "${session}"` : "";
+  throw usageError([
+    "Refusing to restart a live real Chrome profile daemon because Chrome may show another \"Allow remote debugging?\" approval dialog.",
+    "Reuse the existing daemon for normal CDP-backed commands, or run only commands supported by the current daemon.",
+    `If you intentionally want to replace this controller, rerun with \`--restart-daemon --allow-profile-reattach${sessionFlag}\`.`,
+  ].join("\n"));
+}
+
 function shouldReuseExistingRealProfileSession(flags = {}) {
   if (desiredMode(flags) !== AUTO_MODE) {
     return false;
@@ -2041,6 +2104,7 @@ async function ensureDaemonUnlocked(flags = {}) {
   const stateFile = stateFileFromFlags(flags);
   const existing = await readJson(stateFile);
   applyRestartDaemonInheritance(flags, existing);
+  assertRealProfileRestartAllowed(existing, flags);
   const expectedModeKey = modeKey(flags);
   const explicitSelection = hasExplicitDaemonSelection(flags);
   if (shouldReplaceExistingDaemon(existing, expectedModeKey, flags, explicitSelection)) {
@@ -2058,6 +2122,7 @@ async function ensureDaemonUnlocked(flags = {}) {
   try {
     const afterLock = await readJson(stateFile);
     applyRestartDaemonInheritance(flags, afterLock);
+    assertRealProfileRestartAllowed(afterLock, flags);
     const afterExpectedModeKey = modeKey(flags);
     const afterExplicitSelection = hasExplicitDaemonSelection(flags);
     if (shouldReplaceExistingDaemon(afterLock, afterExpectedModeKey, flags, afterExplicitSelection)) {
@@ -2231,10 +2296,14 @@ function assertDaemonSupportsPayload(state, payload) {
   const session = state?.session ?? sessionNameFromStateFile(state?.stateFile ?? "");
   const command = payload?.command ?? "command";
   const detachCommand = session ? `realbrowser detach --session "${session}"` : "realbrowser detach";
+  const realProfile = isRealProfileSessionMode(modeFromState(state));
+  const reloadLine = realProfile
+    ? "Because this daemon controls a real signed-in Chrome profile, do not restart it casually; a replacement controller may trigger another Chrome remote-debugging approval dialog. Reuse the current daemon when possible, or rerun with `--restart-daemon --allow-profile-reattach` only when you explicitly accept that prompt."
+    : `Reload it explicitly with \`--restart-daemon\`, or run \`${detachCommand}\` and then rerun the command.`;
   throw new Error([
     `Running realbrowser daemon pid ${state?.pid ?? "unknown"} does not support ${missing.join(", ")} needed by ${command}.`,
     "It was started by an older copy of this skill, so sending the command would fail or trigger noisy fallbacks.",
-    `Reload it explicitly with \`--restart-daemon\`, or run \`${detachCommand}\` and then rerun the command.`,
+    reloadLine,
   ].join(" "));
 }
 
@@ -2243,23 +2312,137 @@ function printResult(value, flagsOrJson = false) {
   if (flags.quiet) {
     const quiet = value?.quiet ?? value?.path ?? value?.filePath ?? value?.text;
     if (quiet) {
-      console.log(String(quiet));
+      console.log(formatStdoutText(quiet, READ_STDOUT_HARD_MAX_CHARS, flags));
     }
     return;
   }
   if (flags.json) {
-    console.log(JSON.stringify(value, null, 2));
+    console.log(formatStdoutJson(value, READ_STDOUT_HARD_MAX_CHARS, flags));
     return;
   }
   if (typeof value === "string") {
-    console.log(value);
+    console.log(formatStdoutText(value, READ_STDOUT_HARD_MAX_CHARS, flags));
     return;
   }
   if (value?.text) {
-    console.log(value.text);
+    console.log(formatStdoutText(value.text, READ_STDOUT_HARD_MAX_CHARS, flags));
     return;
   }
-  console.log(JSON.stringify(value, null, 2));
+  console.log(formatStdoutJson(value, READ_STDOUT_HARD_MAX_CHARS, flags));
+}
+
+function allowsFullStdout(flags = {}) {
+  return Boolean(
+    flags.fullStdout ||
+    process.env.REALBROWSER_FULL_STDOUT === "1" ||
+    process.env.REALBROWSER_OUTPUT === "full",
+  );
+}
+
+function autoOutEnabled(flags = {}) {
+  return flags.autoOut !== false && process.env.REALBROWSER_AUTO_OUT !== "0";
+}
+
+function formatStdoutText(value, maxChars = READ_STDOUT_HARD_MAX_CHARS, flags = {}) {
+  const text = String(value ?? "");
+  if (allowsFullStdout(flags) || !maxChars || text.length <= maxChars) {
+    return text;
+  }
+  const artifactPath = writeOverflowArtifactSync(text, {
+    command: "stdout",
+    flags,
+    extension: "txt",
+  });
+  const artifactHint = artifactPath ? ` Full output written to ${artifactPath}.` : "";
+  const suffix = `[...STDOUT HARD CAPPED at ${maxChars} chars - use --full-stdout for known-small output, or use --out or another artifact flag for full output.${artifactHint}]`;
+  const sliceLength = Math.max(0, maxChars - suffix.length - 2);
+  return `${text.slice(0, sliceLength)}\n\n${suffix}`;
+}
+
+function formatStdoutJson(value, maxChars = READ_STDOUT_HARD_MAX_CHARS, flags = {}) {
+  const direct = JSON.stringify(value, null, 2) ?? "null";
+  if (allowsFullStdout(flags) || direct.length <= maxChars) {
+    return direct;
+  }
+  const artifactPath = writeOverflowArtifactSync(direct, {
+    command: "stdout-json",
+    flags,
+    extension: "json",
+  });
+  const sanitizedValue = sanitizeJsonForStdout(value);
+  const sanitizedObject = sanitizedValue && typeof sanitizedValue === "object" && !Array.isArray(sanitizedValue)
+    ? sanitizedValue
+    : { value: sanitizedValue };
+  const sanitized = {
+    ...sanitizedObject,
+    stdoutTruncated: true,
+    originalJsonChars: direct.length,
+    stdoutMaxChars: maxChars,
+    ...(artifactPath ? { fullOutput: artifactPath } : {}),
+    note: "JSON stdout exceeded the realbrowser safety cap; use --full-stdout for known-small output, or --out, --har, --request-file, or --response-file for full artifacts.",
+  };
+  const sanitizedJson = JSON.stringify(sanitized, null, 2);
+  if (sanitizedJson.length <= maxChars) {
+    return sanitizedJson;
+  }
+  return JSON.stringify({
+    stdoutTruncated: true,
+    originalJsonChars: direct.length,
+    stdoutMaxChars: maxChars,
+    ...(artifactPath ? { fullOutput: artifactPath } : {}),
+    text: formatStdoutText(value?.text ?? direct, 2000, { ...flags, autoOut: false }),
+    note: "JSON stdout exceeded the realbrowser safety cap; use an artifact flag for full output.",
+  }, null, 2);
+}
+
+function sanitizeJsonForStdout(value, options = {}, depth = 0, seen = new WeakSet()) {
+  const stringMaxChars = options.stringMaxChars ?? 4000;
+  const arrayMaxItems = options.arrayMaxItems ?? 80;
+  const depthMax = options.depthMax ?? 8;
+  if (value === null || value === undefined || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return formatStdoutText(value, stringMaxChars, { autoOut: false });
+  }
+  if (typeof value !== "object") {
+    return String(value);
+  }
+  if (seen.has(value)) {
+    return "[Circular]";
+  }
+  if (depth >= depthMax) {
+    return summarizeJsonValueShape(value);
+  }
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const items = value.slice(0, arrayMaxItems).map((item) =>
+        sanitizeJsonForStdout(item, options, depth + 1, seen),
+      );
+      if (value.length > arrayMaxItems) {
+        items.push({ omittedItems: value.length - arrayMaxItems });
+      }
+      return items;
+    }
+    const result = {};
+    for (const [key, entry] of Object.entries(value)) {
+      result[key] = sanitizeJsonForStdout(entry, options, depth + 1, seen);
+    }
+    return result;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function summarizeJsonValueShape(value) {
+  if (Array.isArray(value)) {
+    return `[Array(${value.length})]`;
+  }
+  if (value && typeof value === "object") {
+    return `[Object(${Object.keys(value).length} keys)]`;
+  }
+  return String(value);
 }
 
 function printCliError(error, flags = {}) {
@@ -4722,6 +4905,9 @@ function formatLocalStatusText(daemon, browserControl, chromeRemoteDebugging = n
     metadataCaveat,
     `Chrome banner: ${browserControl.chromeBannerExpectedNow === true ? "expected now" : browserControl.chromeBannerExpectedNow === false ? "may appear when the next browser command attaches" : "unknown; this daemon predates banner status reporting"}`,
     `Real signed-in profile may be controlled: ${browserControl.realSignedInProfileMayBeControlled ? "yes" : "no"}`,
+    daemon.scriptHash && daemon.scriptHash !== daemon.currentScriptHash && browserControl.realSignedInProfileMayBeControlled
+      ? "Reload guard: real-profile daemon restart requires --allow-profile-reattach because Chrome may show another approval dialog."
+      : "",
     `Cleanup: run \`${browserControl.stopRealbrowserCommand}\` to stop realbrowser only. Add \`--dismiss-banner\` only when you explicitly want a best-effort banner-X click. Use \`${browserControl.stopRealbrowserCommand} --cleanup-remote-debugging\` only when you want to disable Chrome remote debugging too.`,
   ].filter(Boolean).join("\n");
 }
@@ -5130,6 +5316,13 @@ class BrowserDaemon {
   async ensureMcp() {
     if (this.mcp) {
       return this.mcp;
+    }
+    if (isRealProfileSessionMode(this.currentMode()) && !allowsProfileControllerStart(this.activeCommandFlags ?? {})) {
+      throw usageError([
+        "Refusing to start a Chrome DevTools MCP controller for a real Chrome profile because Chrome may show an \"Allow remote debugging?\" approval dialog.",
+        "Use CDP-backed commands such as tabs, goto, wait, js, text, blocks, posts, links, or plain screenshot when possible.",
+        "For MCP-only commands, rerun with `--allow-profile-reattach` only when you explicitly accept that prompt.",
+      ].join("\n"));
     }
     if (this.profileDir) {
       await fsp.mkdir(this.profileDir, { recursive: true });
@@ -5566,13 +5759,16 @@ class BrowserDaemon {
   }
 
   async handle(command, args, flags = {}) {
-    switch (command) {
+    const previousCommandFlags = this.activeCommandFlags;
+    this.activeCommandFlags = flags;
+    try {
+      switch (command) {
       case "doctor":
         return await this.doctor(Boolean(flags.deep));
       case "status":
         return await this.status();
       case "restart":
-        return await this.restart();
+        return await this.restart(flags);
       case "tools":
         return { tools: (await this.listTools()).map((tool) => tool.name).sort() };
       case "tool":
@@ -5799,6 +5995,9 @@ class BrowserDaemon {
         return { text: "stopping" };
       default:
         throw new Error(`Unknown command: ${command}\n\n${usage()}`);
+      }
+    } finally {
+      this.activeCommandFlags = previousCommandFlags;
     }
   }
 
@@ -5969,7 +6168,13 @@ class BrowserDaemon {
     };
   }
 
-  async restart() {
+  async restart(flags = {}) {
+    if (isRealProfileSessionMode(this.currentMode()) && !allowsProfileReattach(flags)) {
+      throw usageError([
+        "Refusing to restart the Chrome DevTools MCP controller for a real Chrome profile because Chrome may show another \"Allow remote debugging?\" approval dialog.",
+        "Reuse the existing controller, or rerun with `restart --allow-profile-reattach` only when you explicitly accept that prompt.",
+      ].join("\n"));
+    }
     this.closeCdpBrowserClient();
     if (this.mcp) {
       await this.mcp.close().catch(() => {});
@@ -5994,7 +6199,8 @@ class BrowserDaemon {
       throw new Error("chain expects a JSON array of command arrays");
     }
     const returnMode = normalizeReturnMode(flags.return ?? (flags.summary ? "summary" : "summary"));
-    const stepMaxChars = parsePositiveInteger(flags.maxChars ?? String(DEFAULT_CHAIN_STEP_MAX_CHARS), "max-chars");
+    const stepMaxCharsInfo = stdoutMaxCharsFromFlags(flags, String(DEFAULT_CHAIN_STEP_MAX_CHARS));
+    const stepMaxChars = stepMaxCharsInfo.value;
     const results = [];
     const chainStartedAt = Date.now();
     for (const [index, step] of steps.entries()) {
@@ -6048,20 +6254,28 @@ class BrowserDaemon {
     if (returnMode === "final" && final) {
       return {
         text: resultText(final.result, stepMaxChars),
-        chain: { ok: results.every((entry) => entry.ok), totalDurationMs, results: results.map(chainStepTiming), trace: flags.trace },
+        chain: {
+          ok: results.every((entry) => entry.ok),
+          totalDurationMs,
+          results: results.map(chainStepTiming),
+          trace: flags.trace,
+          requestedMaxChars: stepMaxCharsInfo.requested,
+          stdoutMaxChars: stepMaxCharsInfo.value,
+        },
       };
     }
     if (returnMode === "all") {
+      const text = results
+        .map((entry) => {
+          if (!entry.ok) {
+            return `[${entry.index}] ${entry.command ?? "?"} (${formatMs(entry.durationMs)}): ERROR ${entry.error}`;
+          }
+          return `[${entry.index}] ${entry.command} (${formatMs(entry.durationMs)}): ${resultText(entry.result, stepMaxChars)}`;
+        })
+        .concat(`total: ${formatMs(totalDurationMs)}`)
+        .join("\n\n");
       return {
-        text: results
-          .map((entry) => {
-            if (!entry.ok) {
-              return `[${entry.index}] ${entry.command ?? "?"} (${formatMs(entry.durationMs)}): ERROR ${entry.error}`;
-            }
-            return `[${entry.index}] ${entry.command} (${formatMs(entry.durationMs)}): ${resultText(entry.result, stepMaxChars)}`;
-          })
-          .concat(`total: ${formatMs(totalDurationMs)}`)
-          .join("\n\n"),
+        text: formatStdoutText(text, READ_STDOUT_HARD_MAX_CHARS, flags),
       };
     }
     return {
@@ -6084,6 +6298,27 @@ class BrowserDaemon {
       verbose: Boolean(flags.verbose || flags.raw),
     });
     if (flags.raw) {
+      const outPath = flags.out ?? flags.output;
+      if (outPath) {
+        const rawText = formatValue(snapshot);
+        await writeTextFile(outPath, `${rawText}\n`);
+        return {
+          text: readOutputSummary({
+            command: "snapshot",
+            outPath,
+            chars: rawText.length,
+            truncated: rawText.length > READ_STDOUT_HARD_MAX_CHARS,
+            raw: true,
+            maxCharsInfo: stdoutMaxCharsFromFlags(flags, String(READ_STDOUT_HARD_MAX_CHARS)),
+          }),
+          structuredContent: {
+            command: "snapshot",
+            raw: true,
+            chars: rawText.length,
+            out: outPath,
+          },
+        };
+      }
       return snapshot;
     }
     const built = buildCompactSnapshot(snapshot.structuredContent?.snapshot, snapshot.text, flags);
@@ -6098,7 +6333,7 @@ class BrowserDaemon {
     }
     const lines = [];
     if (!flags.quiet) {
-      lines.push(built.text);
+      lines.push(outPath ? `snapshot written to ${outPath}` : built.text);
     }
     if (outPath) {
       lines.push(`snapshot: ${outPath}`);
@@ -6113,7 +6348,7 @@ class BrowserDaemon {
     return {
       text: lines.filter(Boolean).join("\n"),
       structuredContent: {
-        ...snapshot.structuredContent,
+        ...compactSnapshotStructuredContent(snapshot.structuredContent),
         snapshotText: built.text,
         refs: built.refs,
         stats: built.stats,
@@ -7161,6 +7396,16 @@ class BrowserDaemon {
   }
 
   async captureScreenshotOnce(filePath, format, flags = {}, quality = undefined) {
+    if (!flags.uid && this.shouldUseFastCdp(flags)) {
+      try {
+        return await this.captureScreenshotCdpOnce(filePath, format, flags, quality);
+      } catch (error) {
+        if (isRealProfileSessionMode(this.currentMode())) {
+          throw error;
+        }
+        // Dedicated/anonymous sessions can still use the MCP screenshot path.
+      }
+    }
     return await this.callTool("take_screenshot", {
       ...this.pageArgs(flags),
       filePath,
@@ -7169,6 +7414,54 @@ class BrowserDaemon {
       ...(flags.full ? { fullPage: true } : {}),
       ...(flags.uid ? { uid: flags.uid } : {}),
     });
+  }
+
+  async captureScreenshotCdpOnce(filePath, format, flags = {}, quality = undefined) {
+    const targetId = await this.resolveCdpTargetId(flags);
+    const normalizedFormat = normalizeFormat(format);
+    const params = {
+      format: normalizedFormat,
+      fromSurface: true,
+      captureBeyondViewport: Boolean(flags.full),
+    };
+    if (quality !== undefined && canUseScreenshotQuality(normalizedFormat)) {
+      params.quality = quality;
+    }
+    if (flags.full) {
+      const metrics = await this.cdpPageRequest(targetId, "Page.getLayoutMetrics", {}).catch(() => null);
+      const contentSize = metrics?.cssContentSize ?? metrics?.contentSize;
+      const width = Number(contentSize?.width);
+      const height = Number(contentSize?.height);
+      if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+        params.clip = {
+          x: 0,
+          y: 0,
+          width: Math.ceil(width),
+          height: Math.ceil(height),
+          scale: 1,
+        };
+      }
+    }
+    const result = await this.cdpPageRequest(targetId, "Page.captureScreenshot", params, {
+      timeoutMs: parsePositiveInteger(flags.timeout ?? "30000", "timeout"),
+    });
+    const data = String(result?.data ?? "");
+    if (!data) {
+      throw new Error("CDP screenshot did not return image data");
+    }
+    const resolvedPath = path.resolve(filePath);
+    await fsp.writeFile(resolvedPath, Buffer.from(data, "base64"));
+    return {
+      text: `Saved screenshot to ${resolvedPath}.`,
+      filePath: resolvedPath,
+      structuredContent: {
+        targetId,
+        filePath: resolvedPath,
+        format: normalizedFormat,
+        cdp: true,
+      },
+      cdp: true,
+    };
   }
 
   async captureScreenshot(filePath, format, flags = {}) {
@@ -7182,10 +7475,11 @@ class BrowserDaemon {
     const largestPhysicalSide = metrics
       ? Math.max(metrics.width * metrics.dpr, (flags.full ? metrics.contentHeight : metrics.height) * metrics.dpr)
       : 0;
+    const cdpOnlyRealProfileScreenshot = !flags.uid && this.shouldUseFastCdp(flags) && isRealProfileSessionMode(this.currentMode());
     const baseScale = metrics && options.maxSide > 0 && largestPhysicalSide > options.maxSide
       ? options.maxSide / largestPhysicalSide
       : 1;
-    const scales = metrics ? screenshotScaleSteps(baseScale) : [1];
+    const scales = metrics && !cdpOnlyRealProfileScreenshot ? screenshotScaleSteps(baseScale) : [1];
     const qualities = canUseScreenshotQuality(format) ? screenshotQualitySteps(rawQuality ?? options.quality) : [undefined];
     let usedEmulation = false;
     let finalResult;
@@ -8124,21 +8418,28 @@ function buildCompactSnapshot(root, fallbackText, flags = {}) {
         ? 6
         : undefined;
   const maxNodes = parsePositiveInteger(flags.maxNodes ?? flags.limit ?? "500", "max-nodes");
-  const maxChars = parsePositiveInteger(
-    flags.maxChars ?? (flags.verbose ? "40000" : String(DEFAULT_SNAPSHOT_MAX_CHARS)),
-    "max-chars",
+  const maxChars = stdoutMaxCharsFromFlags(
+    flags,
+    flags.verbose ? String(READ_STDOUT_HARD_MAX_CHARS) : String(DEFAULT_SNAPSHOT_MAX_CHARS),
   );
   if (!root || typeof root !== "object") {
-    const truncated = truncateText(String(fallbackText ?? ""), maxChars);
+    const truncated = truncateText(String(fallbackText ?? ""), maxChars.value);
+    const stdoutHardCapped = maxChars.capped && truncated.truncated;
+    const text = stdoutHardCapped && !truncated.text.includes("STDOUT CAPPED")
+      ? `${truncated.text}\n\n[...STDOUT CAPPED at ${maxChars.value} chars - use --out for full output]`
+      : truncated.text;
     return {
-      text: truncated.text || "(no snapshot)",
+      text: text || "(no snapshot)",
       truncated: truncated.truncated,
       refs: {},
       stats: {
-        lines: truncated.text ? truncated.text.split("\n").length : 0,
-        chars: truncated.text.length,
+        lines: text ? text.split("\n").length : 0,
+        chars: text.length,
         refs: 0,
         interactive: 0,
+        stdoutCapped: stdoutHardCapped,
+        requestedMaxChars: maxChars.requested,
+        stdoutMaxChars: maxChars.value,
       },
     };
   }
@@ -8199,33 +8500,47 @@ function buildCompactSnapshot(root, fallbackText, flags = {}) {
 
   visit(root, 0);
   let text = lines.join("\n") || "(no matching snapshot nodes)";
-  const truncated = truncateText(text, maxChars);
+  const truncated = truncateText(text, maxChars.value);
   text = truncated.text;
   const isTruncated = truncated.truncated || stoppedByNodes;
   if (stoppedByNodes && !text.includes("[...TRUNCATED")) {
     text = `${text}\n\n[...TRUNCATED - max nodes reached]`;
   }
+  const stdoutHardCapped = maxChars.capped && truncated.truncated;
+  if (stdoutHardCapped && !text.includes("STDOUT CAPPED")) {
+    text = `${text}\n\n[...STDOUT CAPPED at ${maxChars.value} chars - use --out for full output]`;
+  }
   return {
     text,
-    truncated: isTruncated,
+    truncated: isTruncated || (maxChars.capped && truncated.truncated),
     refs,
     stats: {
       lines: text ? text.split("\n").length : 0,
       chars: text.length,
       refs: totalRefs,
       interactive: interactiveRefs,
+      stdoutCapped: stdoutHardCapped,
+      requestedMaxChars: maxChars.requested,
+      stdoutMaxChars: maxChars.value,
     },
   };
+}
+
+function compactSnapshotStructuredContent(structuredContent) {
+  if (!structuredContent || typeof structuredContent !== "object") {
+    return {};
+  }
+  const compact = { ...structuredContent };
+  delete compact.snapshot;
+  return compact;
 }
 
 async function formatReadResult(command, result, flags = {}) {
   const value = extractJsonFromToolText(result.text);
   const rawValue = value ?? result.text ?? "";
   const limit = parsePositiveInteger(flags.limit ?? defaultLimitForReadCommand(command), "limit");
-  const maxChars = parsePositiveInteger(
-    flags.maxChars ?? (flags.verbose ? "40000" : String(DEFAULT_READ_MAX_CHARS)),
-    "max-chars",
-  );
+  const maxChars = stdoutMaxCharsFromFlags(flags, defaultMaxCharsForReadCommand(command, flags));
+  const rawText = Array.isArray(rawValue) || (rawValue && typeof rawValue === "object") ? formatValue(rawValue) : String(rawValue);
   let fullText;
   let displayedValue = rawValue;
   if ((command === "blocks" || command === "visible-blocks") && Array.isArray(rawValue)) {
@@ -8244,18 +8559,54 @@ async function formatReadResult(command, result, flags = {}) {
   }
   const outPath = flags.out ?? flags.output;
   if (outPath) {
-    await writeTextFile(outPath, `${Array.isArray(rawValue) || typeof rawValue === "object" ? formatValue(rawValue) : String(rawValue)}\n`);
+    await writeTextFile(outPath, `${rawText}\n`);
+    const count = Array.isArray(rawValue) ? rawValue.length : undefined;
+    const shown = Array.isArray(displayedValue) ? displayedValue.length : undefined;
+    const stdoutHardCapped = maxChars.capped && rawText.length > maxChars.value;
+    return {
+      text: readOutputSummary({
+        command,
+        outPath,
+        chars: rawText.length,
+        count,
+        shown,
+        truncated: rawText.length > maxChars.value,
+        maxCharsInfo: maxChars,
+      }),
+      structuredContent: {
+        command,
+        count,
+        shown,
+        truncated: rawText.length > maxChars.value,
+        stdoutCapped: stdoutHardCapped,
+        out: outPath,
+        chars: rawText.length,
+        requestedMaxChars: maxChars.requested,
+        stdoutMaxChars: maxChars.value,
+      },
+    };
   }
-  const truncated = truncateText(fullText, maxChars);
+  const truncated = truncateText(fullText, maxChars.value);
+  const stdoutHardCapped = maxChars.capped && fullText.length > maxChars.value;
+  const autoOutPath = truncated.truncated
+    ? await writeOverflowArtifact(rawText, {
+      command,
+      flags,
+      extension: extensionForReadOutput(command, rawValue),
+    })
+    : null;
   const suffix = [];
   if (Array.isArray(rawValue) && rawValue.length > limit) {
     suffix.push(`[...${rawValue.length - limit} more items - use --limit or --out]`);
   }
-  if (truncated.truncated) {
+  if (truncated.truncated && !stdoutHardCapped) {
     suffix.push(`[...TRUNCATED - use --max-chars or --out]`);
   }
-  if (outPath) {
-    suffix.push(`out: ${outPath}`);
+  if (stdoutHardCapped) {
+    suffix.push(`[...STDOUT CAPPED at ${maxChars.value} chars - use --out for full output]`);
+  }
+  if (autoOutPath) {
+    suffix.push(`[full output written to ${autoOutPath}]`);
   }
   return {
     text: [truncated.text, ...suffix].filter(Boolean).join("\n"),
@@ -8264,7 +8615,10 @@ async function formatReadResult(command, result, flags = {}) {
       count: Array.isArray(rawValue) ? rawValue.length : undefined,
       shown: Array.isArray(displayedValue) ? displayedValue.length : undefined,
       truncated: truncated.truncated || (Array.isArray(rawValue) && rawValue.length > limit),
-      ...(outPath ? { out: outPath } : {}),
+      stdoutCapped: stdoutHardCapped,
+      ...(autoOutPath ? { autoOut: autoOutPath } : {}),
+      requestedMaxChars: maxChars.requested,
+      stdoutMaxChars: maxChars.value,
     },
   };
 }
@@ -8274,18 +8628,48 @@ async function formatRawResult(command, result, flags = {}) {
   const outPath = flags.out ?? flags.output;
   if (outPath) {
     await writeTextFile(outPath, `${rawText}\n`);
+    const maxChars = stdoutMaxCharsFromFlags(flags, defaultMaxCharsForReadCommand(command, flags));
+    const stdoutHardCapped = maxChars.capped && rawText.length > maxChars.value;
+    return {
+      text: readOutputSummary({
+        command,
+        outPath,
+        chars: rawText.length,
+        truncated: rawText.length > maxChars.value,
+        raw: true,
+        maxCharsInfo: maxChars,
+      }),
+      structuredContent: {
+        command,
+        raw: true,
+        chars: rawText.length,
+        truncated: rawText.length > maxChars.value,
+        stdoutCapped: stdoutHardCapped,
+        out: outPath,
+        requestedMaxChars: maxChars.requested,
+        stdoutMaxChars: maxChars.value,
+      },
+    };
   }
-  const maxChars = parsePositiveInteger(
-    flags.maxChars ?? (flags.verbose ? "40000" : String(DEFAULT_READ_MAX_CHARS)),
-    "max-chars",
-  );
-  const truncated = truncateText(rawText, maxChars);
+  const maxChars = stdoutMaxCharsFromFlags(flags, defaultMaxCharsForReadCommand(command, flags));
+  const truncated = truncateText(rawText, maxChars.value);
+  const stdoutHardCapped = maxChars.capped && rawText.length > maxChars.value;
+  const autoOutPath = truncated.truncated
+    ? await writeOverflowArtifact(rawText, {
+      command: `${command}-raw`,
+      flags,
+      extension: extensionForReadOutput(command, rawText, true),
+    })
+    : null;
   const suffix = [];
-  if (truncated.truncated) {
+  if (truncated.truncated && !stdoutHardCapped) {
     suffix.push(`[...TRUNCATED raw output - use --max-chars or --out]`);
   }
-  if (outPath) {
-    suffix.push(`out: ${outPath}`);
+  if (stdoutHardCapped) {
+    suffix.push(`[...STDOUT CAPPED at ${maxChars.value} chars - use --out for full output]`);
+  }
+  if (autoOutPath) {
+    suffix.push(`[full raw output written to ${autoOutPath}]`);
   }
   return {
     text: [truncated.text, ...suffix].filter(Boolean).join("\n"),
@@ -8294,7 +8678,10 @@ async function formatRawResult(command, result, flags = {}) {
       raw: true,
       chars: rawText.length,
       truncated: truncated.truncated,
-      ...(outPath ? { out: outPath } : {}),
+      stdoutCapped: stdoutHardCapped,
+      ...(autoOutPath ? { autoOut: autoOutPath } : {}),
+      requestedMaxChars: maxChars.requested,
+      stdoutMaxChars: maxChars.value,
     },
   };
 }
@@ -8346,14 +8733,117 @@ function defaultLimitForReadCommand(command) {
   }
 }
 
-function compactTextResult(result, flags = {}, defaultMaxChars = DEFAULT_READ_MAX_CHARS) {
-  const maxChars = parsePositiveInteger(flags.maxChars ?? String(defaultMaxChars), "max-chars");
-  const truncated = truncateText(result.text ?? "", maxChars);
+function defaultMaxCharsForReadCommand(command, flags = {}) {
+  if (flags.verbose) {
+    return "40000";
+  }
+  return command === "html" ? String(DEFAULT_HTML_MAX_CHARS) : String(DEFAULT_READ_MAX_CHARS);
+}
+
+function stdoutMaxCharsFromFlags(flags = {}, fallback = String(DEFAULT_READ_MAX_CHARS)) {
+  const requested = parsePositiveInteger(flags.maxChars ?? fallback, "max-chars");
+  if (allowsFullStdout(flags)) {
+    return {
+      requested,
+      value: requested,
+      capped: false,
+      fullStdout: true,
+    };
+  }
   return {
-    text: truncated.text,
+    requested,
+    value: Math.min(requested, READ_STDOUT_HARD_MAX_CHARS),
+    capped: requested > READ_STDOUT_HARD_MAX_CHARS,
+    fullStdout: false,
+  };
+}
+
+function extensionForReadOutput(command, value, raw = false) {
+  if (command === "html" && typeof value === "string" && !raw) {
+    return "html";
+  }
+  if (Array.isArray(value) || (value && typeof value === "object")) {
+    return "json";
+  }
+  return raw ? "txt" : "txt";
+}
+
+function outputArtifactDir(flags = {}) {
+  return path.resolve(flags.outputDir || process.env.REALBROWSER_OUTPUT_DIR || DEFAULT_OUTPUT_DIR);
+}
+
+function overflowArtifactPath({ command = "stdout", extension = "txt", flags = {} } = {}) {
+  const timestamp = new Date().toISOString().replaceAll(/[:.]/g, "-");
+  const safeCommand = sanitizeFileName(String(command || "stdout")).replaceAll(/\s+/g, "-");
+  const safeExtension = sanitizeFileName(String(extension || "txt")).replaceAll(/^\.+/g, "") || "txt";
+  const nonce = crypto.randomBytes(3).toString("hex");
+  return path.join(outputArtifactDir(flags), `${timestamp}-${process.pid}-${nonce}-${safeCommand}.${safeExtension}`);
+}
+
+async function writeOverflowArtifact(text, options = {}) {
+  const flags = options.flags ?? {};
+  if (!autoOutEnabled(flags)) {
+    return null;
+  }
+  const value = String(text ?? "");
+  const filePath = overflowArtifactPath(options);
+  await writeTextFile(filePath, value.endsWith("\n") ? value : `${value}\n`);
+  return filePath;
+}
+
+function writeOverflowArtifactSync(text, options = {}) {
+  const flags = options.flags ?? {};
+  if (!autoOutEnabled(flags)) {
+    return null;
+  }
+  const value = String(text ?? "");
+  const filePath = overflowArtifactPath(options);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, value.endsWith("\n") ? value : `${value}\n`, "utf8");
+  return filePath;
+}
+
+function readOutputSummary({ command, outPath, chars, count, shown, truncated, raw = false, maxCharsInfo = null }) {
+  const label = raw ? "raw output" : command;
+  return [
+    `${label} written to ${outPath}`,
+    `chars: ${chars}`,
+    Number.isFinite(count) ? `items: ${count}` : "",
+    Number.isFinite(shown) ? `shown-if-printed: ${shown}` : "",
+    "stdout-preview: skipped because --out was used",
+    truncated ? "full output may exceed the stdout preview budget" : "",
+    maxCharsInfo?.capped ? `stdout cap: ${maxCharsInfo.value} chars (requested ${maxCharsInfo.requested}; use --out for full output)` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function compactTextResult(result, flags = {}, defaultMaxChars = DEFAULT_READ_MAX_CHARS) {
+  const maxChars = stdoutMaxCharsFromFlags(flags, String(defaultMaxChars));
+  const rawText = String(result.text ?? "");
+  const truncated = truncateText(rawText, maxChars.value);
+  const stdoutHardCapped = maxChars.capped && rawText.length > maxChars.value;
+  const autoOutPath = truncated.truncated
+    ? writeOverflowArtifactSync(rawText, {
+      command: "text-result",
+      flags,
+      extension: "txt",
+    })
+    : null;
+  const suffix = [];
+  if (stdoutHardCapped) {
+    suffix.push(`[...STDOUT CAPPED at ${maxChars.value} chars - use --out for full output]`);
+  }
+  if (autoOutPath) {
+    suffix.push(`[full output written to ${autoOutPath}]`);
+  }
+  return {
+    text: [truncated.text, ...suffix].filter(Boolean).join("\n"),
     structuredContent: {
       truncated: truncated.truncated,
       chars: truncated.text.length,
+      stdoutCapped: stdoutHardCapped,
+      ...(autoOutPath ? { autoOut: autoOutPath } : {}),
+      requestedMaxChars: maxChars.requested,
+      stdoutMaxChars: maxChars.value,
     },
   };
 }
@@ -9786,8 +10276,56 @@ async function runSelfTest() {
   const truncated = truncateText("abcdef", 3);
   assertSelfTest(truncated.truncated && truncated.text.includes("abc"), "truncateText truncates");
   assertSelfTest(extractJsonFromToolText('[{"text":"one"}]')?.[0]?.text === "one", "plain JSON tool text is parsed");
-  const rawCompacted = await formatRawResult("eval", { text: "abcdef" }, { maxChars: "3", raw: true });
+  const rawCompacted = await formatRawResult("eval", { text: "abcdef" }, { maxChars: "3", raw: true, autoOut: false });
   assertSelfTest(rawCompacted.text.includes("TRUNCATED raw output"), "raw output is capped by max-chars");
+  const compactSnapshotStructured = compactSnapshotStructuredContent({
+    snapshot: { role: "RootWebArea", children: [{ role: "paragraph", name: "large" }] },
+    other: true,
+  });
+  assertSelfTest(!Object.hasOwn(compactSnapshotStructured, "snapshot") && compactSnapshotStructured.other === true, "compact snapshot json omits raw tree");
+  const fallbackSnapshot = buildCompactSnapshot(null, "x".repeat(READ_STDOUT_HARD_MAX_CHARS + 500), { maxChars: "1000000" });
+  assertSelfTest(fallbackSnapshot.stats.stdoutMaxChars === READ_STDOUT_HARD_MAX_CHARS, "snapshot stdout has a hard max cap");
+  assertSelfTest(fallbackSnapshot.text.includes("STDOUT CAPPED"), "snapshot hard cap is visible in text output");
+  const readOutTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "realbrowser-read-out-self-test-"));
+  try {
+    const htmlDefault = await formatReadResult("html", { text: "x".repeat(DEFAULT_HTML_MAX_CHARS + 500) }, { outputDir: readOutTempDir });
+    assertSelfTest(htmlDefault.structuredContent.stdoutMaxChars === DEFAULT_HTML_MAX_CHARS, "html reads use a smaller default stdout budget");
+    assertSelfTest(htmlDefault.text.includes("TRUNCATED"), "html reads truncate large stdout by default");
+    assertSelfTest(
+      htmlDefault.structuredContent.autoOut && fs.existsSync(htmlDefault.structuredContent.autoOut),
+      "truncated read output is preserved in an auto artifact",
+    );
+    const hardCappedRead = await formatReadResult("text", { text: "x".repeat(READ_STDOUT_HARD_MAX_CHARS + 500) }, {
+      maxChars: "1000000",
+      outputDir: readOutTempDir,
+    });
+    assertSelfTest(hardCappedRead.structuredContent.stdoutMaxChars === READ_STDOUT_HARD_MAX_CHARS, "read stdout has a hard max cap");
+    assertSelfTest(hardCappedRead.text.includes("STDOUT CAPPED"), "oversized requested read stdout reports the hard cap");
+    assertSelfTest(hardCappedRead.structuredContent.autoOut && fs.existsSync(hardCappedRead.structuredContent.autoOut), "hard-capped read output is preserved in an auto artifact");
+    const fullStdoutRead = await formatReadResult("text", { text: "x".repeat(READ_STDOUT_HARD_MAX_CHARS + 10) }, {
+      maxChars: String(READ_STDOUT_HARD_MAX_CHARS + 10),
+      fullStdout: true,
+      autoOut: false,
+    });
+    assertSelfTest(fullStdoutRead.structuredContent.stdoutMaxChars === READ_STDOUT_HARD_MAX_CHARS + 10, "full-stdout bypasses the hard cap when explicit");
+    assertSelfTest(!fullStdoutRead.text.includes("STDOUT CAPPED"), "full-stdout output is not hard-capped");
+    const oversizedJson = formatStdoutJson(
+      { text: "x".repeat(READ_STDOUT_HARD_MAX_CHARS + 1000) },
+      READ_STDOUT_HARD_MAX_CHARS,
+      { outputDir: readOutTempDir },
+    );
+    const oversizedJsonParsed = JSON.parse(oversizedJson);
+    assertSelfTest(oversizedJsonParsed.stdoutTruncated === true, "json stdout is bounded when objects are too large");
+    assertSelfTest(oversizedJsonParsed.fullOutput && fs.existsSync(oversizedJsonParsed.fullOutput), "oversized json stdout is preserved in an auto artifact");
+    const fullStdoutJson = formatStdoutJson({ text: "abcdef" }, 3, { fullStdout: true });
+    assertSelfTest(fullStdoutJson.includes("abcdef") && !fullStdoutJson.includes("stdoutTruncated"), "full-stdout bypasses final json cap");
+    const htmlOutPath = path.join(readOutTempDir, "page.html");
+    const htmlOut = await formatReadResult("html", { text: `<main>${"x".repeat(DEFAULT_HTML_MAX_CHARS + 500)}</main>` }, { out: htmlOutPath });
+    assertSelfTest(!htmlOut.text.includes("x".repeat(100)), "--out read summaries do not echo large content");
+    assertSelfTest(fs.readFileSync(htmlOutPath, "utf8").includes("x".repeat(100)), "--out read artifact keeps full content");
+  } finally {
+    fs.rmSync(readOutTempDir, { recursive: true, force: true });
+  }
 
   assertSelfTest(
     visibleBlocksFunction(undefined, { fallbackText: false }).includes("allowFallbackText = false"),
@@ -10167,8 +10705,29 @@ async function runSelfTest() {
   assertSelfTest(parsedNoDismissDetach.flags.dismissBanner === false, "parser handles no-dismiss banner flag");
   const parsedAllowAttach = parseArgv(["cleanup-remote-debugging", "--allow-attach"]);
   assertSelfTest(parsedAllowAttach.flags.allowAttach === true, "parser handles cleanup allow attach flag");
+  const parsedAllowProfileReattach = parseArgv(["tabs", "--restart-daemon", "--allow-profile-reattach"]);
+  assertSelfTest(parsedAllowProfileReattach.flags.allowProfileReattach === true, "parser handles profile reattach consent flag");
+  const parsedFullStdout = parseArgv(["html", "--full-stdout", "--max-chars", "100000"]);
+  assertSelfTest(parsedFullStdout.flags.fullStdout === true, "parser handles full stdout flag");
+  const parsedNoAutoOut = parseArgv(["html", "--no-auto-out"]);
+  assertSelfTest(parsedNoAutoOut.flags.autoOut === false, "parser handles no-auto-out flag");
   const parsedRestartDaemon = parseArgv(["tabs", "--restart-daemon"]);
   assertSelfTest(parsedRestartDaemon.flags.restartDaemon === true, "parser handles daemon restart flag");
+  const realProfileState = {
+    pid: process.pid,
+    session: "real",
+    stateFile: stateFileForSessionName("real"),
+    modeKey: JSON.stringify({ mode: AUTO_MODE, browserUrl: "http://127.0.0.1:9222" }),
+  };
+  assertSelfTestThrows(
+    () => assertRealProfileRestartAllowed(realProfileState, { restartDaemon: true }),
+    "real-profile restart requires explicit reattach consent",
+  );
+  assertRealProfileRestartAllowed(realProfileState, { restartDaemon: true, allowProfileReattach: true });
+  assertRealProfileRestartAllowed(
+    { pid: process.pid, modeKey: JSON.stringify({ mode: DEDICATED_MODE, browserUrl: "" }) },
+    { restartDaemon: true },
+  );
   assertSelfTest(
     requiredCapabilitiesForPayload({ command: "chain", args: ['[["wait","Example Group"],["blocks","--limit","5"]]'] }).has("visible-blocks"),
     "daemon capability check inspects chain steps",
@@ -10188,6 +10747,28 @@ async function runSelfTest() {
   assertSelfTestThrows(
     () => assertDaemonSupportsPayload({ pid: 1, session: "old" }, { command: "blocks", args: [] }),
     "daemon capability check rejects unsupported old-daemon commands",
+  );
+  let realProfileCapabilityError = "";
+  try {
+    assertDaemonSupportsPayload(realProfileState, { command: "blocks", args: [] });
+  } catch (error) {
+    realProfileCapabilityError = error instanceof Error ? error.message : String(error);
+  }
+  assertSelfTest(
+    realProfileCapabilityError.includes("--allow-profile-reattach"),
+    "real-profile capability error does not casually suggest restart",
+  );
+  const restartGuardDaemon = new BrowserDaemon(path.join(os.tmpdir(), "realbrowser-self-test-restart.json"));
+  restartGuardDaemon.browserUrl = "http://127.0.0.1:9222";
+  await assertSelfTestRejects(
+    () => restartGuardDaemon.restart({}),
+    "real-profile MCP restart requires explicit reattach consent",
+  );
+  const mcpAttachGuardDaemon = new BrowserDaemon(path.join(os.tmpdir(), "realbrowser-self-test-mcp.json"));
+  mcpAttachGuardDaemon.browserUrl = "http://127.0.0.1:9222";
+  await assertSelfTestRejects(
+    () => mcpAttachGuardDaemon.listTools(),
+    "real-profile MCP lazy attach requires explicit reattach consent",
   );
   const backgroundPayload = daemonPayloadForCommand(parsedBackgroundOpen.command, parsedBackgroundOpen.args, parsedBackgroundOpen.flags);
   assertSelfTest(backgroundPayload.command === "open", "open is handled by the daemon hot path");

@@ -44,9 +44,15 @@ polling loops; that can trigger repeated Chrome approval dialogs.
 
 The daemon reports its script hash and capabilities. If a running daemon is
 older than the edited skill and a command needs a new capability, realbrowser
-fails with a reload instruction instead of sending an unsupported command. Use
-`--restart-daemon` only when explicitly accepting that a real Chrome profile may
-show one fresh remote-debugging approval prompt.
+fails instead of sending an unsupported command. For real signed-in Chrome
+profiles, do not reload the daemon as routine cleanup: a replacement controller
+may trigger another Chrome "Allow remote debugging?" approval dialog. A
+real-profile daemon restart is blocked unless `--allow-profile-reattach` is
+passed with `--restart-daemon`; use that only when the prompt tradeoff is
+intentional. MCP-only commands that would create a new real-profile controller
+are also blocked without that flag; prefer CDP-backed reads/actions when they
+answer the task. Anonymous and dedicated managed sessions can be restarted
+normally.
 
 `status` is side-effect-light by default and should be used to check whether realbrowser is already controlling Chrome. It may inspect default-local-Chrome remote-debugging metadata when that file is available, without attaching to the browser backend; treat that metadata as a hint, not proof for every backend. Use `status --deep`, `tabs`, or any page command only when you intentionally want to attach to the browser backend.
 
@@ -156,10 +162,10 @@ question instead of treating screenshots or HTML as fallbacks:
   clearer on screen than in DOM text, or when content is rendered inside an
   image/canvas/card.
 - Use `html` when you need selectors, DOM attributes, or to debug why
-  extraction is wrong. Keep stdout bounded with `--max-chars`; when the HTML is
-  large, write it to an artifact path with `--out <path>` and inspect that file
-  with the platform-native search/viewer instead of pasting large HTML into
-  context.
+  extraction is wrong. `html` is a diagnostic read mode, so its default stdout
+  preview is intentionally short. When the HTML is large, write it to an
+  artifact path with `--out <path>` and inspect that file with the
+  platform-native search/viewer instead of pasting large HTML into context.
 - Use `snapshot` when you need clickable/accessible refs for interaction or an
   accessibility-tree view of the page structure.
 - Use `blocks` for generic dashboards, search results, documents, and pages
@@ -185,6 +191,13 @@ Typical DOM inspection:
 realbrowser --handle content-read html --max-chars 4000
 realbrowser --handle content-read html <selector> --out <artifact-path> --max-chars 2000
 ```
+
+When the user explicitly asks for full raw output and the output is known to be
+small enough for the conversation, use `--raw --full-stdout --max-chars <n>`.
+Do not use `--full-stdout` as a routine fix for large pages; it is an explicit
+escape hatch that can consume a lot of context. For large pages or uncertain
+sizes, write the full data to `--out <path>` and inspect that artifact with
+local tools such as `rg`, `sed`, `head`, or targeted follow-up reads.
 
 Use targeted `js` when the built-in read modes do not expose the structure you
 need. `chain` includes per-step durations in JSON/trace and summary output; use
@@ -454,12 +467,15 @@ Global flags:
 - `--headless` / `--headed`: control managed anonymous/dedicated Chrome visibility. Managed sessions default to headless; existing real-profile attach ignores this because Chrome is already running.
 - `--keep-anonymous`: keep the temporary anonymous profile directory after detach for debugging.
 - `--force`: only for commands that explicitly document it. For handle-writing commands, it intentionally replaces an existing handle file; for `use-session`, it remembers a session name before that daemon starts.
-- `--restart-daemon` / `--reload-daemon`: explicitly stop and reload the selected daemon with the current skill code. For real signed-in Chrome sessions this may show one fresh remote-debugging approval prompt, so use it only when accepting that tradeoff.
+- `--restart-daemon` / `--reload-daemon`: explicitly stop and reload the selected daemon with the current skill code. Anonymous and dedicated managed sessions can restart freely. Real signed-in Chrome sessions require `--allow-profile-reattach` because replacing the controller may show another Chrome remote-debugging approval prompt.
+- `--allow-profile-reattach`: consent to starting or replacing a real-profile Chrome DevTools MCP controller. Use only when a signed-in Chrome daemon truly must be restarted for new skill code, missing capabilities, or an MCP-only command.
 - `--reload`: reload the selected page for commands such as `capture-network`.
 - `--duration <ms>`: capture or wait duration for commands such as `capture-network`.
 - `--har <path>`: write a local HAR-style network artifact for `capture-network`.
 - `--timeout <ms>`: bound waits for commands such as profile `open --select`, readiness waits, downloads, and capture commands.
 - `--out <path>`: write command output artifacts such as console capture JSON or large read results.
+- `--full-stdout`: explicit escape hatch for printing full output to stdout when the caller knows it is small enough. Use with `--raw` and a deliberate `--max-chars <n>`; prefer `--out <path>` for large or unknown output.
+- `--auto-out` / `--no-auto-out`: enable or disable automatic full-output artifacts when stdout is truncated. Auto artifacts default to `~/.realbrowser/outputs` and can be redirected with `REALBROWSER_OUTPUT_DIR`.
 - `--no-network`: on `capture-console`, skip DevTools network failure rows and capture JavaScript console messages only.
 - `--dedicated`: force the dedicated fallback profile.
 - `--no-fallback`: require real Chrome/Chrome MCP attach to work; do not switch to the dedicated profile. Use this whenever existing cookies/login state are required.
@@ -479,7 +495,7 @@ Global flags:
 10. After navigation, modal changes, or form submission, run `observe` or `snapshot --efficient` again before the next action.
 11. If a `uid` is stale, snapshot once and retry with the new ref.
 12. For workflows with several actions, prefer `chain --return summary --trace ~/.realbrowser/trace.json`; the trace includes per-step and total durations for speed review.
-13. Do not restart or detach real signed-in profile sessions during normal browser work; starting a fresh CDP session can trigger Chrome's remote-debugging approval dialog again. Use `active-session`/`sessions` to reuse the existing approved connection.
+13. Do not restart or detach real signed-in profile sessions during normal browser work; starting a fresh controller can trigger Chrome's remote-debugging approval dialog again. Use `active-session`/`sessions` to reuse the existing approved connection. If a real-profile daemon is stale, keep using commands it supports; restart only with `--restart-daemon --allow-profile-reattach` after accepting the prompt tradeoff.
 14. Ask for explicit user approval before submitting sensitive data, making purchases, deleting data, changing account/security settings, granting permissions, or taking any action that is hard to undo.
 15. Stop and report manual blockers such as login, 2FA, captcha, camera/microphone permission, or Chrome remote debugging approval.
 
@@ -490,9 +506,14 @@ Global flags:
 - Prefer `wait <text>` or readiness waits over shell `sleep`. `wait <text>` polls in the page through the fast CDP path when a CDP endpoint is available.
 - Prefer `posts --limit <n>` for repeated-card content and `blocks --limit <n>` for search results or dashboards over full-page `text`.
 - Prefer direct CDP-backed endpoint/profile sessions for cheap reads and navigation. Use `--mcp` only when you need to compare against Chrome DevTools MCP behavior.
+- For real signed-in Chrome profiles, MCP-only commands that would start a new controller require `--allow-profile-reattach`; prefer CDP-backed commands first to avoid repeated Chrome approval prompts.
 - Do not call raw/full snapshot by default. If the user asks for verbose or full output, use `--verbose`, `--raw`, `REALBROWSER_OUTPUT=verbose`, `REALBROWSER_OUTPUT=raw`, or `--out <path>`.
 - On Windows PowerShell, set full-output mode with `$env:REALBROWSER_OUTPUT = "raw"` before running `scripts\realbrowser.ps1`, then remove it with `Remove-Item Env:\REALBROWSER_OUTPUT`.
-- For large HTML/text/network bodies, use `--out <path>` or `network get --response-file <path>`.
+- Stdout is bounded by default even for `--json` and raw output. If stdout truncates, realbrowser preserves the full value in an auto artifact unless `--no-auto-out` is set. Read the printed `full output written to ...` path with local file tools instead of rerunning huge stdout.
+- Use `--full-stdout` only when the user explicitly needs full raw stdout and the result is known to fit safely in context. Pair it with a deliberate `--max-chars <n>`.
+- Full large data belongs in files: use `--out <path>`, `--har <path>`, `network get --request-file <path> --response-file <path>`, or a targeted screenshot artifact.
+- `html` defaults to a short preview. Selector-scope it whenever possible; if the page may be large, use `html <selector> --out <path>` and search the saved file locally.
+- For large HTML/text/network bodies, use artifact flags instead of increasing `--max-chars`. `--max-chars` can tune previews, but stdout remains hard-capped to avoid context blowups and auto-compaction.
 - Use `--page <id>` after `tabs` or `select` to avoid extra target discovery.
 - Screenshot commands return file paths; inspect the image only when visual evidence is needed.
 - Default screenshots are normalized for agent use. Use `--raw-size` only when exact browser pixels matter.
