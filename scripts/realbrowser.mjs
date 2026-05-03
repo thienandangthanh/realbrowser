@@ -35,6 +35,7 @@ const SCREENSHOT_SCALE_STEPS = [1, 0.82, 0.67, 0.55];
 const NPX_COMMAND = process.platform === "win32" ? "npx.cmd" : "npx";
 const CONTROLLED_BANNER_TEXT = "Chrome is being controlled by automated test software";
 const REMOTE_DEBUGGING_SETTINGS_URL = "chrome://inspect/#remote-debugging";
+const BANNER_X_INSTRUCTION = `click the banner X to hide it; this does not turn off Chrome remote debugging.`;
 const MAC_CONTROLLED_BANNER_DISMISS_RIGHT_OFFSET = 42;
 const MAC_CONTROLLED_BANNER_DISMISS_TOP_OFFSET = 167;
 const MAC_BROWSER_PROCESS_NAMES = [
@@ -45,6 +46,42 @@ const MAC_BROWSER_PROCESS_NAMES = [
   "Brave Browser",
   "Microsoft Edge",
   "Vivaldi",
+];
+const MAC_BROWSER_USER_DATA_PATHS = [
+  ["Google", "Chrome"],
+  ["Google", "Chrome Beta"],
+  ["Google", "Chrome for Testing"],
+  ["Chromium"],
+  ["BraveSoftware", "Brave-Browser"],
+  ["Microsoft Edge"],
+  ["Vivaldi"],
+];
+const WINDOWS_BROWSER_USER_DATA_PATHS = [
+  ["Google", "Chrome", "User Data"],
+  ["Google", "Chrome Beta", "User Data"],
+  ["Google", "Chrome for Testing", "User Data"],
+  ["Chromium", "User Data"],
+  ["BraveSoftware", "Brave-Browser", "User Data"],
+  ["Microsoft", "Edge", "User Data"],
+  ["Vivaldi", "User Data"],
+];
+const LINUX_BROWSER_CONFIG_PATHS = [
+  ["google-chrome"],
+  ["google-chrome-beta"],
+  ["chrome-for-testing"],
+  ["chromium"],
+  ["chromium-browser"],
+  ["BraveSoftware", "Brave-Browser"],
+  ["microsoft-edge"],
+  ["vivaldi"],
+  ["vivaldi-snapshot"],
+];
+const LINUX_FLATPAK_BROWSER_CONFIG_PATHS = [
+  ["com.google.Chrome", ["google-chrome"]],
+  ["org.chromium.Chromium", ["chromium"]],
+  ["com.brave.Browser", ["BraveSoftware", "Brave-Browser"]],
+  ["com.microsoft.Edge", ["microsoft-edge"]],
+  ["com.vivaldi.Vivaldi", ["vivaldi"]],
 ];
 
 const INTERACTIVE_ROLES = new Set([
@@ -673,7 +710,7 @@ async function runCli() {
     if (!state || !isProcessAlive(state.pid)) {
       const lines = [
         "realbrowser daemon is not running",
-        `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", click the banner X to hide it; this does not turn off Chrome remote debugging.`,
+        `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", ${BANNER_X_INSTRUCTION}`,
       ];
       if (flags.cleanupRemoteDebugging) {
         lines.push("No daemon is available for automatic cleanup; use Chrome's settings UI, or run `realbrowser cleanup-remote-debugging --allow-attach` if starting a fresh permission-gated attach is acceptable.");
@@ -689,11 +726,7 @@ async function runCli() {
       cleanup = await cleanupRemoteDebuggingViaDaemon(state);
     }
     await daemonRpc(state, { command: "stop" }).catch(() => null);
-    const shouldDismissBanner =
-      !flags.cleanupRemoteDebugging &&
-      flags.dismissBanner !== false &&
-      hadMcpConnection &&
-      mode !== DEDICATED_MODE;
+    const shouldDismissBanner = shouldAttemptBannerDismissal({ flags, hadMcpConnection, mode });
     const bannerDismissal = shouldDismissBanner
       ? await dismissChromeControlledBanner()
       : null;
@@ -702,7 +735,7 @@ async function runCli() {
       cleanup?.text,
       bannerDismissal?.text,
       bannerDismissal?.attempted && !bannerDismissal.dismissed
-        ? `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", click the banner X to hide it; this does not turn off Chrome remote debugging.`
+        ? `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", ${BANNER_X_INSTRUCTION}`
         : "",
     ].filter(Boolean);
     console.log(lines.join("\n"));
@@ -911,6 +944,15 @@ function remoteDebuggingMetadataCaveat(mode) {
   return "That metadata may not describe the active browser backend.";
 }
 
+function shouldAttemptBannerDismissal({ flags = {}, hadMcpConnection = false, mode = AUTO_MODE } = {}) {
+  return (
+    !flags.cleanupRemoteDebugging &&
+    flags.dismissBanner !== false &&
+    mode !== DEDICATED_MODE &&
+    (flags.dismissBanner === true || hadMcpConnection)
+  );
+}
+
 function chromeUserDataDirCandidates() {
   const candidates = [];
   if (process.env.REALBROWSER_CHROME_USER_DATA_DIR) {
@@ -921,58 +963,26 @@ function chromeUserDataDirCandidates() {
   }
   const home = os.homedir();
   if (process.platform === "darwin") {
-    for (const browserPath of [
-      ["Google", "Chrome"],
-      ["Google", "Chrome Beta"],
-      ["Google", "Chrome for Testing"],
-      ["Chromium"],
-      ["BraveSoftware", "Brave-Browser"],
-      ["Microsoft Edge"],
-      ["Vivaldi"],
-    ]) {
-      candidates.push(path.join(home, "Library", "Application Support", ...browserPath));
-    }
+    appendPathCandidates(candidates, path.join(home, "Library", "Application Support"), MAC_BROWSER_USER_DATA_PATHS);
   } else if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA;
     if (localAppData) {
-      for (const browserPath of [
-        ["Google", "Chrome", "User Data"],
-        ["Google", "Chrome Beta", "User Data"],
-        ["Google", "Chrome for Testing", "User Data"],
-        ["Chromium", "User Data"],
-        ["BraveSoftware", "Brave-Browser", "User Data"],
-        ["Microsoft", "Edge", "User Data"],
-        ["Vivaldi", "User Data"],
-      ]) {
-        candidates.push(path.join(localAppData, ...browserPath));
-      }
+      appendPathCandidates(candidates, localAppData, WINDOWS_BROWSER_USER_DATA_PATHS);
     }
   } else {
     const configHome = process.env.XDG_CONFIG_HOME || path.join(home, ".config");
-    for (const browserPath of [
-      ["google-chrome"],
-      ["google-chrome-beta"],
-      ["chrome-for-testing"],
-      ["chromium"],
-      ["chromium-browser"],
-      ["BraveSoftware", "Brave-Browser"],
-      ["microsoft-edge"],
-      ["vivaldi"],
-      ["vivaldi-snapshot"],
-    ]) {
-      candidates.push(path.join(configHome, ...browserPath));
-    }
-    for (const [appId, browserPath] of [
-      ["com.google.Chrome", ["google-chrome"]],
-      ["org.chromium.Chromium", ["chromium"]],
-      ["com.brave.Browser", ["BraveSoftware", "Brave-Browser"]],
-      ["com.microsoft.Edge", ["microsoft-edge"]],
-      ["com.vivaldi.Vivaldi", ["vivaldi"]],
-    ]) {
+    appendPathCandidates(candidates, configHome, LINUX_BROWSER_CONFIG_PATHS);
+    for (const [appId, browserPath] of LINUX_FLATPAK_BROWSER_CONFIG_PATHS) {
       candidates.push(path.join(home, ".var", "app", appId, "config", ...browserPath));
     }
   }
   return [...new Set(candidates.map((candidate) => path.resolve(candidate)))];
+}
+
+function appendPathCandidates(candidates, baseDir, relativePaths) {
+  for (const relativePath of relativePaths) {
+    candidates.push(path.join(baseDir, ...relativePath));
+  }
 }
 
 function modeFromState(state) {
@@ -4290,6 +4300,18 @@ function runSelfTest() {
   assertSelfTest(
     noFallbackFromState({ modeKey: JSON.stringify({ mode: AUTO_MODE, noFallback: true }) }) === true,
     "noFallbackFromState reads disabled fallback",
+  );
+  assertSelfTest(
+    shouldAttemptBannerDismissal({ flags: {}, hadMcpConnection: true, mode: AUTO_MODE }) === true,
+    "banner dismissal defaults on after an MCP-backed real-profile session",
+  );
+  assertSelfTest(
+    shouldAttemptBannerDismissal({ flags: { dismissBanner: true }, hadMcpConnection: false, mode: AUTO_MODE }) === true,
+    "explicit banner dismissal works even when daemon health is incomplete",
+  );
+  assertSelfTest(
+    shouldAttemptBannerDismissal({ flags: {}, hadMcpConnection: true, mode: DEDICATED_MODE }) === false,
+    "banner dismissal is skipped for dedicated mode",
   );
   const detachedControl = browserControlStatus({ running: false, mode: AUTO_MODE, mcpConnected: null });
   assertSelfTest(detachedControl.realSignedInProfileMayBeControlled === false, "detached status reports no realbrowser control");
