@@ -654,18 +654,53 @@ function daemonPayloadForCommand(command, args, flags = {}) {
     requireArgs(command, args, 1);
     return {
       command: "tool",
-      args: [
-        "new_page",
-        JSON.stringify({
-          url: args[0],
-          background: !flags.front,
-          ...(flags.timeout ? { timeout: parsePositiveInteger(flags.timeout, "timeout") } : {}),
-        }),
-      ],
+      args: backgroundNewPageArgs(args[0], flags),
+      flags,
+    };
+  }
+  if (command === "chain") {
+    return {
+      command,
+      args: translateChainOpenSteps(args),
       flags,
     };
   }
   return { command, args, flags };
+}
+
+function backgroundNewPageArgs(url, flags = {}) {
+  return [
+    "new_page",
+    JSON.stringify({
+      url,
+      background: !flags.front,
+      ...(flags.timeout ? { timeout: parsePositiveInteger(flags.timeout, "timeout") } : {}),
+    }),
+  ];
+}
+
+function translateChainOpenSteps(args) {
+  if (args.length === 0) {
+    return args;
+  }
+  const steps = parseJsonArg(args.join(" "), "chain");
+  if (!Array.isArray(steps)) {
+    return args;
+  }
+  let changed = false;
+  const translated = steps.map((step) => {
+    if (!Array.isArray(step) || step.length === 0) {
+      return step;
+    }
+    const parsed = parseArgv(step.map((value) => String(value)));
+    if (parsed.command !== "open" && parsed.command !== "newtab") {
+      return step;
+    }
+    requireArgs(parsed.command, parsed.args, 1);
+    changed = true;
+    return ["tool", ...backgroundNewPageArgs(parsed.args[0], parsed.flags)];
+  });
+  return changed ? [JSON.stringify(translated)] : args;
 }
 
 class McpClient {
@@ -3374,7 +3409,8 @@ function buildEvalFunction(code) {
   const trimmed = code.trim();
   if (
     /^(async\s+)?function\b/.test(trimmed) ||
-    /^(async\s*)?(\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/.test(trimmed)
+    (/^(async\s*)?(\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/.test(trimmed) &&
+      !looksLikeInvokedFunctionExpression(trimmed))
   ) {
     return trimmed;
   }
@@ -3382,6 +3418,13 @@ function buildEvalFunction(code) {
     return `async () => { ${code} }`;
   }
   return `async () => (${code})`;
+}
+
+function looksLikeInvokedFunctionExpression(code) {
+  return (
+    /^\(\s*(async\s*)?(function\b|(\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>)/.test(code) &&
+    /\)\s*\([^)]*\)\s*$/.test(code)
+  );
 }
 
 function needsEvalBlockWrapper(code) {
@@ -3530,6 +3573,16 @@ function runSelfTest() {
   assertSelfTest(JSON.parse(backgroundPayload.args[1]).background === true, "open translation uses background by default");
   const foregroundPayload = daemonPayloadForCommand(parsedForegroundOpen.command, parsedForegroundOpen.args, parsedForegroundOpen.flags);
   assertSelfTest(JSON.parse(foregroundPayload.args[1]).background === false, "open --front uses foreground");
+  const chainPayload = daemonPayloadForCommand("chain", ['[["open","https://example.com"],["snapshot","--efficient"]]'], {});
+  const translatedChain = JSON.parse(chainPayload.args[0]);
+  assertSelfTest(translatedChain[0][0] === "tool" && translatedChain[0][1] === "new_page", "chain open is translated to new_page");
+  assertSelfTest(JSON.parse(translatedChain[0][2]).background === true, "chain open defaults to background");
+  assertSelfTest(translatedChain[1][0] === "snapshot", "chain translation preserves other commands");
+  assertSelfTest(buildEvalFunction("() => 1") === "() => 1", "buildEvalFunction preserves direct arrow functions");
+  assertSelfTest(
+    buildEvalFunction("(() => 1)()").startsWith("async () => ("),
+    "buildEvalFunction wraps invoked arrow expressions",
+  );
 
   const parsedScreenshotLimits = parseArgv(["screenshot", "--max-side", "2000", "--max-bytes=5mb", "--raw-size"]);
   assertSelfTest(parsedScreenshotLimits.flags.maxSide === "2000", "parser handles screenshot max-side");
