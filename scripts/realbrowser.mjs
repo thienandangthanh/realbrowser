@@ -195,7 +195,7 @@ Usage:
   realbrowser tool <mcpToolName> [jsonArgs]
   realbrowser tools [--json]
   realbrowser chain '[["snapshot","--page","1"],["console","--errors","--page","1"]]' [--return summary|final|all] [--trace <path>] [--json]
-  realbrowser stop|detach [--cleanup-remote-debugging] [--no-dismiss-banner]
+  realbrowser stop|detach [--dismiss-banner] [--cleanup-remote-debugging]
 
 Global flags:
   --json
@@ -211,7 +211,6 @@ Global flags:
   --no-fallback
   --cleanup-remote-debugging
   --dismiss-banner
-  --no-dismiss-banner
   --allow-attach
 `;
 }
@@ -708,25 +707,33 @@ async function runCli() {
   if (command === "stop" || command === "detach") {
     const state = await readJson(stateFileFromFlags(flags));
     if (!state || !isProcessAlive(state.pid)) {
+      const bannerDismissal = flags.dismissBanner === true && !flags.cleanupRemoteDebugging
+        ? await dismissChromeControlledBanner()
+        : null;
       const lines = [
         "realbrowser daemon is not running",
-        `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", ${BANNER_X_INSTRUCTION}`,
+        bannerDismissal?.text,
+        bannerDismissal?.attempted && !bannerDismissal.dismissed
+          ? `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", ${BANNER_X_INSTRUCTION}`
+          : "",
+        !bannerDismissal
+          ? `If Chrome still shows "${CONTROLLED_BANNER_TEXT}", ${BANNER_X_INSTRUCTION}`
+          : "",
       ];
       if (flags.cleanupRemoteDebugging) {
         lines.push("No daemon is available for automatic cleanup; use Chrome's settings UI, or run `realbrowser cleanup-remote-debugging --allow-attach` if starting a fresh permission-gated attach is acceptable.");
       }
-      console.log(lines.join("\n"));
+      console.log(lines.filter(Boolean).join("\n"));
       return;
     }
     const healthBody = await health(state).catch(() => null);
     const mode = healthBody?.mode ?? modeFromState(state) ?? AUTO_MODE;
-    const hadMcpConnection = healthBody?.mcpConnected === true;
     let cleanup = null;
     if (flags.cleanupRemoteDebugging) {
       cleanup = await cleanupRemoteDebuggingViaDaemon(state);
     }
     await daemonRpc(state, { command: "stop" }).catch(() => null);
-    const shouldDismissBanner = shouldAttemptBannerDismissal({ flags, hadMcpConnection, mode });
+    const shouldDismissBanner = shouldAttemptBannerDismissal({ flags, mode });
     const bannerDismissal = shouldDismissBanner
       ? await dismissChromeControlledBanner()
       : null;
@@ -944,12 +951,11 @@ function remoteDebuggingMetadataCaveat(mode) {
   return "That metadata may not describe the active browser backend.";
 }
 
-function shouldAttemptBannerDismissal({ flags = {}, hadMcpConnection = false, mode = AUTO_MODE } = {}) {
+function shouldAttemptBannerDismissal({ flags = {}, mode = AUTO_MODE } = {}) {
   return (
     !flags.cleanupRemoteDebugging &&
-    flags.dismissBanner !== false &&
     mode !== DEDICATED_MODE &&
-    (flags.dismissBanner === true || hadMcpConnection)
+    flags.dismissBanner === true
   );
 }
 
@@ -1126,7 +1132,7 @@ function browserControlStatus(daemon, chromeRemoteDebugging = null) {
         : "realbrowser daemon is running, but this daemon version did not report whether Chrome DevTools MCP is connected.",
     stopRealbrowserCommand: "realbrowser detach",
     turnOffChromeRemoteDebugging: REMOTE_DEBUGGING_SETTINGS_URL,
-    note: "The Chrome banner is a browser safety indicator while attached. Plain detach closes realbrowser's session and may dismiss the banner UI, but it must not disable Chrome remote debugging.",
+    note: "The Chrome banner is a browser safety indicator while attached. Plain detach closes realbrowser's session only; --dismiss-banner is the explicit best-effort browser-UI cleanup path.",
   };
 }
 
@@ -1158,7 +1164,7 @@ function formatLocalStatusText(daemon, browserControl, chromeRemoteDebugging = n
     metadataCaveat,
     `Chrome banner: ${browserControl.chromeBannerExpectedNow === true ? "expected now" : browserControl.chromeBannerExpectedNow === false ? "may appear when the next browser command attaches" : "unknown; this daemon predates banner status reporting"}`,
     `Real signed-in profile may be controlled: ${browserControl.realSignedInProfileMayBeControlled ? "yes" : "no"}`,
-    `Cleanup: run \`${browserControl.stopRealbrowserCommand}\`; plain detach keeps Chrome remote debugging enabled and best-effort clicks the banner X. Use \`${browserControl.stopRealbrowserCommand} --cleanup-remote-debugging\` only when you want to disable Chrome remote debugging too.`,
+    `Cleanup: run \`${browserControl.stopRealbrowserCommand}\` to stop realbrowser only. Add \`--dismiss-banner\` only when you explicitly want a best-effort banner-X click. Use \`${browserControl.stopRealbrowserCommand} --cleanup-remote-debugging\` only when you want to disable Chrome remote debugging too.`,
   ].filter(Boolean).join("\n");
 }
 
@@ -4302,15 +4308,15 @@ function runSelfTest() {
     "noFallbackFromState reads disabled fallback",
   );
   assertSelfTest(
-    shouldAttemptBannerDismissal({ flags: {}, hadMcpConnection: true, mode: AUTO_MODE }) === true,
-    "banner dismissal defaults on after an MCP-backed real-profile session",
+    shouldAttemptBannerDismissal({ flags: {}, mode: AUTO_MODE }) === false,
+    "plain detach does not dismiss browser UI by default",
   );
   assertSelfTest(
-    shouldAttemptBannerDismissal({ flags: { dismissBanner: true }, hadMcpConnection: false, mode: AUTO_MODE }) === true,
-    "explicit banner dismissal works even when daemon health is incomplete",
+    shouldAttemptBannerDismissal({ flags: { dismissBanner: true }, mode: AUTO_MODE }) === true,
+    "explicit banner dismissal works independently of daemon health",
   );
   assertSelfTest(
-    shouldAttemptBannerDismissal({ flags: {}, hadMcpConnection: true, mode: DEDICATED_MODE }) === false,
+    shouldAttemptBannerDismissal({ flags: { dismissBanner: true }, mode: DEDICATED_MODE }) === false,
     "banner dismissal is skipped for dedicated mode",
   );
   const detachedControl = browserControlStatus({ running: false, mode: AUTO_MODE, mcpConnected: null });
