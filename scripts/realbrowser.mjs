@@ -21,6 +21,7 @@ const DEFAULT_DOWNLOAD_DIR = path.join(os.homedir(), ".realbrowser", "downloads"
 const DEFAULT_DOWNLOAD_SOURCE_DIR = path.join(os.homedir(), "Downloads");
 const DEFAULT_SCREENSHOT_MAX_SIDE = parseOptionalIntegerEnv("REALBROWSER_SCREENSHOT_MAX_SIDE", 2000);
 const DEFAULT_SCREENSHOT_MAX_BYTES = parseOptionalBytesEnv("REALBROWSER_SCREENSHOT_MAX_BYTES", 5 * 1024 * 1024);
+const DEFAULT_MANAGED_IDLE_TIMEOUT_MS = parseOptionalIntegerEnv("REALBROWSER_IDLE_TIMEOUT_MS", 30 * 60 * 1000);
 const START_TIMEOUT_MS = Number.parseInt(process.env.REALBROWSER_START_TIMEOUT_MS ?? "20000", 10);
 const MCP_START_TIMEOUT_MS = Number.parseInt(process.env.REALBROWSER_MCP_TIMEOUT_MS ?? "30000", 10);
 const PACKAGE_SPEC = process.env.REALBROWSER_MCP_PACKAGE ?? "chrome-devtools-mcp@latest";
@@ -33,6 +34,7 @@ const DAEMON_CAPABILITIES = Object.freeze([
   "endpoint-session-manager",
   "filtered-links",
   "managed-headless",
+  "managed-idle-timeout",
   "page-local-wait",
   "persistent-cdp-ws-target-list",
   "visible-wait",
@@ -1543,6 +1545,12 @@ function desiredHeadless(flags = {}, mode = desiredMode(flags)) {
     return envHeadless;
   }
   return mode === ANONYMOUS_MODE || mode === DEDICATED_MODE;
+}
+
+function managedIdleTimeoutMsForMode(mode) {
+  return mode === ANONYMOUS_MODE || mode === DEDICATED_MODE
+    ? DEFAULT_MANAGED_IDLE_TIMEOUT_MS
+    : 0;
 }
 
 function profileDirForMode(mode, flags = {}) {
@@ -9578,6 +9586,9 @@ async function runDaemon() {
   const port = await findFreePort();
   const token = crypto.randomBytes(32).toString("hex");
   const daemon = new BrowserDaemon(stateFile);
+  const idleTimeoutMs = managedIdleTimeoutMsForMode(daemon.mode);
+  let lastActivity = Date.now();
+  let idleCheckInterval = null;
   let rpcQueue = Promise.resolve();
   const enqueueRpc = (task) => {
     const run = rpcQueue.catch(() => {}).then(task);
@@ -9596,6 +9607,8 @@ async function runDaemon() {
           capabilities: DAEMON_CAPABILITIES,
           mode: daemon.currentMode(),
           headless: daemon.headless,
+          idleTimeoutMs,
+          idleForMs: Date.now() - lastActivity,
           noFallback: daemon.noFallback,
           mcpConnected: Boolean(daemon.mcp),
         });
@@ -9609,6 +9622,7 @@ async function runDaemon() {
         sendJson(res, 401, { error: "unauthorized" });
         return;
       }
+      lastActivity = Date.now();
       const body = await readRequestJson(req);
       const result = await enqueueRpc(() => daemon.handle(body.command, body.args ?? [], body.flags ?? {}));
       sendJson(res, 200, result);
@@ -9629,6 +9643,7 @@ async function runDaemon() {
     version: CLI_VERSION,
     scriptHash: SCRIPT_HASH,
     capabilities: DAEMON_CAPABILITIES,
+    idleTimeoutMs,
     script: SCRIPT_PATH,
     stateFile,
     session: process.env.REALBROWSER_SESSION || undefined,
@@ -9641,6 +9656,17 @@ async function runDaemon() {
       keepAnonymous: process.env.REALBROWSER_KEEP_ANONYMOUS === "1",
     }),
   });
+  if (idleTimeoutMs > 0) {
+    const checkEveryMs = Math.max(500, Math.min(60_000, Math.floor(idleTimeoutMs / 4)));
+    idleCheckInterval = setInterval(() => {
+      if (Date.now() - lastActivity <= idleTimeoutMs) {
+        return;
+      }
+      clearInterval(idleCheckInterval);
+      daemon.handle("stop", [], {}).catch(() => process.exit(0));
+    }, checkEveryMs);
+    idleCheckInterval.unref?.();
+  }
 }
 
 function readRequestJson(req) {
@@ -9745,6 +9771,9 @@ async function runSelfTest() {
   assertSelfTest(parsedHeadedOpen.flags.headless === false && parsedHeadedOpen.flags.headed === true, "parser handles headed flag");
   assertSelfTest(desiredHeadless({ anonymous: true }) === true, "anonymous sessions default to headless");
   assertSelfTest(desiredHeadless({ anonymous: true, front: true }) === false, "front opts managed sessions into headed mode");
+  assertSelfTest(managedIdleTimeoutMsForMode(ANONYMOUS_MODE) > 0, "anonymous managed sessions have an idle timeout");
+  assertSelfTest(managedIdleTimeoutMsForMode(DEDICATED_MODE) > 0, "dedicated managed sessions have an idle timeout");
+  assertSelfTest(managedIdleTimeoutMsForMode(AUTO_MODE) === 0, "real-profile auto sessions do not idle-shutdown by default");
   assertSelfTest(
     buildMcpArgs({ mode: ANONYMOUS_MODE, profileDir: "", headless: true }).includes("--headless=true"),
     "anonymous MCP launch can be headless",
