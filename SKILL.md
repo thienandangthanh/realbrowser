@@ -17,7 +17,6 @@ REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
 "$REALBROWSER_CLI" open http://localhost:3000
 "$REALBROWSER_CLI" observe
 "$REALBROWSER_CLI" snapshot --efficient
-"$REALBROWSER_CLI" detach
 ```
 
 On Windows PowerShell, prefer `scripts\realbrowser.ps1 ...`. On `cmd.exe`, use `scripts\realbrowser.cmd ...`. `node scripts\realbrowser.mjs ...` and the installed `realbrowser` npm bin are also portable. The POSIX `scripts/realbrowser` wrapper is for macOS/Linux shells.
@@ -28,6 +27,8 @@ The CLI starts a persistent loopback daemon on demand. The daemon stores its por
 
 Use `--session <name>` whenever multiple browser contexts may exist. A named session has its own state file under `~/.realbrowser/sessions/`, so `tom-anon`, `default-anon`, and the default session do not overwrite each other.
 
+Realbrowser also has one active session pointer at `~/.realbrowser/active-session.json`. `select-tab` sets it after a unique match, explicit `--session <name>` commands set it after successful page commands, and `use-session <name>` sets it manually. Plain follow-up commands such as `observe`, `console`, `capture-network`, `viewport`, and `screenshot` use the active running session automatically. Use `sessions` to see the active `*`, `active-session` to inspect it, `clear-session` to forget it, and `--no-active-session` when you intentionally want the default state file instead.
+
 ## Browser Choice
 
 Default behavior:
@@ -35,11 +36,11 @@ Default behavior:
 1. Prefer Chrome DevTools MCP `--autoConnect` so Codex can control the user's real running Chrome profile after Chrome DevTools Protocol remote debugging is enabled in `chrome://inspect/#remote-debugging`.
 2. If auto-connect cannot attach, fall back to a dedicated profile at `~/.realbrowser/profile`.
 
-Chrome's "Allow remote debugging?" dialog is expected when a new Chrome DevTools MCP auto-connect session attaches to the real signed-in profile. `Allow` should be treated as permission for the current debugging connection, not a permanent approval for every future daemon process. Reuse the persistent daemon and avoid `stop`/`restart` unless needed.
+Chrome's "Allow remote debugging?" dialog is expected when a new Chrome DevTools MCP auto-connect session attaches to the real signed-in profile. `Allow` should be treated as permission for the current debugging connection, not a permanent approval for every future daemon process. Reuse the persistent active session and avoid `stop`, `detach`, or `restart` for real signed-in profile checks unless the user explicitly asks for cleanup.
 
 For tasks that require the user's logged-in Chrome profile, fallback is not acceptable. First verify the intended Chrome profile is active, open `chrome://inspect/#remote-debugging` in that profile, turn on "Allow remote debugging for this browser instance", then run realbrowser with `--no-fallback` or `REALBROWSER_NO_FALLBACK=1`. `status` should then report `Dedicated fallback disabled: yes`. If attach still fails, stop and report the Chrome remote-debugging/CDP blocker instead of continuing in the dedicated profile.
 
-Chrome's "Chrome is being controlled by automated test software" banner is expected while Chrome DevTools MCP has an active debugging session. Report it as a safety indicator, run `realbrowser status` to identify whether the realbrowser daemon is connected, and use `realbrowser stop` or `realbrowser detach` to detach realbrowser. Plain detach should not turn off Chrome remote debugging and should not touch browser UI; it only closes realbrowser's session. If the user explicitly asks to hide the banner, use `realbrowser detach --dismiss-banner` for a best-effort click on the visible banner `X` on supported desktop platforms. This only hides browser UI and does not disable remote debugging/CDP. On platforms where browser-UI clicking is not automated, detach must still succeed and print a manual banner-X instruction. If the task should also turn off the user's Chrome remote-debugging setting, use `realbrowser detach --cleanup-remote-debugging` while the daemon is still running. If the daemon is already stopped, `realbrowser cleanup-remote-debugging` will not create a fresh debugging session unless `--allow-attach` is passed.
+Chrome's "Chrome is being controlled by automated test software" banner is expected while Chrome DevTools MCP has an active debugging session. Report it as a safety indicator and run `realbrowser status` to identify whether realbrowser is connected. Do not detach real signed-in profile sessions as routine cleanup; keeping the session alive avoids repeated remote-debugging approval prompts and preserves the selected browser context for the next command. Plain detach should not turn off Chrome remote debugging and should not touch browser UI; it only closes realbrowser's session. If the user explicitly asks to hide the banner, use `realbrowser detach --dismiss-banner` for a best-effort click on the visible banner `X` on supported desktop platforms. This only hides browser UI and does not disable remote-debugging/CDP. On platforms where browser-UI clicking is not automated, detach must still succeed and print a manual banner-X instruction. If the task should also turn off the user's Chrome remote-debugging setting, use `realbrowser detach --cleanup-remote-debugging` while the daemon is still running. If the daemon is already stopped, `realbrowser cleanup-remote-debugging` will not create a fresh debugging session unless `--allow-attach` is passed.
 
 Keep this portable. The official portable boundary is Chrome DevTools MCP/CDP plus Chrome's own remote-debugging UI. OS browser-UI automation is best-effort only and must not be required for the core attach/detach flow.
 
@@ -64,6 +65,7 @@ For requests like "go to staging.ninzap.com on Tom's browser profile, check inbo
 ```bash
 "$REALBROWSER_CLI" profiles "tuyenhx.tanker" --browser chrome
 "$REALBROWSER_CLI" open --profile "chrome:Profile 4" https://staging.ninzap.com/ --select --no-fallback --timeout 15000
+"$REALBROWSER_CLI" active-session
 "$REALBROWSER_CLI" observe
 "$REALBROWSER_CLI" snapshot --efficient
 "$REALBROWSER_CLI" screenshot staging-ninzap-inbox.png --full
@@ -79,7 +81,7 @@ When the user asks to check a URL that may already be open, search existing debu
 "$REALBROWSER_CLI" observe
 ```
 
-`find-tab`/`tabs-all` enumerate tabs from every discovered DevTools endpoint and show matching URL/title plus possible profiles. `select-tab` attaches to the matching endpoint and selects the matching page when there is exactly one candidate. If several tabs match, do not guess; show the candidates and ask the user which one to use. If no tab is debuggable, open the URL with `open --profile <id> <url>`.
+`find-tab`/`tabs-all` enumerate tabs from every discovered DevTools endpoint and show matching URL/title plus possible profiles. `select-tab` attaches to the matching endpoint and selects the matching page when there is exactly one candidate. A unique selection becomes the active session; use plain follow-up commands unless you intentionally pass another `--session`. If several tabs match, do not guess; show the candidates and ask the user which one to use. If no tab is debuggable, open the URL with `open --profile <id> <url>`.
 
 ## Anonymous Sessions And Network Capture
 
@@ -102,7 +104,7 @@ For multiple anonymous/profile contexts, name every context and search all sessi
 "$REALBROWSER_CLI" sessions
 "$REALBROWSER_CLI" find-tab ninzap.dev --all-sessions
 "$REALBROWSER_CLI" select-tab ninzap.dev --all-sessions
-"$REALBROWSER_CLI" --session tom-anon observe
+"$REALBROWSER_CLI" observe
 ```
 
 For a profile-bound Incognito window, combine `--profile`, `--anonymous`, `--session`, and `--select`. This opens Chrome with `--profile-directory=<profile>` plus `--incognito`, then attaches to the profile's detected DevTools endpoint. It requires that profile to expose a DevTools endpoint for automation:
@@ -111,7 +113,7 @@ For a profile-bound Incognito window, combine `--profile`, `--anonymous`, `--ses
 "$REALBROWSER_CLI" open https://ninzap.dev --profile "chrome:Profile 4" --anonymous --session tom-anon --select --no-fallback
 ```
 
-When the user says "check the current UI on ninzap.dev" and there may be several profiles or anonymous sessions, first run `find-tab ninzap.dev --all-sessions`. If exactly one tab matches, run `select-tab ninzap.dev --all-sessions` and continue with the reported `--session <name>`. If several match, show the candidates and ask; do not guess.
+When the user says "check the current UI on ninzap.dev" and there may be several profiles or anonymous sessions, first run `sessions` and `find-tab ninzap.dev --all-sessions`. If exactly one tab matches, run `select-tab ninzap.dev --all-sessions`; this activates that session, so continue with plain commands like `observe`, `responsive`, `console`, or `screenshot`. If several match, show the candidates and ask; do not guess.
 
 For performance/network requests, start capture before navigation or reload:
 
@@ -123,7 +125,7 @@ For performance/network requests, start capture before navigation or reload:
 
 `capture-network` records browser performance entries plus DevTools network rows, summarizes slow requests, large transfers, failed/error lines, render-blocking resources, top hosts, and navigation timing. It does not capture response bodies or auth headers. URLs in summaries redact query strings unless `--values` or `--raw` is passed; HAR files preserve full URLs because they are local artifacts.
 
-For render bugs or requests like "check ninzap.dev console log to see what is the problem", capture console logs into an artifact the agent can analyze:
+For render bugs or requests like "check ninzap.dev console log to see what is the problem", capture console logs into an artifact the agent can analyze. Chrome DevTools Console can also show network failures when "Network messages" is enabled, so `capture-console` includes failed DevTools network rows by default; use `--no-network` only when the user needs JavaScript console messages alone.
 
 ```bash
 "$REALBROWSER_CLI" capture-console https://ninzap.dev --anonymous --duration 5000 --out ninzap-dev-console.json
@@ -133,7 +135,7 @@ For render bugs or requests like "check ninzap.dev console log to see what is th
 "$REALBROWSER_CLI" console get <msgid> --raw
 ```
 
-`capture-console` lists `console.log`/`info`/`warn`/`error` messages, fetches per-message details, and writes JSON with message ids, argument values, and stack/source data when Chrome DevTools MCP exposes them. In anonymous mode it reuses the initial incognito page for fresh URL captures. Use `--errors` to focus on errors and warnings, `--filter <text>` to narrow noisy apps, and `console get <msgid>` when you only need one detailed message. Console logs can contain user data, tokens, request payloads, or account details; keep artifacts local unless the user explicitly wants them shared.
+`capture-console` lists `console.log`/`info`/`warn`/`error` messages, fetches per-message details, includes failed network rows that Chrome DevTools would show in the Console, and writes JSON with message ids, argument values, stack/source data, and `networkFailures` when Chrome DevTools MCP exposes them. In anonymous mode it reuses the initial incognito page for fresh URL captures. Use `--reload` when you need resource-load failures from the current render, `--errors` to focus on errors and warnings, `--filter <text>` to narrow noisy apps, and `console get <msgid>` when you only need one detailed message. Console logs and network rows can contain user data, tokens, request payloads, or account details; keep artifacts local unless the user explicitly wants them shared.
 
 Useful overrides:
 
@@ -145,6 +147,7 @@ REALBROWSER_BROWSER_URL=http://127.0.0.1:9222 "$REALBROWSER_CLI" download <uid> 
 REALBROWSER_CDP_URL=http://127.0.0.1:9222 "$REALBROWSER_CLI" wait-download report.pdf
 REALBROWSER_STATE_FILE=/tmp/realbrowser.json "$REALBROWSER_CLI" doctor
 REALBROWSER_SESSION=tom-anon "$REALBROWSER_CLI" observe
+REALBROWSER_NO_ACTIVE_SESSION=1 "$REALBROWSER_CLI" status
 REALBROWSER_BROWSER_USER_DATA_DIR=/path/to/browser/profile-root "$REALBROWSER_CLI" status
 REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dismiss-banner
 ```
@@ -154,13 +157,16 @@ REALBROWSER_BROWSER_PROCESS_NAME="Google Chrome" "$REALBROWSER_CLI" detach --dis
 - `doctor [--deep]`: check Node, npm/npx, daemon, MCP tools, and optionally live tabs.
 - `status [--deep]`: show local daemon/control state without attaching by default. It may include default-local-browser remote-debugging metadata when that file is available; treat that as a diagnostic hint, not proof for dedicated profiles, `--browser-url`, or remote CDP. Pass `--deep` to attach and include tab count plus selected tab.
 - `profiles [query] [--browser <key>]`: list local Chromium-family browser profiles. Use the stable id from this output for profile-specific work.
-- `sessions`: list running realbrowser sessions and their modes/state files.
-- `find-tab [query] [--browser <key>] [--session <name>|--all-sessions]` / `tabs-all [query]`: search existing debuggable tabs across discovered browser/profile endpoints and, with `--all-sessions`, running realbrowser sessions.
-- `select-tab <query> [--browser <key>] [--session <name>|--all-sessions] [--front]`: attach to the endpoint for a unique matching existing tab and select it for later commands. If the selected tab is in a named session, continue subsequent commands with the reported `--session <name>`. If the match is ambiguous, it prints candidates instead of selecting.
+- `sessions`: list running realbrowser sessions and their modes/state files. The `*` row is the active session used by commands without `--session`.
+- `active-session` / `current-session`: show the remembered active session and whether it is running.
+- `use-session <name> [--force]`: make a running named session the active session. `--force` only remembers the name before the daemon starts; normal use should not need it.
+- `clear-session`: forget the active session pointer without stopping any browser daemon.
+- `find-tab [query] [--browser <key>] [--session <name>|--all-sessions]` / `tabs-all [query]`: search existing debuggable tabs across discovered browser/profile endpoints and, with `--all-sessions`, running realbrowser sessions. Without `--all-sessions`, it also searches the active running session.
+- `select-tab <query> [--browser <key>] [--session <name>|--all-sessions] [--front] [--no-activate-session]`: attach to the endpoint for a unique matching existing tab and select it for later commands. A unique match activates its session unless `--no-activate-session` is passed. If the match is ambiguous, it prints candidates instead of selecting.
 - `open-profile <profile-query> <url> [--select]`: open a URL in a selected browser UI profile. Equivalent to `open <url> --profile <profile-query>`.
 - `capture-network [url] [--anonymous|--profile <profile-query>|--browser-url <url>] [--reload] [--duration <ms>] [--har <path>]`: capture network/performance data from a fresh navigation, reload, or current selected page. Use `--anonymous` for clean-state checks, `--profile` or `select-tab` for authenticated checks, and `--har` for a local HAR-style artifact.
-- `capture-console [url] [--anonymous|--profile <profile-query>] [--reload] [--duration <ms>] [--out <path>] [--errors] [--filter <text>]`: capture console logs from a fresh navigation, reload, or current selected page. Use it for render failures and JavaScript errors; `--out` writes the detailed JSON artifact for later analysis.
-- `stop` / `detach`: stop the local daemon and close realbrowser's MCP connection. Plain detach leaves Chrome remote debugging enabled and does not touch browser UI. Add `--dismiss-banner` only when the user explicitly wants a best-effort click on the visible automation banner `X`. Add `--cleanup-remote-debugging` only when the user explicitly wants Chrome's remote-debugging setting turned off too.
+- `capture-console [url] [--anonymous|--profile <profile-query>] [--reload] [--duration <ms>] [--out <path>] [--errors] [--filter <text>] [--no-network]`: capture console logs from a fresh navigation, reload, or current selected page. It also includes failed network rows because Chrome DevTools shows those in the Console when "Network messages" is enabled. Use it for render failures and JavaScript errors; `--out` writes the detailed JSON artifact for later analysis.
+- `stop` / `detach`: stop the selected daemon and close realbrowser's MCP connection. With an active session, plain `detach` stops that active session; use `--session <name>` to stop a specific named session or `--all-sessions` to stop every running session. Do not detach real signed-in profile sessions as routine cleanup. Plain detach leaves Chrome remote debugging enabled and does not touch browser UI. Add `--dismiss-banner` only when the user explicitly wants a best-effort click on the visible automation banner `X`. Add `--cleanup-remote-debugging` only when the user explicitly wants Chrome's remote-debugging setting turned off too.
 - `cleanup-remote-debugging`: turn off Chrome's `chrome://inspect/#remote-debugging` setting through an existing realbrowser daemon, then stop the daemon. Add `--allow-attach` to start a fresh permission-gated attach when no daemon is running. Dedicated-profile mode skips user Chrome settings cleanup and just stops the managed session. `--browser-url` cleanup targets the configured backend through browser UI when possible; local Chrome metadata may not describe that backend.
 - `restart`: restart the persistent daemon's MCP/browser connection without changing the daemon token or port.
 - `tabs`: list open pages.
@@ -221,6 +227,8 @@ Global flags:
 - `--mode compact|normal|verbose|raw`: output mode shortcut. `REALBROWSER_OUTPUT=verbose|raw|quiet` can set the default for a command or session.
 - `--`: stop option parsing. Use before literal text or JavaScript that begins with a known flag, such as `type -- --raw`.
 - `--session <name>`: use or create a named realbrowser session. Use this for workflows with multiple profiles, multiple anonymous windows, or long-lived app contexts.
+- `--no-active-session`: ignore the remembered active session for this command and target the default state file or explicit flags instead.
+- `--no-activate-session`: on `select-tab`, select a unique tab without changing the active session pointer.
 - `--all-sessions`: search or stop all known running sessions. Use with `find-tab`, `select-tab`, `tabs-all`, or `detach`.
 - `--state-file <path>`: use a custom daemon state file.
 - `--backend real|dev`: choose real-browser auto-connect or the dedicated dev profile.
@@ -231,10 +239,12 @@ Global flags:
 - `--select`: after profile-targeted `open`/`newtab`, wait for the matching debuggable tab, attach to its endpoint, and select it for follow-up commands.
 - `--anonymous`: use Chrome DevTools MCP isolated browser state. This is clean browser state, not network anonymity.
 - `--keep-anonymous`: keep the temporary anonymous profile directory after detach for debugging.
+- `--force`: only for commands that explicitly document it, such as `use-session --force`.
 - `--reload`: reload the selected page for commands such as `capture-network`.
 - `--duration <ms>`: capture or wait duration for commands such as `capture-network`.
 - `--har <path>`: write a local HAR-style network artifact for `capture-network`.
 - `--out <path>`: write command output artifacts such as console capture JSON or large read results.
+- `--no-network`: on `capture-console`, skip DevTools network failure rows and capture JavaScript console messages only.
 - `--dedicated`: force the dedicated fallback profile.
 - `--no-fallback`: require real Chrome/Chrome MCP attach to work; do not switch to the dedicated profile. Use this whenever existing cookies/login state are required.
 - `--dismiss-banner`: explicitly request the best-effort browser-UI click that hides Chrome's automation banner during detach. This does not change remote-debugging/CDP settings. On unsupported platforms, the CLI prints the manual banner-X instruction instead of failing.
@@ -242,8 +252,8 @@ Global flags:
 ## Operating Loop
 
 1. Start with `doctor` when setup is uncertain. For login-state tasks, verify the intended Chrome profile, enable Chrome remote debugging/CDP in `chrome://inspect/#remote-debugging`, and run with `--no-fallback`.
-2. If several profiles or anonymous sessions may be open, run `sessions` and `find-tab <url-or-title> --all-sessions` first. Use `select-tab <query> --all-sessions` only when there is a unique match, then continue with the reported `--session <name>`.
-3. If the user asks for anonymous/clean mode, run `open <url> --anonymous --session <task-name> --select`, do the UI checks, and `detach --session <task-name>` when finished so the isolated session is closed.
+2. If several profiles or anonymous sessions may be open, run `sessions` and `find-tab <url-or-title> --all-sessions` first. Use `select-tab <query> --all-sessions` only when there is a unique match; it activates that context, so follow-up commands can be plain `observe`, `snapshot`, `console`, `capture-network`, or `screenshot`.
+3. If the user asks for anonymous/clean mode, run `open <url> --anonymous --session <task-name> --select`, do the UI checks, and `detach --session <task-name>` when finished so the isolated session is closed. If the anonymous session should remain available for more checks, leave it running and mention that it is the active session.
 4. If the user asks for network/performance issues, prefer `capture-network <url> --anonymous` for clean-state checks or `select-tab`/`--profile` plus `capture-network --reload` for authenticated checks.
 5. If the user asks for console logs, JavaScript errors, or "what is the render problem", use `capture-console <url> --anonymous --out <file>` for clean-state checks or `select-tab`/`--profile` plus `capture-console --reload --out <file>` for authenticated checks. Feed the JSON artifact back into analysis.
 6. If a specific signed-in profile matters and no suitable tab is open, run `profiles`, choose a stable id, and open the target URL with `open --profile <id> <url>` before attaching.
@@ -253,7 +263,7 @@ Global flags:
 10. After navigation, modal changes, or form submission, run `observe` or `snapshot --efficient` again before the next action.
 11. If a `uid` is stale, snapshot once and retry with the new ref.
 12. For workflows with several actions, prefer `chain --return summary --trace ~/.realbrowser/trace.json`.
-13. Do not restart the daemon during normal browser work; restarting can trigger Chrome's remote-debugging approval dialog again.
+13. Do not restart or detach real signed-in profile sessions during normal browser work; starting a fresh CDP session can trigger Chrome's remote-debugging approval dialog again. Use `active-session`/`sessions` to reuse the existing approved connection.
 14. Ask for explicit user approval before submitting sensitive data, making purchases, deleting data, changing account/security settings, granting permissions, or taking any action that is hard to undo.
 15. Stop and report manual blockers such as login, 2FA, captcha, camera/microphone permission, or Chrome remote debugging approval.
 
