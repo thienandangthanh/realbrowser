@@ -81,7 +81,7 @@ When the user asks to check a URL that may already be open, search existing debu
 
 ## Anonymous Sessions And Network Capture
 
-`--anonymous` means Chrome DevTools MCP isolated browser state, not privacy/anonymity on the network. It starts Chrome DevTools MCP with isolated mode and an incognito Chrome argument when supported. Use it when the user asks for anonymous mode, clean login testing, first-run UI checks, or cookie-free behavior:
+`--anonymous` means Chrome DevTools MCP isolated browser state in a Chrome Incognito window, not privacy/anonymity on the network. It starts Chrome DevTools MCP with isolated mode and an incognito Chrome argument, then navigates the initial incognito `about:blank` page instead of using MCP `new_page`, because `new_page` can open a separate normal isolated window. Use it when the user asks for anonymous mode, clean login testing, first-run UI checks, or cookie-free behavior:
 
 ```bash
 "$REALBROWSER_CLI" open https://ninzap.dev --anonymous --select
@@ -112,7 +112,7 @@ For render bugs or requests like "check ninzap.dev console log to see what is th
 "$REALBROWSER_CLI" console get <msgid> --raw
 ```
 
-`capture-console` lists `console.log`/`info`/`warn`/`error` messages, fetches per-message details, and writes JSON with message ids, argument values, and stack/source data when Chrome DevTools MCP exposes them. Use `--errors` to focus on errors and warnings, `--filter <text>` to narrow noisy apps, and `console get <msgid>` when you only need one detailed message. Console logs can contain user data, tokens, request payloads, or account details; keep artifacts local unless the user explicitly wants them shared.
+`capture-console` lists `console.log`/`info`/`warn`/`error` messages, fetches per-message details, and writes JSON with message ids, argument values, and stack/source data when Chrome DevTools MCP exposes them. In anonymous mode it reuses the initial incognito page for fresh URL captures. Use `--errors` to focus on errors and warnings, `--filter <text>` to narrow noisy apps, and `console get <msgid>` when you only need one detailed message. Console logs can contain user data, tokens, request payloads, or account details; keep artifacts local unless the user explicitly wants them shared.
 
 Useful overrides:
 

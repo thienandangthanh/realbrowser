@@ -1084,13 +1084,16 @@ async function runCli() {
   }
 
   const state = await ensureDaemon(flags);
-  const response = await daemonRpc(state, daemonPayloadForCommand(command, args, flags));
+  const response = await daemonRpc(state, daemonPayloadForCommand(command, args, flags, state));
   printResult(response, flags);
 }
 
-function daemonPayloadForCommand(command, args, flags = {}) {
+function daemonPayloadForCommand(command, args, flags = {}, state = null) {
   if (command === "open" || command === "newtab") {
     requireArgs(command, args, 1);
+    if (flags.anonymous || modeFromState(state) === ANONYMOUS_MODE) {
+      return { command, args, flags };
+    }
     return {
       command: "tool",
       args: backgroundNewPageArgs(args[0], flags),
@@ -2573,6 +2576,23 @@ function parseListPagesResult(result) {
   return pages;
 }
 
+function isBlankPageUrl(url) {
+  const value = String(url ?? "").trim().toLowerCase();
+  return !value || value === "about:blank" || value === "chrome://newtab/" || value === "chrome://new-tab-page/";
+}
+
+function sameDocumentUrl(left, right) {
+  try {
+    const leftUrl = new URL(left);
+    const rightUrl = new URL(right, leftUrl.origin);
+    leftUrl.hash = "";
+    rightUrl.hash = "";
+    return leftUrl.href === rightUrl.href;
+  } catch {
+    return String(left ?? "").replace(/#.*$/u, "") === String(right ?? "").replace(/#.*$/u, "");
+  }
+}
+
 function toolError(result, name) {
   if (!result?.isError) {
     return null;
@@ -2712,10 +2732,7 @@ class BrowserDaemon {
       case "open":
       case "newtab":
         requireArgs(command, args, 1);
-        return await this.callTool("new_page", {
-          url: args[0],
-          background: !(flags.front || flags.select),
-        });
+        return await this.handleOpen(args, flags, command);
       case "navigate":
       case "goto":
         requireArgs(command, args, 1);
@@ -3402,6 +3419,65 @@ class BrowserDaemon {
     });
   }
 
+  async handleOpen(args, flags = {}, command = "open") {
+    requireArgs(command, args, 1);
+    const url = args[0];
+    if (this.mode === ANONYMOUS_MODE) {
+      const pageId = command === "newtab"
+        ? await this.openAnonymousTab(url, flags)
+        : await this.resolveAnonymousNavigationPageId(flags);
+      if (pageId !== null && pageId !== undefined) {
+        if (command !== "newtab") {
+          await this.callTool("navigate_page", {
+            pageId,
+            type: "url",
+            url,
+          });
+        }
+        return await this.selectPage(pageId, Boolean(flags.front || flags.select));
+      }
+    }
+    return await this.callTool("new_page", {
+      url,
+      background: !(flags.front || flags.select),
+    });
+  }
+
+  async resolveAnonymousNavigationPageId(flags = {}) {
+    if (flags.page !== undefined) {
+      return parsePageId(flags.page);
+    }
+    const pages = parseListPagesResult(await this.callTool("list_pages", {}));
+    const blank = pages.find((page) => isBlankPageUrl(page.url));
+    if (blank) {
+      return blank.id;
+    }
+    const selected = pages.find((page) => page.selected);
+    return selected?.id ?? pages[0]?.id ?? null;
+  }
+
+  async openAnonymousTab(url, flags = {}) {
+    const pages = parseListPagesResult(await this.callTool("list_pages", {}));
+    const opener = pages.find((page) => page.selected) ?? pages.find((page) => !isBlankPageUrl(page.url)) ?? pages[0];
+    if (!opener) {
+      return null;
+    }
+    await this.callTool("evaluate_script", {
+      pageId: opener.id,
+      function: `() => {
+        window.open(${JSON.stringify(url)}, "_blank", "noopener,noreferrer");
+        return true;
+      }`,
+    }).catch(() => null);
+    await sleep(500);
+    const afterPages = parseListPagesResult(await this.callTool("list_pages", {}));
+    const match = [...afterPages].reverse().find((page) => sameDocumentUrl(page.url, url));
+    if (match) {
+      return match.id;
+    }
+    return afterPages.find((page) => page.selected)?.id ?? afterPages.at(-1)?.id ?? null;
+  }
+
   async handleCaptureConsole(args, flags = {}) {
     const targetUrl = args[0];
     const durationMs = parsePositiveInteger(flags.duration ?? String(DEFAULT_CONSOLE_CAPTURE_DURATION_MS), "duration");
@@ -3410,8 +3486,13 @@ class BrowserDaemon {
     let action = "sample";
 
     if (targetUrl) {
-      await this.callTool("new_page", { url: "about:blank", background: false });
-      pageId = await this.resolvePageId(flags);
+      pageId = this.mode === ANONYMOUS_MODE
+        ? await this.resolveAnonymousNavigationPageId(flags)
+        : null;
+      if (pageId === null || pageId === undefined) {
+        await this.callTool("new_page", { url: "about:blank", background: false });
+        pageId = await this.resolvePageId(flags);
+      }
       await this.callTool("navigate_page", {
         pageId,
         type: "url",
@@ -3568,8 +3649,13 @@ class BrowserDaemon {
     let action = "sample";
 
     if (targetUrl) {
-      await this.callTool("new_page", { url: "about:blank", background: false });
-      pageId = await this.resolvePageId(flags);
+      pageId = this.mode === ANONYMOUS_MODE
+        ? await this.resolveAnonymousNavigationPageId(flags)
+        : null;
+      if (pageId === null || pageId === undefined) {
+        await this.callTool("new_page", { url: "about:blank", background: false });
+        pageId = await this.resolvePageId(flags);
+      }
       await this.evaluateFunction(clearPerformanceEntriesFunction(), { ...flags, page: String(pageId) }).catch(() => null);
       await this.callTool("navigate_page", {
         pageId,
@@ -6176,6 +6262,15 @@ function runSelfTest() {
   assertSelfTest(JSON.parse(backgroundPayload.args[1]).background === true, "open translation uses background by default");
   const foregroundPayload = daemonPayloadForCommand(parsedForegroundOpen.command, parsedForegroundOpen.args, parsedForegroundOpen.flags);
   assertSelfTest(JSON.parse(foregroundPayload.args[1]).background === false, "open --front uses foreground");
+  const anonymousPayload = daemonPayloadForCommand(parsedAnonymousOpen.command, parsedAnonymousOpen.args, parsedAnonymousOpen.flags);
+  assertSelfTest(anonymousPayload.command === "open", "anonymous open is handled by daemon to preserve incognito context");
+  const anonymousFollowupPayload = daemonPayloadForCommand(
+    parsedBackgroundOpen.command,
+    parsedBackgroundOpen.args,
+    parsedBackgroundOpen.flags,
+    { modeKey: JSON.stringify({ mode: ANONYMOUS_MODE }) },
+  );
+  assertSelfTest(anonymousFollowupPayload.command === "open", "open reuses daemon handling when state is anonymous");
   const chainPayload = daemonPayloadForCommand("chain", ['[["open","https://example.com"],["snapshot","--efficient"]]'], {});
   const translatedChain = JSON.parse(chainPayload.args[0]);
   assertSelfTest(translatedChain[0][0] === "tool" && translatedChain[0][1] === "new_page", "chain open is translated to new_page");
