@@ -6371,6 +6371,14 @@ function sameDocumentUrl(left, right) {
   }
 }
 
+function matchingMcpPagesForCdpPage(mcpPages, cdpPage) {
+  const targetUrl = String(cdpPage?.url ?? "");
+  const exactMatches = mcpPages.filter((page) => page.url === targetUrl);
+  return exactMatches.length > 0
+    ? exactMatches
+    : mcpPages.filter((page) => sameDocumentUrl(page.url, targetUrl));
+}
+
 function toolError(result, name) {
   if (!result?.isError) {
     return null;
@@ -7114,6 +7122,50 @@ class BrowserDaemon {
 
   pageArgs(flags = {}) {
     return flags.page !== undefined ? { pageId: parsePageId(flags.page) } : {};
+  }
+
+  async mcpPageIdForFlags(flags = {}) {
+    if (flags.mcp === true || !this.shouldUseFastCdp(flags)) {
+      return await this.resolvePageId(flags);
+    }
+    const hasCdpSelection = flags.page !== undefined || flags.targetId || this.selectedCdpTargetId;
+    if (!hasCdpSelection) {
+      return await this.resolvePageId(flags);
+    }
+    let targetId = "";
+    let cdpPage = null;
+    try {
+      targetId = await this.resolveCdpTargetId(flags);
+      cdpPage = targetId ? await this.cdpPageForTargetId(targetId) : null;
+    } catch (error) {
+      if (flags.page !== undefined || flags.targetId) {
+        throw error;
+      }
+      return await this.resolvePageId(flags);
+    }
+    if (!cdpPage?.url) {
+      if (flags.page !== undefined || flags.targetId) {
+        throw new Error(`Could not resolve a URL for CDP target ${targetId || "(unknown)"}`);
+      }
+      return await this.resolvePageId(flags);
+    }
+    const mcpPages = parseListPagesResult(await this.callTool("list_pages", {}));
+    const sameDocumentMatches = matchingMcpPagesForCdpPage(mcpPages, cdpPage);
+    if (sameDocumentMatches.length === 1) {
+      return sameDocumentMatches[0].id;
+    }
+    const targetLabel = `${cdpPage.tabId ?? cdpPage.id ?? targetId} ${cdpPage.title || "(untitled)"} ${cdpPage.url}`;
+    if (sameDocumentMatches.length > 1) {
+      throw new Error(`CDP target maps to multiple MCP pages; use --mcp --page with the intended page from \`realbrowser --mcp tabs\`.\nTarget: ${targetLabel}\n${formatPageCandidates(sameDocumentMatches)}`);
+    }
+    if (flags.page !== undefined || flags.targetId || this.selectedCdpTargetId) {
+      throw new Error(`Could not map selected CDP target to a DevTools MCP page; use --mcp --page with the intended page from \`realbrowser --mcp tabs\`.\nTarget: ${targetLabel}\nMCP pages:\n${formatPageCandidates(mcpPages)}`);
+    }
+    return await this.resolvePageId(flags);
+  }
+
+  async mcpPageArgs(flags = {}) {
+    return { pageId: await this.mcpPageIdForFlags(flags) };
   }
 
   async handle(command, args, flags = {}) {
@@ -8097,13 +8149,13 @@ class BrowserDaemon {
     if (args[0] === "get") {
       requireArgs("console get", args, 2);
       const result = await this.callTool("get_console_message", {
-        ...this.pageArgs(flags),
+        ...await this.mcpPageArgs(flags),
         msgid: Number.parseInt(args[1], 10),
       });
       return flags.raw ? result : compactTextResult(result, flags, DEFAULT_READ_MAX_CHARS);
     }
     const result = await this.callTool("list_console_messages", {
-      ...this.pageArgs(flags),
+      ...await this.mcpPageArgs(flags),
       ...(flags.errors ? { types: ["error", "warn"] } : {}),
       ...(flags.preserve ? { includePreservedMessages: true } : {}),
     });
@@ -8233,7 +8285,10 @@ class BrowserDaemon {
     let action = "sample";
     const beforeCaptureAction = async () => {
       if (options.clearPerformance) {
-        await this.evaluateFunction(clearPerformanceEntriesFunction(), { ...flags, page: String(pageId) }).catch(() => null);
+        await this.callTool("evaluate_script", {
+          pageId,
+          function: clearPerformanceEntriesFunction(),
+        }).catch(() => null);
       }
     };
 
@@ -8252,7 +8307,7 @@ class BrowserDaemon {
       });
       action = "navigate";
     } else {
-      pageId = await this.resolvePageId(flags);
+      pageId = await this.mcpPageIdForFlags(flags);
       await beforeCaptureAction();
       if (flags.reload) {
         await this.callTool("navigate_page", {
@@ -8269,12 +8324,13 @@ class BrowserDaemon {
   async waitForCaptureSettled(pageId, flags = {}, options = {}) {
     const timeoutMs = options.timeoutMs;
     const durationMs = options.durationMs ?? 0;
-    await this.handleWait(["load"], { ...flags, page: String(pageId), timeout: String(timeoutMs) }).catch(() => null);
+    await this.handleWait(["load"], { ...flags, mcp: true, page: String(pageId), timeout: String(timeoutMs) }).catch(() => null);
     if (durationMs > 0) {
       await sleep(durationMs);
     }
     await this.handleWait(["networkidle"], {
       ...flags,
+      mcp: true,
       page: String(pageId),
       timeout: String(Math.min(10000, Math.max(1000, timeoutMs))),
     }).catch(() => null);
@@ -8304,9 +8360,9 @@ class BrowserDaemon {
       }).catch((error) => ({
         text: `network list unavailable: ${error instanceof Error ? error.message : String(error)}`,
       }));
-    const pageInfoResult = await this.evaluateFunction(consolePageInfoFunction(), {
-      ...flags,
-      page: String(pageId),
+    const pageInfoResult = await this.callTool("evaluate_script", {
+      pageId,
+      function: consolePageInfoFunction(),
     }).catch(() => null);
     const pageInfo = pageInfoResult ? parseEvaluateJsonResult(pageInfoResult, "capture-console page info") : {};
     const filter = normalizeOptionalString(flags.filter)?.toLowerCase();
@@ -8413,7 +8469,7 @@ class BrowserDaemon {
     if (args[0] === "get") {
       const reqid = args[1] === undefined ? undefined : Number.parseInt(args[1], 10);
       const result = await this.callTool("get_network_request", {
-        ...this.pageArgs(flags),
+        ...await this.mcpPageArgs(flags),
         ...(Number.isFinite(reqid) ? { reqid } : {}),
         ...(flags.requestFile ? { requestFilePath: flags.requestFile } : {}),
         ...(flags.responseFile ? { responseFilePath: flags.responseFile } : {}),
@@ -8421,7 +8477,7 @@ class BrowserDaemon {
       return flags.raw ? result : compactTextResult(result, flags, DEFAULT_READ_MAX_CHARS);
     }
     const result = await this.callTool("list_network_requests", {
-      ...this.pageArgs(flags),
+      ...await this.mcpPageArgs(flags),
       ...(flags.preserve ? { includePreservedRequests: true } : {}),
     });
     return compactLineResult(result, {
@@ -8440,9 +8496,9 @@ class BrowserDaemon {
     const { pageId, action } = await this.prepareCapturePage(targetUrl, flags, { clearPerformance: true });
     await this.waitForCaptureSettled(pageId, flags, { timeoutMs, durationMs });
 
-    const perfResult = await this.evaluateFunction(networkPerformanceCaptureFunction(), {
-      ...flags,
-      page: String(pageId),
+    const perfResult = await this.callTool("evaluate_script", {
+      pageId,
+      function: networkPerformanceCaptureFunction(),
     });
     const capture = parseEvaluateJsonResult(perfResult, "capture-network");
     capture.action = action;
@@ -13237,6 +13293,15 @@ async function runSelfTest() {
   assertSelfTest(handleAwareCommands().has("goto"), "handle-aware command metadata includes aliases");
   assertSelfTest(handleAwareCommands().has("chain"), "chain can run against a pinned handle");
   assertSelfTest(!handleAwareCommands().has("select"), "page-selection commands do not implicitly consume handles");
+  const mcpPagesForMapping = [
+    { id: 1, url: "https://datafa.st/docs/google-search-console" },
+    { id: 16, url: "https://chat.zalo.me/" },
+    { id: 26, url: "https://www.bilibili.com/video/BV1bsYPztE4D/" },
+  ];
+  assertSelfTest(
+    matchingMcpPagesForCdpPage(mcpPagesForMapping, { url: "https://chat.zalo.me/" })[0]?.id === 16,
+    "CDP-to-MCP page mapping uses URL instead of assuming page-id namespaces match",
+  );
 
   const autoControl = browserControlStatus({ running: true, mode: AUTO_MODE, mcpConnected: true });
   assertSelfTest(autoControl.chromeBannerExpectedNow === true, "browser control reports active Chrome banner");
