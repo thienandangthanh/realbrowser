@@ -139,6 +139,13 @@ the console lines back verbatim in a code block.
 "$REALBROWSER_CLI" console --preserve --limit 80
 ```
 
+For exact-tab work, verify the selected target with `tabs` plus a targeted `js`
+read before trusting copied output. Prefer the selected-tab `console` command
+after verification. Do not manually carry a Page number from `tabs` into MCP
+console reads as if it were a Chrome DevTools MCP page id; direct-CDP tab
+numbers and MCP page ids can differ. Current realbrowser maps the selected CDP
+target to the matching MCP page by URL before console reads.
+
 If the page is in a real signed-in Chrome profile, `console` may refuse with a
 message about starting a Chrome DevTools MCP controller and the
 "Allow remote debugging?" prompt. Do not treat that as "console unavailable"
@@ -148,6 +155,14 @@ case, rerun the same selected-tab console command with explicit consent:
 ```bash
 "$REALBROWSER_CLI" console --preserve --limit 80 --allow-profile-reattach
 ```
+
+If the copied output is empty or appears to come from another site when the user
+expects logs, do not stop there. Run `status` and check for
+`Daemon script: <old> (current <new>; reload needed for new skill code)`. A
+stale daemon can miss current target-mapping behavior; after the user has
+accepted the real-profile prompt, rerun with `--reload-daemon
+--allow-profile-reattach` or restart the daemon with `restart
+--allow-profile-reattach`.
 
 For startup/render bugs where a fresh load is needed:
 
@@ -187,7 +202,9 @@ Copy-output response rules:
 - If there are multiple matching tabs or profiles, verify the exact target by
   URL/title/visible page text before reading output.
 - If no lines are captured, say that no console output was found for the
-  selected tab and state whether the page was reloaded.
+  selected tab and state whether the page was reloaded. If the user says the
+  DevTools Console should contain startup logs, arm `capture-console --reload`
+  and reproduce instead of relying on historical console replay.
 
 ## Network And Performance Capture
 

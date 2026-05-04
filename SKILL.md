@@ -39,13 +39,17 @@ REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
 
 When the user cares about the exact tab, prove the target before trusting
 console output. `select-tab` alone is not enough; verify the URL/title, then
-read console output from that selected target.
+read console output from that selected target. Prefer the selected-tab
+`console` command after verification. Do not assume the Page numbers from
+`tabs` are the same namespace as Chrome DevTools MCP page ids; `console` is
+MCP-backed and current realbrowser maps the selected CDP target to the matching
+MCP page internally.
 
 ```bash
 "$REALBROWSER_CLI" tabs
-# Record the matching Page and Target values, then verify the page itself.
+# Record the matching Target/Page values, then verify the CDP target itself.
 "$REALBROWSER_CLI" --page <page-number> js '({href: location.href, title: document.title, readyState: document.readyState})'
-"$REALBROWSER_CLI" --page <page-number> console --preserve --limit 80
+"$REALBROWSER_CLI" console --preserve --limit 80
 ```
 
 For real signed-in Chrome profiles, `console` and `capture-console` may be
@@ -61,22 +65,30 @@ page reads:
 
 If multiple tabs match, verify by URL/title/visible page text with `observe` or
 a targeted `js` read, then select the requested tab before reading console output.
+If you pinned a page with `--page <page-number>`, current realbrowser maps the
+CDP target to MCP by URL before reading console output. If output is empty or
+mentions another site, immediately run `status`. When it reports
+`Daemon script: <old> (current <new>; reload needed for new skill code)`, rerun
+the command after `--reload-daemon --allow-profile-reattach` or use `restart
+--allow-profile-reattach` when the user has accepted the real-profile prompt.
+
 For web development startup or hydration issues, use `capture-console --reload`
-only when a reload/reproduction is wanted, and pin the page when there are many
-open tabs:
+only when a reload/reproduction is wanted. First verify the selected tab, then
+capture from that selected tab:
 
 ```bash
-"$REALBROWSER_CLI" --page <page-number> capture-console --reload --duration 10000 --out /tmp/app-console.json --allow-profile-reattach --json
+"$REALBROWSER_CLI" capture-console --reload --duration 10000 --out /tmp/app-console.json --allow-profile-reattach --json
 jq '{pageId, url, title, counts, messages: [.messages[] | {type, text}]}' /tmp/app-console.json
 ```
 
 After every console copy, sanity-check the copied lines. If the output URL,
 network section, stack traces, or message text mention an unrelated site or
 bundle (for example another open tab's domain), do not paste it as correct.
-Re-check `tabs`, verify the current page with `js`, then rerun the console
-command. If the current DevTools panel already shows historical startup messages
-but command-line capture prints none, explain that CDP may not replay DevTools'
-old frontend buffer; arm capture first and reproduce/reload instead.
+Re-check `tabs`, verify the current page with `js`, compare `--mcp tabs` only
+when debugging a target mismatch, then rerun the selected-tab console command.
+If the current DevTools panel already shows historical startup messages but
+command-line capture prints none, explain that CDP may not replay DevTools' old
+frontend buffer; arm capture first and reproduce/reload instead.
 
 ## OpenClaw-Style Extraction
 

@@ -192,6 +192,10 @@ Realbrowser is designed to keep Codex token use low:
 - Use compact targets from `tabs`/`find-tab` such as `t1` instead of raw target ids.
 - Use `links --filter/--text-filter/--href-filter --visible` when you need a
   small link set instead of full-page link dumps.
+- For console copy requests, `select-tab`, verify URL/title, then use the
+  selected-tab `console` command. Do not assume direct-CDP `tabs` Page numbers
+  are the same as Chrome DevTools MCP page ids; current realbrowser maps the
+  selected CDP target to MCP before reading console logs.
 - Use `console --errors --limit 20` and `network --failed --limit 30`.
 - Use project-specific `--handle-out tmp/realbrowser-handles/<task>.json`
   paths for parallel Codex tabs. Existing handle files are not overwritten
@@ -203,7 +207,9 @@ Realbrowser is designed to keep Codex token use low:
   review.
 - If a running daemon predates the edited skill and a command needs a new
   capability, reload it explicitly with `--restart-daemon`; for a real Chrome
-  profile this can show one fresh approval prompt.
+  profile this can show one fresh approval prompt. For console mismatches or
+  unexpected empty logs, check `status` for `reload needed for new skill code`
+  before trusting the result.
 - Use `--raw`, `--verbose`, `--max-chars`, or `--out <path>` only when the compact result is not enough.
 
 The implementation intentionally copies the proven shape of OpenClaw's efficient browser snapshots and gstack's compact localhost command loop while keeping the backend attached to the user's real Chrome session when possible.
