@@ -166,6 +166,10 @@ desktop/tablet/mobile screenshots":
    ```bash
    "$REALBROWSER_CLI" --session site-check device-screenshots /tmp/site-inbox
    ```
+   The output should show the requested PNG dimensions. If `browser=<width>x<height>`
+   differs from the device size, the real tab is probably zoomed; inspect the
+   image for blank gutters or clipping, and reset browser zoom before capture
+   only when exact CSS breakpoints matter.
    For a user-facing full-size screenshot, prefer:
    ```bash
    "$REALBROWSER_CLI" --session site-check full-screenshot /tmp/site-full.png

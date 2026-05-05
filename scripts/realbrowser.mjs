@@ -10628,7 +10628,7 @@ class BrowserDaemon {
             mobile,
             screenWidth: device.width,
             screenHeight: device.height,
-          }, { sessionId });
+          }, { sessionId, timeoutMs: parsePositiveInteger(flags.timeout ?? "10000", "timeout") });
           await client.request("Emulation.setTouchEmulationEnabled", {
             enabled: mobile,
             ...(mobile ? { configuration: "mobile" } : {}),
@@ -10636,9 +10636,6 @@ class BrowserDaemon {
           const ready = await this.waitForDeviceScreenshotReadyInSession(client, sessionId, flags);
           await this.captureScreenshotCdpInSession(client, sessionId, targetId, outputPath, "png", {
             ...flags,
-            exactViewportPng: true,
-            clipWidth: device.width,
-            clipHeight: device.height,
             full: Boolean(flags.full),
           });
           const png = readPngDimensions(outputPath);
@@ -10653,8 +10650,10 @@ class BrowserDaemon {
           }));
         }
       } finally {
-        await safeCdpRequest(client, "Emulation.clearDeviceMetricsOverride", {}, { sessionId });
         await safeCdpRequest(client, "Emulation.setTouchEmulationEnabled", { enabled: false }, { sessionId });
+        await safeCdpRequest(client, "Emulation.clearDeviceMetricsOverride", {}, { sessionId });
+        await sleep(50);
+        await safeCdpRequest(client, "Emulation.clearDeviceMetricsOverride", {}, { sessionId });
       }
       return this.formatDeviceScreenshotResults(results, prefix, page, { cdp: true, targetId });
     });

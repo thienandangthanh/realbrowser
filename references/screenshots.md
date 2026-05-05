@@ -61,7 +61,11 @@ sizes are not required:
 ```
 
 This saves mobile, tablet, and desktop screenshots in one daemon call. Inspect
-the saved images before finishing.
+the saved images before finishing. If a real Chrome tab is zoomed, the reported
+`browser=<width>x<height>` CSS viewport can differ from the requested device
+size; do not compensate by capturing beyond the rendered surface, because that
+can create blank gutters. Reset browser zoom first only when exact CSS
+breakpoints matter.
 
 ## Full-Size Screenshots
 
