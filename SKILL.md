@@ -1,6 +1,6 @@
 ---
 name: realbrowser
-description: Use when you need fast local real-browser automation from Codex, including listing/selecting Chrome profiles, named browser sessions, anonymous clean-state sessions, structured role/DOM extraction for large dynamic pages, network/performance capture, opening tabs, taking snapshots or screenshots, clicking, typing, filling forms, reading console/network data, or debugging localhost/browser UI with Chrome DevTools MCP.
+description: Use when you need fast local real-browser automation from Codex, including listing/selecting Chrome profiles, named browser sessions, anonymous clean-state sessions, structured role/DOM extraction for repeated, lazy, or nested page content, network/performance capture, opening tabs, taking snapshots or screenshots, clicking, typing, filling forms, reading console/network data, or debugging localhost/browser UI with Chrome DevTools MCP.
 ---
 
 # Realbrowser
@@ -49,6 +49,39 @@ target; it is not permission to inspect unrelated sensitive tabs or perform
 sensitive actions. Ask before submits, sends, purchases, deletes,
 security/account changes, permission grants, or broad access outside the named
 target.
+
+## Browser Inspection Loop
+
+Use this loop for general browsing work before picking a recipe:
+
+1. Classify the scope: existing tab/profile, anonymous page, screenshot,
+   console/network, form/action, single detail read, or structured content.
+2. Acquire one stable target with the least disruption. Prefer existing
+   sessions/tabs when the prompt implies current state or a named profile.
+3. Verify cheaply with URL, title, ready state, and a small visible-text sample.
+4. Preserve state when practical: note the selected tab, URL, scroll position,
+   filter/sort, focused field, or modal before changing it.
+5. Choose the smallest reader that answers the question. Use the reader ladder
+   below instead of starting with full HTML or broad snapshots.
+6. Refine boundaries before trusting extracted content. Confirm the root,
+   direct children, current sort/filter, and whether unrelated nested content is
+   mixed in.
+7. Act/read on current refs only, then report the result with context such as
+   signed-in profile state, current visible order, current filters, or anonymous
+   public state. Restore inspection-only state when practical.
+
+Reader ladder:
+
+- URL/title/ready/scroll/account hints: tiny `js`.
+- Visible page state and quick controls: bounded `observe`.
+- Forms, buttons, labels, and accessible controls: `snapshot-aria`.
+- Repeated or nested content: `extract-items`, then selector-scoped records.
+- Ambiguous DOM boundaries: `query-selector --out` or `snapshot-dom --out`.
+- Exact clicking/typing refs: `snapshot --efficient`.
+- Visual, canvas, iframe, media-heavy, clipped, or responsive checks:
+  screenshots.
+- Console or network evidence: console/network capture commands; do not reload
+  unless the user asks to reproduce load-time output.
 
 ## Task Router
 
@@ -101,9 +134,9 @@ URL/title/visible-text read, then extract only the requested content:
 Use the matching later section only when needed:
 
 - Console output or DevTools logs: read "Console Output Copy Fast Path".
-- Large dynamic pages or repeated-content extraction: use "Large Dynamic Page
-  Extraction" before broad `observe`, then read `references/debugging.md` only
-  if boundaries are ambiguous.
+- Repeated, lazy, or nested page content: use "Structured Page Extraction"
+  before broad `observe`, then read `references/debugging.md` only if
+  boundaries are ambiguous.
 - Login, custom devices, full-page regions, or clipping risk: read
   "Screenshot Task Fast Path" and then `references/screenshots.md` if needed.
 - Profile cookies or signed-in browser state: read `references/profiles.md`.
@@ -129,27 +162,31 @@ REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
 "$REALBROWSER_CLI" console --preserve --limit 80
 ```
 
-## Large Dynamic Page Extraction
+## Structured Page Extraction
 
-For large dynamic pages such as feeds, chats, search results, dashboards, or
-virtualized lists, use compact role/DOM readers instead of full-page HTML stdout.
-Use this path before broad `observe` when the task is to extract item content.
-`observe` is for page state, controls, and sanity checks; it is not the default
-parser for repeated or nested content. Start with `extract-items` for a compact
-one-eval item summary; fall back to raw role/DOM records when boundaries are
-ambiguous. Write deep reads to files and inspect those artifacts locally. For
-nested item boundaries, stale daemon handling, or selector strategy, read
-`references/debugging.md`.
+Use this for any page where the requested answer lives inside repeated, lazy, or
+nested structures: feeds, inboxes, search results, tables, grids, chats,
+dashboards, notifications, product/catalog lists, file lists, comments, or
+virtualized panes. `observe` is for page state, controls, and sanity checks; it
+is not the default parser for item content.
+
+First identify the stable content root and direct children. Treat selectors such
+as `[role="article"]`, `article`, rows, cards, or message bubbles as hypotheses:
+they can match comments, replies, sidebars, composers, pinned/sponsored blocks,
+chat overlays, or hidden templates. When item order matters, report it as the
+current visible/current loaded order unless you deliberately scroll, dedupe, and
+confirm the sort/filter.
 
 ```bash
 "$REALBROWSER_CLI" extract-items --limit 5 --max-text-chars 700
 "$REALBROWSER_CLI" extract-items --selector main --limit 5 --max-text-chars 700
 "$REALBROWSER_CLI" extract-items --selector main --item-selector article --limit 5 --out "$ARTIFACT_DIR/page-items.json"
+"$REALBROWSER_CLI" js '(() => { const root = document.querySelector("main,[role=main],[role=feed],[role=list],[role=grid],table") || document.body; return [...root.children].slice(0,12).map((el,i)=>({i, tag:el.tagName, role:el.getAttribute("role"), text:(el.innerText||"").replace(/\s+/g," ").slice(0,240)})); })()'
 "$REALBROWSER_CLI" snapshot --selector main --compact --max-chars 2500
 "$REALBROWSER_CLI" snapshot --compact --max-chars 2500
 "$REALBROWSER_CLI" snapshot-dom --selector main --out "$ARTIFACT_DIR/page-dom.json" --limit 1800 --max-text-chars 180
 "$REALBROWSER_CLI" snapshot-aria --out "$ARTIFACT_DIR/page-aria.json" --limit 1800
-"$REALBROWSER_CLI" query-selector 'main, [role="feed"], [role="article"], article' --out "$ARTIFACT_DIR/page-elements.json" --limit 60 --max-text-chars 300 --max-html-chars 800
+"$REALBROWSER_CLI" query-selector 'main,[role="main"],[role="feed"],[role="list"],[role="grid"],table,[role="article"],article' --out "$ARTIFACT_DIR/page-elements.json" --limit 60 --max-text-chars 300 --max-html-chars 800
 ```
 
 For huge or noisy pages, do not print or grep broad artifact matches into the
@@ -157,7 +194,11 @@ conversation. First identify a stable root or candidate headings, then extract a
 small JSON/text summary with `jq`, Node, or a targeted `js` expression. When a
 page may contain API keys, auth tokens, customer data, private messages, billing
 details, or other secrets, avoid raw stdout: use `--out` artifacts for local
-inspection or a targeted `js` expression that redacts before returning text.
+inspection or a targeted `js` expression that redacts before returning text. If
+hydration stalls with low item counts, visible skeletons, or
+`document.visibilityState === "hidden"`, try background waits, scrolls, compact
+extraction, and targeted `js` first; foreground only when that is required to
+finish the task.
 
 ## Screenshot Task Fast Path
 
@@ -195,9 +236,9 @@ risk, read `references/screenshots.md`.
   first try background `wait-ready`, scrolls, compact extraction, and targeted
   `js`/selector reads. Use explicit foregrounding only after those fail or when
   the user asked to bring the browser forward.
-- Large dynamic pages, social feeds, or pages with thousands of nodes:
-  read `references/debugging.md` before dumping HTML. Start with compact
-  snapshots, write deep reads to files, and inspect those files with
+- Large, lazy, repeated, or deeply nested pages: use "Structured Page
+  Extraction" before dumping HTML. Start with compact item summaries, confirm
+  roots/direct children, write deep reads to files, and inspect those files with
   OS-available local tools.
 - Exact viewport, mobile screenshot, raw PNG dimensions, or responsive capture:
   read `references/screenshots.md`.
@@ -227,13 +268,14 @@ risk, read `references/screenshots.md`.
    page is slow or lazy. Use foregrounding only for explicit visual handoff, or
    after background waits/scrolls/extraction fail and the foreground need is
    worth interrupting the user.
+   For inspection-only work, record scroll position, active filter/sort, modal,
+   or focused input before changing them when practical.
 3. Read before acting. Use `observe --max-chars 1500-2500` for page state,
-   controls, and quick sanity checks. For large feeds, chats, search results,
-   dashboards, virtualized lists, tables, or nested repeated items, start with
-   the large dynamic page extraction path (`extract-items --limit <n>`, then
-   selector-scoped `snapshot`, `snapshot-dom`, `snapshot-aria`, or
-   `query-selector --out` only as needed) and keep large artifacts out of
-   stdout.
+   controls, and quick sanity checks. For repeated, lazy, or nested content,
+   start with the structured extraction path (`extract-items --limit <n>`, root
+   or direct-child checks, then selector-scoped `snapshot`, `snapshot-dom`,
+   `snapshot-aria`, or `query-selector --out` only as needed) and keep large
+   artifacts out of stdout.
    Use `snapshot --efficient` when current `uid` or CDP `[ref=eN]` refs are
    needed.
 4. Act only on current refs. After navigation, modal changes, form submission,
@@ -366,14 +408,14 @@ body conclusions.
   selector/debug work, not as the default page parser.
 - Do not use `--full-stdout` for large or unknown output. Prefer artifacts and
   targeted local inspection.
-- For feeds, chats, search results, dashboards, tables, or nested dynamic
-  lists, do not treat full-page HTML as the parser and do not rely on
-  site-specific shortcuts such as `posts`, `blocks`, or `content-blocks`. Use
-  `extract-items`, selector-scoped snapshots, `snapshot-aria`,
-  `snapshot-dom --selector <css> --out`, and `query-selector --out`; use
-  screenshots only to verify visual boundaries or media-heavy content. Slow
-  hydration is not by itself a reason to foreground a signed-in profile tab;
-  try background waits, scrolls, compact extraction, and targeted `js` first.
+- For repeated, lazy, or nested pages, do not treat full-page HTML as the parser
+  and do not rely on site-specific shortcuts such as `posts`, `blocks`, or
+  `content-blocks`. Use `extract-items`, root/direct-child checks,
+  selector-scoped snapshots, `snapshot-aria`, `snapshot-dom --selector <css>
+  --out`, and `query-selector --out`; use screenshots to verify visual
+  boundaries or media-heavy content. Slow hydration is not by itself a reason to
+  foreground a signed-in profile tab; try background waits, scrolls, compact
+  extraction, and targeted `js` first.
 - If a command unexpectedly prints huge output or truncates, stop that read path
   and switch to `--out` artifacts plus targeted local inspection.
 - If extracted content includes or may include secrets, credentials, private

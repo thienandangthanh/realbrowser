@@ -31,8 +31,9 @@ when content boundaries are ambiguous.
 "$REALBROWSER_CLI" --handle content-read chain '[["wait","Items","--visible","--timeout","15000"],["snapshot","--compact","--max-chars","2000"]]' --return final
 ```
 
-For large dynamic pages such as feeds, dashboards, chats, search results, or
-virtualized lists:
+For pages with repeated, lazy, or nested content such as dashboards, chats,
+search results, tables, grids, inboxes, catalogs, notifications, or virtualized
+lists:
 
 1. Reuse or claim the real tab/profile once. For real signed-in profiles, use
    `--profile` only to initialize or switch the endpoint. After a profile open
@@ -69,22 +70,22 @@ virtualized lists:
    content, or when text extraction cannot expose the visual boundary.
 
 ```bash
-ARTIFACT_DIR="${TMPDIR:-/tmp}/realbrowser-feed"
+ARTIFACT_DIR="${TMPDIR:-/tmp}/realbrowser-content"
 mkdir -p "$ARTIFACT_DIR"
-"$REALBROWSER_CLI" claim "https://example.com/feed" \
+"$REALBROWSER_CLI" claim "https://example.com/items" \
   --profile "chrome:Default" \
-  --handle-name feed-read \
+  --handle-name content-read \
   --no-fallback \
   --timeout 30000
-"$REALBROWSER_CLI" --handle feed-read wait-ready --selector main --visual-stable --timeout 30000
-"$REALBROWSER_CLI" --handle feed-read extract-items --limit 5 --max-text-chars 700
-"$REALBROWSER_CLI" --handle feed-read extract-items --selector main --limit 5 --max-text-chars 700
-"$REALBROWSER_CLI" --handle feed-read extract-items --selector main --item-selector article --limit 5 --out "$ARTIFACT_DIR/feed-items.json"
-"$REALBROWSER_CLI" --handle feed-read snapshot --compact --max-chars 2500
-"$REALBROWSER_CLI" --handle feed-read snapshot-dom --selector main --out "$ARTIFACT_DIR/feed-dom.json" --limit 1800 --max-text-chars 180
-"$REALBROWSER_CLI" --handle feed-read snapshot-aria --out "$ARTIFACT_DIR/feed-aria.json" --limit 1800
-"$REALBROWSER_CLI" --handle feed-read query-selector 'main, [role="feed"], [role="article"], article' \
-  --out "$ARTIFACT_DIR/feed-elements.json" \
+"$REALBROWSER_CLI" --handle content-read wait-ready --selector main --visual-stable --timeout 30000
+"$REALBROWSER_CLI" --handle content-read extract-items --limit 5 --max-text-chars 700
+"$REALBROWSER_CLI" --handle content-read extract-items --selector main --limit 5 --max-text-chars 700
+"$REALBROWSER_CLI" --handle content-read extract-items --selector main --item-selector article --limit 5 --out "$ARTIFACT_DIR/items.json"
+"$REALBROWSER_CLI" --handle content-read snapshot --compact --max-chars 2500
+"$REALBROWSER_CLI" --handle content-read snapshot-dom --selector main --out "$ARTIFACT_DIR/dom.json" --limit 1800 --max-text-chars 180
+"$REALBROWSER_CLI" --handle content-read snapshot-aria --out "$ARTIFACT_DIR/aria.json" --limit 1800
+"$REALBROWSER_CLI" --handle content-read query-selector 'main,[role="main"],[role="feed"],[role="list"],[role="grid"],table,[role="article"],article' \
+  --out "$ARTIFACT_DIR/elements.json" \
   --limit 60 \
   --max-text-chars 300 \
   --max-html-chars 800
@@ -93,7 +94,7 @@ mkdir -p "$ARTIFACT_DIR"
 Search the saved artifacts with whichever local tool is available:
 
 ```bash
-rg -n "needle|role|article|data-|aria" "$ARTIFACT_DIR"/feed-*.json
+rg -n "needle|role|article|data-|aria" "$ARTIFACT_DIR"/*.json
 ```
 
 Keep artifact inspection targeted. Broad `rg` over DOM/AX JSON can print large
@@ -102,8 +103,8 @@ each node. Prefer heading/candidate extraction first, then a
 small summary around likely item roots.
 
 ```powershell
-$ArtifactDir = Join-Path $env:TEMP "realbrowser-feed"
-Select-String -Path (Join-Path $ArtifactDir "feed-*.json") -Pattern "needle|role|article|data-|aria"
+$ArtifactDir = Join-Path $env:TEMP "realbrowser-content"
+Select-String -Path (Join-Path $ArtifactDir "*.json") -Pattern "needle|role|article|data-|aria"
 ```
 
 There is no site-specific `posts`, `blocks`, or `content-blocks` shortcut.
@@ -117,23 +118,24 @@ script even when the current `scripts/realbrowser` supports the command. On real
 signed-in profiles, reload/restart only when the reader is needed because Chrome
 may surface the remote-debugging approval/banner.
 
-### Nested Item Trap
+### Nested Item Boundary Trap
 
-On nested feeds, chats, search results, issue trackers, dashboards, and other
-repeated-item pages, selector names are not proof of item boundaries. A selector
-such as `[role="article"]` may match nested comments, replies, cards, or
-subpanels instead of the top-level item the user asked about. Do not count
-selector matches as feed items without checking surrounding DOM/AX context.
+On chats, search results, issue trackers, dashboards, inboxes, catalogs, and
+other repeated-item pages, selector names are not proof of item boundaries. A
+selector such as `[role="article"]` may match nested comments, replies, cards,
+or subpanels instead of the top-level item the user asked about. Do not count
+selector matches as top-level content items without checking surrounding DOM/AX
+context.
 
 A more reliable sequence is:
 
 ```bash
-ARTIFACT_DIR="${TMPDIR:-/tmp}/realbrowser-feed"
+ARTIFACT_DIR="${TMPDIR:-/tmp}/realbrowser-content"
 mkdir -p "$ARTIFACT_DIR"
 "$REALBROWSER_CLI" query-selector 'main h1, main h2, main h3, [role="heading"]' --out "$ARTIFACT_DIR/headings.json" --limit 80 --max-text-chars 200 --max-html-chars 500
 "$REALBROWSER_CLI" extract-items --selector main --limit 8 --max-text-chars 700 --out "$ARTIFACT_DIR/items.json"
-"$REALBROWSER_CLI" snapshot-dom --selector main --out "$ARTIFACT_DIR/feed-dom.json" --limit 2200 --max-text-chars 180
-"$REALBROWSER_CLI" snapshot-aria --out "$ARTIFACT_DIR/feed-aria.json" --limit 2200
+"$REALBROWSER_CLI" snapshot-dom --selector main --out "$ARTIFACT_DIR/dom.json" --limit 2200 --max-text-chars 180
+"$REALBROWSER_CLI" snapshot-aria --out "$ARTIFACT_DIR/aria.json" --limit 2200
 ```
 
 Use the heading/candidate list to identify likely top-level items in visible
