@@ -6,8 +6,9 @@ description: Use when you need fast local real-browser automation from Codex, in
 # Realbrowser
 
 Use this skill for local browser checks when a real or managed Chrome session is
-more direct than generic browser tooling. Keep the first pass small: read this
-file, run the task, and open references only when the task needs their detail.
+more direct than generic browser tooling. Keep the first pass small: read the
+task router below, run the matching recipe when it covers the request, and open
+later sections or references only when the task needs their detail.
 
 ## Quick Start
 
@@ -36,89 +37,68 @@ paths to `$env:TEMP`/`%TEMP%` and use PowerShell `Select-String` /
 Do not run `doctor` by default. Use it when setup is uncertain or a browser
 command fails.
 
+## Task Router
+
+For a simple public screenshot or responsive-capture request, do not read the
+console/debug/profile sections first and do not do memory/history lookup unless
+the user refers to an existing tab, profile, credentials, prior browser state, or
+a previous failed attempt. Use a clean anonymous session, cap text reads, capture
+the images, inspect them, and detach the dedicated session:
+
+```bash
+REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
+"$REALBROWSER_CLI" open https://site.example --anonymous --session site-shot --select --timeout 30000
+"$REALBROWSER_CLI" --session site-shot observe --max-chars 1200
+"$REALBROWSER_CLI" --session site-shot device-screenshots /tmp/site-shot
+"$REALBROWSER_CLI" --session site-shot detach
+```
+
+If the wording implies an existing target, verify and reuse it before opening a
+new tab:
+
+```bash
+"$REALBROWSER_CLI" sessions
+"$REALBROWSER_CLI" find-tab "<url-or-title-fragment>" --all-sessions
+"$REALBROWSER_CLI" select-tab "<url-or-title-fragment>" --all-sessions
+"$REALBROWSER_CLI" js '({href: location.href, title: document.title, readyState: document.readyState})'
+```
+
+Use the matching later section only when needed:
+
+- Console output or DevTools logs: read "Console Output Copy Fast Path".
+- Large dynamic pages or DOM extraction: read "OpenClaw-Style Extraction".
+- Login, custom devices, full-page regions, or clipping risk: read
+  "Screenshot Task Fast Path" and then `references/screenshots.md` if needed.
+- Profile cookies or signed-in browser state: read `references/profiles.md`.
+- Failed network, cache, headers, HAR, or performance: read
+  `references/debugging.md`.
+
 ## Console Output Copy Fast Path
 
 For requests like "check console log", "copy console output", or "what is in
 DevTools Console", treat the user's ask literally: select the exact existing
 tab, read the DevTools-style console lines, and paste those lines back in a
 code block. Do not summarize first, do not mix output from other matching tabs,
-and do not reload unless the user asks to reproduce startup logs.
+and do not reload unless the user asks to reproduce startup logs. For target
+mismatches, signed-in Chrome profile details, or fresh startup capture, read
+`references/debugging.md`.
 
 ```bash
 REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
 "$REALBROWSER_CLI" sessions
 "$REALBROWSER_CLI" find-tab "<url-or-title-fragment>" --all-sessions
 "$REALBROWSER_CLI" select-tab "<url-or-title-fragment>" --all-sessions
-"$REALBROWSER_CLI" observe --max-chars 1500
+"$REALBROWSER_CLI" js '({href: location.href, title: document.title, readyState: document.readyState})'
 "$REALBROWSER_CLI" console --preserve --limit 80
 ```
-
-When the user cares about the exact tab, prove the target before trusting
-console output. `select-tab` alone is not enough; verify the URL/title, then
-read console output from that selected target. Prefer the selected-tab
-`console` command after verification. On real signed-in Chrome profiles, current
-realbrowser keeps an endpoint-scoped CDP daemon and persistent page CDP session
-once it attaches, so `tabs`, `select-tab`, `js`, `observe`, `console`, and
-screenshot commands do not open separate CDP/MCP controllers.
-
-```bash
-"$REALBROWSER_CLI" tabs
-# Record the matching target/page value, then verify the selected page.
-"$REALBROWSER_CLI" --page <page-number> js '({href: location.href, title: document.title, readyState: document.readyState})'
-"$REALBROWSER_CLI" console --preserve --limit 80
-```
-
-For real signed-in Chrome profiles, selected-tab `console` is CDP-backed and
-buffers messages while the endpoint daemon is attached. If Chrome remote
-debugging is already enabled or a realbrowser endpoint session is already
-running, run the normal command first; realbrowser should not require
-`--allow-profile-reattach` for that routine attach. Chrome can still show its
-own "Allow remote debugging?" prompt, and the user must allow it in Chrome if it
-appears. Treat that browser prompt as approval for the persistent realbrowser
-CDP session; do not detach/restart between follow-up reads unless the user wants
-to approve again. Use `--allow-profile-reattach` only when intentionally
-replacing/restarting the controller or when the CLI explicitly refuses a fresh
-MCP attach:
-
-```bash
-"$REALBROWSER_CLI" console --preserve --limit 80
-```
-
-If multiple tabs match, verify by URL/title/visible page text with `observe` or
-a targeted `js` read, then select the requested tab before reading console output.
-If you pinned a page with `--page <page-number>`, keep using the same selected
-endpoint session for follow-up reads. If `status` reports
-`Daemon script: <old> (current <new>; reload needed for new skill code)`,
-rerun the normal routine read first; current realbrowser can route routine
-console/screenshot commands through an endpoint-scoped current CDP daemon when
-Chrome remote debugging is already enabled or an explicit endpoint is in use,
-activating that session for follow-ups. Add `--allow-profile-reattach` only for
-an intentional reload/restart of a real signed-in profile controller or an
-explicit MCP-only command that refuses to attach.
-
-For web development startup or hydration issues, use `capture-console --reload`
-only when a reload/reproduction is wanted. First verify the selected tab, then
-capture from that selected tab:
-
-```bash
-"$REALBROWSER_CLI" capture-console --reload --duration 10000 --out /tmp/app-console.json --json
-jq '{pageId, url, title, counts, messages: [.messages[] | {type, text}]}' /tmp/app-console.json
-```
-
-After every console copy, sanity-check the copied lines. If the output URL,
-network section, stack traces, or message text mention an unrelated site or
-bundle (for example another open tab's domain), do not paste it as correct.
-Re-check `tabs`, verify the current page with `js`, compare `--mcp tabs` only
-when debugging a target mismatch, then rerun the selected-tab console command.
-If the current DevTools panel already shows historical startup messages but
-command-line capture prints none, explain that CDP may not replay DevTools' old
-frontend buffer; arm capture first and reproduce/reload instead.
 
 ## OpenClaw-Style Extraction
 
-Realbrowser has generic OpenClaw-style extraction built in. Use this before
-screenshots or raw HTML when reading large dynamic pages such as feeds, chats,
-search results, dashboards, or virtualized lists:
+For large dynamic pages such as feeds, chats, search results, dashboards, or
+virtualized lists, use compact role/DOM readers instead of full-page HTML stdout.
+Write deep reads to files and inspect those artifacts locally. For nested item
+boundaries, stale daemon handling, or selector strategy, read
+`references/debugging.md`.
 
 ```bash
 "$REALBROWSER_CLI" snapshot --selector main --compact --max-chars 2500
@@ -128,98 +108,23 @@ search results, dashboards, or virtualized lists:
 "$REALBROWSER_CLI" query-selector 'main, [role="feed"], [role="article"], article' --out "$ARTIFACT_DIR/page-elements.json" --limit 60 --max-text-chars 300 --max-html-chars 800
 ```
 
-This is the parser path agents should know about: `snapshot --compact` reads a
-bounded role view, `snapshot-aria` records accessibility nodes, `snapshot-dom`
-records DOM elements, and `query-selector` records focused selector matches.
-When a user asks for an OpenClaw-style element snapshot or "snapshot element",
-map that to these realbrowser CLI readers first.
-Write deep reads to `--out` artifacts and inspect them with OS-available local
-tools. Do not use full-page HTML stdout as the default parser, and do not rely
-on removed semantic shortcuts such as `posts`, `blocks`, or `content-blocks`.
-
-These readers live in this skill's `scripts/realbrowser` implementation. Use
-the realbrowser CLI, not the OpenClaw repository, for live browsing tasks. If
-one of these commands fails with a daemon capability error, run `status` and
-`sessions` before changing approach. `status` reports `Daemon script: <old>
-(current <new>; reload needed for new skill code)` when an old daemon is
-blocking current skill commands. Reload only when the new reader is needed; on
-real signed-in Chrome profiles, restarting the controller can surface the Chrome
-remote-debugging approval/banner.
-
-For nested feeds or repeated-item pages, treat selectors as hypotheses rather
-than semantics. A selector such as `[role="article"]` can match nested items
-like comments, replies, cards, or subpanels. A better first pass is to read
-headings/landmarks/repeated candidates, then inspect nearby DOM/role records
-around the matching node:
-
-```bash
-"$REALBROWSER_CLI" query-selector 'main h1, main h2, main h3, [role="heading"]' --out "$ARTIFACT_DIR/headings.json" --limit 80 --max-text-chars 200 --max-html-chars 500
-"$REALBROWSER_CLI" snapshot-dom --out "$ARTIFACT_DIR/page-dom.json" --limit 2200 --max-text-chars 180
-```
-
-Use the current page artifacts to determine item boundaries and order. Do not
-bake observed content or one run's ordering into the skill; dynamic pages
-change.
-
 ## Screenshot Task Fast Path
 
 For requests like "check staging site, log in if needed, open inbox, take
-desktop/tablet/mobile screenshots":
+desktop/tablet/mobile screenshots", use the Task Router recipe when it covers
+the request. For exact default desktop/tablet/mobile PNG screenshots on an
+already selected or named session:
 
-1. Before opening anything, decide whether the wording implies an existing
-   target. Treat "that tab", "existing tab", "already open", "current tab",
-   "staging tab", named browser/profile mentions, and follow-ups to recent
-   browser work as existing-tab requests:
-   ```bash
-   "$REALBROWSER_CLI" sessions
-   "$REALBROWSER_CLI" find-tab "<url-or-title-fragment>" --all-sessions
-   "$REALBROWSER_CLI" select-tab "<url-or-title-fragment>" --all-sessions
-   "$REALBROWSER_CLI" js '({href: location.href, title: document.title, readyState: document.readyState})'
-   ```
-   `--all-sessions` includes named anonymous sessions as well as real-profile
-   endpoint sessions. If the user explicitly says "anonymous", "incognito", or
-   "clean session", still search matching anonymous sessions first; open a new
-   anonymous session only when no suitable existing anonymous target exists or
-   the user asks for a fresh one.
-2. Use a clean anonymous session only for public/clean-state checks when no
-   existing target is implied or found:
-   ```bash
-   "$REALBROWSER_CLI" open https://site.example --anonymous --session site-check --select --timeout 30000
-   ```
-3. Read compact state from the selected or newly opened target:
-   ```bash
-   "$REALBROWSER_CLI" observe --max-chars 2000
-   # If you opened a named session instead of selecting an existing tab:
-   "$REALBROWSER_CLI" --session site-check observe --max-chars 2000
-   ```
-4. If login is needed, use `snapshot --efficient`, `fill-form`, `click`, then
-   wait for the post-login page with `wait --domcontentloaded` or visible text.
-5. Navigate directly to the requested page when the route is known.
-6. For exact default desktop/tablet/mobile PNG screenshots, run:
-   ```bash
-   "$REALBROWSER_CLI" device-screenshots /tmp/site-inbox
-   # If you opened a named session instead of selecting an existing tab:
-   "$REALBROWSER_CLI" --session site-check device-screenshots /tmp/site-inbox
-   ```
-   The output should show the requested PNG dimensions. If `browser=<width>x<height>`
-   differs from the device size, the real tab is probably zoomed; inspect the
-   image for blank gutters or clipping, and reset browser zoom before capture
-   only when exact CSS breakpoints matter.
-   For a user-facing full-size screenshot, prefer:
-   ```bash
-   "$REALBROWSER_CLI" full-screenshot /tmp/site-full.png
-   # If you opened a named session instead of selecting an existing tab:
-   "$REALBROWSER_CLI" --session site-check full-screenshot /tmp/site-full.png
-   ```
-   Add `--viewport 390x844` for mobile or `--selector <css>` for a full
-   internal scroll region.
-7. If the layout hydrates slowly, add a readiness guard such as
-   `--selector main --visual-stable --settle-ms 500`.
-8. For custom device sizes, full-size internal-scroll screenshots, or specific
-   region captures, read `references/screenshots.md`.
-9. Inspect saved images with `view_image` when available. Detach only
-   anonymous/dedicated sessions you opened for the task; do not detach an
-   existing real-profile tab or session the user was already using.
+```bash
+"$REALBROWSER_CLI" device-screenshots /tmp/site-inbox
+"$REALBROWSER_CLI" --session site-check device-screenshots /tmp/site-inbox
+```
+
+Inspect saved images with `view_image` when available. Detach only
+anonymous/dedicated sessions you opened for the task; do not detach an existing
+real-profile tab or session the user was already using. For login, custom
+devices, full-page/internal-scroll screenshots, mobile emulation, or clipping
+risk, read `references/screenshots.md`.
 
 ## Decision Matrix
 
