@@ -40,44 +40,52 @@ REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
 When the user cares about the exact tab, prove the target before trusting
 console output. `select-tab` alone is not enough; verify the URL/title, then
 read console output from that selected target. Prefer the selected-tab
-`console` command after verification. Do not assume the Page numbers from
-`tabs` are the same namespace as Chrome DevTools MCP page ids; `console` is
-MCP-backed and current realbrowser maps the selected CDP target to the matching
-MCP page internally.
+`console` command after verification. On real signed-in Chrome profiles, current
+realbrowser keeps an endpoint-scoped CDP daemon and persistent page CDP session
+once it attaches, so `tabs`, `select-tab`, `js`, `observe`, `console`, and
+screenshot commands do not open separate CDP/MCP controllers.
 
 ```bash
 "$REALBROWSER_CLI" tabs
-# Record the matching Target/Page values, then verify the CDP target itself.
+# Record the matching target/page value, then verify the selected page.
 "$REALBROWSER_CLI" --page <page-number> js '({href: location.href, title: document.title, readyState: document.readyState})'
 "$REALBROWSER_CLI" console --preserve --limit 80
 ```
 
-For real signed-in Chrome profiles, `console` and `capture-console` may be
-MCP-backed and can refuse to start a new controller because Chrome may show
-"Allow remote debugging?". If the user has already said they allowed it, or
-explicitly accepts that prompt in the current turn, rerun the console command
-with `--allow-profile-reattach` instead of stopping or switching to unrelated
-page reads:
+For real signed-in Chrome profiles, selected-tab `console` is CDP-backed and
+buffers messages while the endpoint daemon is attached. If Chrome remote
+debugging is already enabled or a realbrowser endpoint session is already
+running, run the normal command first; realbrowser should not require
+`--allow-profile-reattach` for that routine attach. Chrome can still show its
+own "Allow remote debugging?" prompt, and the user must allow it in Chrome if it
+appears. Treat that browser prompt as approval for the persistent realbrowser
+CDP session; do not detach/restart between follow-up reads unless the user wants
+to approve again. Use `--allow-profile-reattach` only when intentionally
+replacing/restarting the controller or when the CLI explicitly refuses a fresh
+MCP attach:
 
 ```bash
-"$REALBROWSER_CLI" console --preserve --limit 80 --allow-profile-reattach
+"$REALBROWSER_CLI" console --preserve --limit 80
 ```
 
 If multiple tabs match, verify by URL/title/visible page text with `observe` or
 a targeted `js` read, then select the requested tab before reading console output.
-If you pinned a page with `--page <page-number>`, current realbrowser maps the
-CDP target to MCP by URL before reading console output. If output is empty or
-mentions another site, immediately run `status`. When it reports
-`Daemon script: <old> (current <new>; reload needed for new skill code)`, rerun
-the command after `--reload-daemon --allow-profile-reattach` or use `restart
---allow-profile-reattach` when the user has accepted the real-profile prompt.
+If you pinned a page with `--page <page-number>`, keep using the same selected
+endpoint session for follow-up reads. If `status` reports
+`Daemon script: <old> (current <new>; reload needed for new skill code)`,
+rerun the normal routine read first; current realbrowser can route routine
+console/screenshot commands through an endpoint-scoped current CDP daemon when
+Chrome remote debugging is already enabled or an explicit endpoint is in use,
+activating that session for follow-ups. Add `--allow-profile-reattach` only for
+an intentional reload/restart of a real signed-in profile controller or an
+explicit MCP-only command that refuses to attach.
 
 For web development startup or hydration issues, use `capture-console --reload`
 only when a reload/reproduction is wanted. First verify the selected tab, then
 capture from that selected tab:
 
 ```bash
-"$REALBROWSER_CLI" capture-console --reload --duration 10000 --out /tmp/app-console.json --allow-profile-reattach --json
+"$REALBROWSER_CLI" capture-console --reload --duration 10000 --out /tmp/app-console.json --json
 jq '{pageId, url, title, counts, messages: [.messages[] | {type, text}]}' /tmp/app-console.json
 ```
 

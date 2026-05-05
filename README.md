@@ -115,14 +115,14 @@ REALBROWSER_BROWSER_URL=http://127.0.0.1:9222 ./scripts/realbrowser tabs
 
 When using the default real-browser mode, realbrowser starts Chrome DevTools MCP with `--autoConnect`. Current Chrome DevTools MCP documents that auto-connect works with Chrome 144+ and requires remote debugging to be enabled from `chrome://inspect/#remote-debugging`.
 
-Chrome may show an "Allow remote debugging?" dialog because this grants an external app full control of the real signed-in profile. Treat `Allow` as permission for the current debugging connection, not as a permanent trust grant for every future daemon/MCP process. Normal follow-up commands should reuse the persistent realbrowser daemon and should not ask again. It can reappear after:
+Chrome may show an "Allow remote debugging?" dialog because this grants an external app full control of the real signed-in profile. Treat `Allow` as permission for Chrome's browser-level prompt; realbrowser cannot bypass it. Once Chrome remote debugging is enabled or an approved realbrowser endpoint session is running, routine commands such as `tabs`, `select-tab`, `js`, selected-tab `console`, `screenshot`, and `device-screenshots` should run without adding `--allow-profile-reattach`. Use that flag for intentional controller replacement/restart or explicit MCP-only work, not as a default follow-up habit. The Chrome prompt can reappear after:
 
 - `realbrowser stop` or `realbrowser restart`.
 - Code changes while developing realbrowser.
 - Switching backend/mode/state files.
 - Chrome or Chrome DevTools MCP closing and reconnecting.
 
-To reduce prompts, keep the daemon warm and avoid restarting it during normal browser work. If you need a pre-opened debug endpoint, launch Chrome with a localhost-only DevTools port and use `REALBROWSER_BROWSER_URL=http://127.0.0.1:9222`, but do that only on a trusted machine because a DevTools port can control the browser.
+To reduce prompts, keep the daemon warm and avoid restarting it during normal browser work. For real signed-in profile endpoint sessions, routine operations prefer one persistent CDP browser socket plus persistent page sessions; MCP is reserved for commands that still need MCP-only data such as preserved network capture. The first fresh attach may still show Chrome's browser-level approval; follow-up `tabs`, `select-tab`, `js`, `observe`, `console`, `screenshot`, and `device-screenshots` should reuse the same endpoint session. If you need a pre-opened debug endpoint, launch Chrome with a localhost-only DevTools port and use `REALBROWSER_BROWSER_URL=http://127.0.0.1:9222`, but do that only on a trusted machine because a DevTools port can control the browser. `status` reports whether the CLI reattach flag is needed for routine profile work.
 
 Chrome may expose a profile's browser WebSocket while returning 404 for
 `/json/list`; realbrowser handles that through the approved persistent daemon
@@ -179,10 +179,12 @@ Realbrowser is designed to keep Codex token use low:
   `REALBROWSER_IDLE_TIMEOUT_MS` milliseconds, defaulting to 30 minutes; real
   signed-in profile sessions stay alive to avoid repeated approval prompts.
 - Use `wait <text>` or readiness waits instead of shell sleeps.
-- Use profile/endpoint sessions when possible; cheap operations use one
-  persistent direct-CDP socket before MCP. Reuse the endpoint-scoped session for
-  a real signed-in browser; pass `--force` only when intentionally creating a
-  duplicate controller.
+- Use profile/endpoint sessions when possible. For a real signed-in browser,
+  routine operations prefer one persistent CDP browser socket plus persistent
+  page sessions so `tabs`, `select-tab`, `js`, `observe`, console reads, and
+  screenshots do not each ask Chrome for a separate remote-debugging approval.
+  MCP-only commands may still create an MCP controller. Pass `--force` only
+  when intentionally creating a duplicate controller.
 - Use `snapshot --efficient` when clickable `uid` refs are needed.
 - Use `snapshot --labels` or `screenshot --labels` for annotated screenshots.
 - `open` and `newtab` open background tabs by default; pass `--front` only for an explicit visual handoff.
@@ -193,9 +195,10 @@ Realbrowser is designed to keep Codex token use low:
 - Use `links --filter/--text-filter/--href-filter --visible` when you need a
   small link set instead of full-page link dumps.
 - For console copy requests, `select-tab`, verify URL/title, then use the
-  selected-tab `console` command. Do not assume direct-CDP `tabs` Page numbers
-  are the same as Chrome DevTools MCP page ids; current realbrowser maps the
-  selected CDP target to MCP before reading console logs.
+  selected-tab `console` command. Do not add `--allow-profile-reattach` when
+  Chrome remote debugging is already enabled or the endpoint session is already
+  running. Keep the endpoint session active so follow-up reads reuse the same
+  persistent CDP page session.
 - Use `console --errors --limit 20` and `network --failed --limit 30`.
 - Use project-specific `--handle-out tmp/realbrowser-handles/<task>.json`
   paths for parallel Codex tabs. Existing handle files are not overwritten
@@ -205,11 +208,13 @@ Realbrowser is designed to keep Codex token use low:
   `chain --return summary --trace ~/.realbrowser/trace.json` when intermediate
   step evidence matters. `chain` records per-step and total durations for speed
   review.
-- If a running daemon predates the edited skill and a command needs a new
-  capability, reload it explicitly with `--restart-daemon`; for a real Chrome
-  profile this can show one fresh approval prompt. For console mismatches or
-  unexpected empty logs, check `status` for `reload needed for new skill code`
-  before trusting the result.
+- If a running daemon predates the edited skill, current realbrowser keeps
+  routine CDP-backed reads moving without asking for CLI reattach approval when
+  Chrome remote debugging is already enabled or an explicit endpoint is in use.
+  It prefers an endpoint-scoped current daemon, activates that session for
+  follow-ups, and refreshes stale endpoint state instead of creating disposable
+  temporary controllers. Use `--restart-daemon --allow-profile-reattach` only
+  when you intentionally want to replace a real-profile controller.
 - Use `--raw`, `--verbose`, `--max-chars`, or `--out <path>` only when the compact result is not enough.
 
 The implementation intentionally copies the proven shape of OpenClaw's efficient browser snapshots and gstack's compact localhost command loop while keeping the backend attached to the user's real Chrome session when possible.

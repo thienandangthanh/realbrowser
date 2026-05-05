@@ -25,6 +25,7 @@ const DEFAULT_SCREENSHOT_MAX_BYTES = parseOptionalBytesEnv("REALBROWSER_SCREENSH
 const DEFAULT_MANAGED_IDLE_TIMEOUT_MS = parseOptionalIntegerEnv("REALBROWSER_IDLE_TIMEOUT_MS", 30 * 60 * 1000);
 const START_TIMEOUT_MS = Number.parseInt(process.env.REALBROWSER_START_TIMEOUT_MS ?? "20000", 10);
 const MCP_START_TIMEOUT_MS = Number.parseInt(process.env.REALBROWSER_MCP_TIMEOUT_MS ?? "30000", 10);
+const CDP_CONSOLE_BUFFER_LIMIT = 1000;
 const PACKAGE_SPEC = process.env.REALBROWSER_MCP_PACKAGE ?? "chrome-devtools-mcp@latest";
 const CLI_VERSION = "0.1.0";
 const SCRIPT_HASH = crypto.createHash("sha256").update(fs.readFileSync(SCRIPT_PATH)).digest("hex").slice(0, 16);
@@ -40,7 +41,9 @@ const DAEMON_CAPABILITIES = Object.freeze([
   "managed-headless",
   "managed-idle-timeout",
   "page-local-wait",
+  "persistent-cdp-page-sessions",
   "persistent-cdp-ws-target-list",
+  "cdp-console-buffer",
   "query-selector",
   "snapshot-aria",
   "snapshot-dom",
@@ -1911,12 +1914,24 @@ function allowsProfileReattach(flags = {}) {
   );
 }
 
-function allowsProfileControllerStart(flags = {}) {
+function allowsProfileControllerStart(flags = {}, context = {}) {
   return Boolean(
     allowsProfileReattach(flags) ||
     flags.allowAttach ||
-    process.env.REALBROWSER_ALLOW_PROFILE_CONTROL === "1",
+    process.env.REALBROWSER_ALLOW_PROFILE_CONTROL === "1" ||
+    context.browserUrl ||
+    context.reusedRealProfileSession ||
+    flags.reusedRealProfileSession ||
+    context.chromeRemoteDebugging?.userEnabled === true,
   );
+}
+
+async function allowsProfileControllerStartForCurrentChrome(flags = {}, context = {}) {
+  if (allowsProfileControllerStart(flags, context)) {
+    return true;
+  }
+  const chromeRemoteDebugging = await localChromeRemoteDebuggingStatus().catch(() => null);
+  return allowsProfileControllerStart(flags, { ...context, chromeRemoteDebugging });
 }
 
 function wouldRestartLiveRealProfileDaemon(state, flags = {}) {
@@ -2380,19 +2395,278 @@ async function maybeRunScreenshotUtilityWithTemporaryDaemon(state, payload, flag
   return await runPayloadWithTemporaryCurrentDaemon(state, payload, flags, capability);
 }
 
+function isRoutineRealProfileCommand(command) {
+  return new Set([
+    "console",
+    "errors",
+    "network",
+    "requests",
+    "observe",
+    "capture-console",
+    "console-capture",
+    "capture-logs",
+    "logs-capture",
+    "capture-network",
+    "network-capture",
+    "capture-requests",
+    "screenshot",
+    "device-screenshots",
+    "exact-screenshots",
+    "responsive-exact",
+    "full-screenshot",
+    "full-size-screenshot",
+    "fullpage-screenshot",
+    "area-screenshot",
+    "element-screenshot",
+    "part-screenshot",
+  ]).has(command);
+}
+
+function shouldPreferSingleMcpController(command, args = []) {
+  if ([
+    "network",
+    "requests",
+    "capture-network",
+    "network-capture",
+    "capture-requests",
+  ].includes(command)) {
+    return true;
+  }
+  return false;
+}
+
+function preferSingleMcpControllerFlags(command, args = [], flags = {}, context = {}) {
+  if (
+    flags.mcp === true ||
+    flags.fast === false ||
+    context.mode === ANONYMOUS_MODE ||
+    context.mode === DEDICATED_MODE ||
+    !context.hasBrowserEndpoint ||
+    !shouldPreferSingleMcpController(command, args)
+  ) {
+    return flags;
+  }
+  return {
+    ...flags,
+    mcp: true,
+  };
+}
+
+function isCurrentCliDaemon(state) {
+  const scriptHash = state?.__health?.scriptHash ?? state?.scriptHash ?? "";
+  if (scriptHash && scriptHash !== SCRIPT_HASH) {
+    return false;
+  }
+  const scriptPath = state?.__health?.script ?? state?.script ?? "";
+  if (scriptPath && path.resolve(scriptPath) !== path.resolve(SCRIPT_PATH)) {
+    return false;
+  }
+  return true;
+}
+
+function isProfileControllerStartRefusal(error) {
+  const text = String(error?.message ?? error);
+  return text.includes("Refusing to start a Chrome DevTools MCP controller for a real Chrome profile");
+}
+
+function isMissingRequiredCapabilityError(error, payload) {
+  for (const capability of requiredCapabilitiesForPayload(payload)) {
+    if (isMissingDaemonCapabilityError(error, capability)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function canRouteStaleRealProfileRoutineCommand(state, payload, flags = {}, context = {}) {
+  if (!isRoutineRealProfileCommand(payload?.command)) {
+    return false;
+  }
+  if (!isRealProfileSessionMode(modeFromState(state))) {
+    return false;
+  }
+  if (isCurrentCliDaemon(state) && !context.profileControllerStartRefused) {
+    return false;
+  }
+  return allowsProfileControllerStart(flags, {
+    browserUrl: browserUrlFromState(state) || realProfileEndpointFromFlags(flags),
+    reusedRealProfileSession: flags.reusedRealProfileSession,
+    chromeRemoteDebugging: context.chromeRemoteDebugging,
+  });
+}
+
+async function maybeRunRoutineCommandWithCurrentEndpointDaemon(state, payload, flags = {}, error = null) {
+  const chromeRemoteDebugging = await localChromeRemoteDebuggingStatus().catch(() => null);
+  if (!canRouteStaleRealProfileRoutineCommand(state, payload, flags, {
+    chromeRemoteDebugging,
+    profileControllerStartRefused: isProfileControllerStartRefusal(error),
+  })) {
+    return null;
+  }
+  try {
+    const routed = await runPayloadWithEndpointSessionWhenAvailable(state, payload, flags);
+    if (routed) {
+      return routed;
+    }
+    const stableRouted = await runPayloadWithStableAutoConnectSession(state, payload, flags);
+    if (stableRouted) {
+      return stableRouted;
+    }
+  } catch (routeError) {
+    if (!isProfileControllerStartRefusal(routeError) && !isMissingRequiredCapabilityError(routeError, payload)) {
+      throw routeError;
+    }
+    const stableRouted = await runPayloadWithFreshEndpointSession(state, payload, flags).catch((freshError) => {
+      if (!isProfileControllerStartRefusal(freshError) && !isMissingRequiredCapabilityError(freshError, payload)) {
+        throw freshError;
+      }
+      return null;
+    });
+    if (stableRouted) {
+      return stableRouted;
+    }
+    const autoConnectRouted = await runPayloadWithStableAutoConnectSession(state, payload, flags).catch((stableError) => {
+      if (!isProfileControllerStartRefusal(stableError) && !isMissingRequiredCapabilityError(stableError, payload)) {
+        throw stableError;
+      }
+      return null;
+    });
+    if (autoConnectRouted) {
+      return autoConnectRouted;
+    }
+  }
+  return await runPayloadWithTemporaryCurrentDaemon(state, payload, flags, "routine");
+}
+
+async function routingBrowserUrlForRealProfile(state, flags = {}) {
+  const explicit = browserUrlFromState(state) || realProfileEndpointFromFlags(flags);
+  if (explicit) {
+    return explicit;
+  }
+  const profiles = await listBrowserProfiles({ browser: flags.browser, active: true }).catch(() => []);
+  const endpoint = browserTabEndpoints(profiles, flags)[0] ?? null;
+  return endpoint?.wsEndpoint ?? endpoint?.httpUrl ?? "";
+}
+
+async function runPayloadWithEndpointSessionWhenAvailable(state, payload, flags = {}) {
+  const browserUrl = await routingBrowserUrlForRealProfile(state, flags);
+  if (!browserUrl) {
+    return null;
+  }
+  const routeFlags = {
+    ...payload.flags,
+    browserUrl,
+    noFallback: true,
+    noActiveSession: true,
+  };
+  if (!routeFlags.targetId) {
+    const targetId = await selectedCdpTargetIdFromDaemon(state, flags);
+    if (targetId) {
+      routeFlags.targetId = targetId;
+    }
+  }
+  const endpointSession = await ensureEndpointSession(browserUrl, routeFlags, { mutateFlags: false });
+  if (!endpointSession?.state) {
+    return null;
+  }
+  const result = await daemonRpc(endpointSession.state, {
+    command: payload.command,
+    args: payload.args,
+    flags: routeFlags,
+  });
+  if (endpointSession.name && shouldActivateSession(flags)) {
+    await writeActiveSessionName(endpointSession.name);
+  }
+  return result;
+}
+
+async function runPayloadWithFreshEndpointSession(state, payload, flags = {}) {
+  const browserUrl = await routingBrowserUrlForRealProfile(state, flags);
+  if (!browserUrl || flags.stateFile || flags.handle) {
+    return null;
+  }
+  const endpoint = normalizeBrowserEndpoint(browserUrl);
+  if (!endpoint) {
+    return null;
+  }
+  const session = autoSessionNameForBrowserTab({ browserUrl: endpoint.wsEndpoint ?? endpoint.httpUrl });
+  const routeFlags = {
+    ...payload.flags,
+    browserUrl: endpoint.wsEndpoint ?? endpoint.httpUrl,
+    noFallback: true,
+    noActiveSession: true,
+    session,
+  };
+  if (!routeFlags.targetId) {
+    const targetId = await selectedCdpTargetIdFromDaemon(state, flags);
+    if (targetId) {
+      routeFlags.targetId = targetId;
+    }
+  }
+  const existing = await runningEndpointSession(endpoint);
+  if (existing?.state && !isCurrentCliDaemon(existing.state)) {
+    await stopState(existing.state).catch(() => {});
+  }
+  const freshState = await ensureDaemon(routeFlags);
+  const result = await daemonRpc(freshState, {
+    command: payload.command,
+    args: payload.args,
+    flags: routeFlags,
+  });
+  if (shouldActivateSession(flags)) {
+    await writeActiveSessionName(session);
+  }
+  return result;
+}
+
+async function runPayloadWithStableAutoConnectSession(state, payload, flags = {}) {
+  if (
+    browserUrlFromState(state) ||
+    realProfileEndpointFromFlags(flags) ||
+    flags.stateFile ||
+    flags.handle ||
+    flags.noActiveSession ||
+    !isRealProfileSessionMode(modeFromState(state))
+  ) {
+    return null;
+  }
+  const routeFlags = {
+    ...payload.flags,
+  };
+  if (!isCurrentCliDaemon(state)) {
+    await stopState(state).catch(() => {});
+  }
+  const stableState = await ensureDaemon(routeFlags);
+  if (!isCurrentCliDaemon(stableState)) {
+    return null;
+  }
+  const result = await daemonRpc(stableState, {
+    command: payload.command,
+    args: payload.args,
+    flags: routeFlags,
+  });
+  const sessionName = sessionNameForState(stableState, routeFlags);
+  if (sessionName && shouldActivateSession(flags)) {
+    await writeActiveSessionName(sessionName);
+  }
+  return result;
+}
+
 async function runPayloadWithTemporaryCurrentDaemon(state, payload, flags = {}, capability = "command") {
-  const browserUrl = browserUrlFromState(state);
-  if (!browserUrl || !isRealProfileSessionMode(modeFromState(state))) {
+  const browserUrl = browserUrlFromState(state) || realProfileEndpointFromFlags(flags);
+  if (!isRealProfileSessionMode(modeFromState(state)) && !browserUrl) {
     return null;
   }
   const tempFlags = {
     ...payload.flags,
-    browserUrl,
     noFallback: true,
     noActiveSession: true,
     session: "",
     stateFile: path.join(os.tmpdir(), `realbrowser-${capability}-${process.pid}-${Date.now()}.json`),
   };
+  if (browserUrl) {
+    tempFlags.browserUrl = browserUrl;
+  }
   if (!tempFlags.targetId) {
     const targetId = await selectedCdpTargetIdFromDaemon(state, flags);
     if (targetId) {
@@ -2811,9 +3085,12 @@ async function runCli() {
   }
 
   if (command === "find-tab" || command === "tabs-all" || command === "search-tabs") {
+    await resolveProfileForAutomation(flags);
     const tabs = await findBrowserTabs({
       query: args.join(" "),
       browser: flags.browser,
+      browserUrl: flags.browserUrl,
+      cdpUrl: flags.cdpUrl,
       allSessions: flags.allSessions || command === "tabs-all",
       session: flags.session || activeSessionNameFromFlags(flags),
       stateFile: flags.stateFile,
@@ -2827,6 +3104,7 @@ async function runCli() {
 
   if (command === "select-tab" || command === "attach-tab") {
     requireArgs(command, args, 1);
+    await resolveProfileForAutomation(flags);
     printResult(await selectBrowserTabForAutomation(args.join(" "), flags), flags);
     return;
   }
@@ -2985,11 +3263,12 @@ async function runCli() {
 
   const state = await ensureDaemon(flags);
   const payload = daemonPayloadForCommand(command, args, flags, state);
-  let response;
+  let response = await maybeRunRoutineCommandWithCurrentEndpointDaemon(state, payload, flags);
   try {
-    response = await daemonRpc(state, payload);
+    response ??= await daemonRpc(state, payload);
   } catch (error) {
-    response = await maybeRunDeviceScreenshotsWithTemporaryDaemon(state, payload, flags, error) ??
+    response = await maybeRunRoutineCommandWithCurrentEndpointDaemon(state, payload, flags, error) ??
+      await maybeRunDeviceScreenshotsWithTemporaryDaemon(state, payload, flags, error) ??
       await maybeRunScreenshotUtilityWithTemporaryDaemon(state, payload, flags, error);
     if (!response) {
       throw error;
@@ -3524,6 +3803,7 @@ async function localStatus(flags = {}) {
     scriptHash: running ? (healthBody?.scriptHash ?? state.scriptHash ?? null) : null,
     currentScriptHash: SCRIPT_HASH,
     mode,
+    browserUrl: browserUrlFromState(state),
     noFallback: Object.prototype.hasOwnProperty.call(healthBody ?? {}, "noFallback")
       ? Boolean(healthBody.noFallback)
       : noFallbackFromState(state),
@@ -4397,7 +4677,8 @@ async function prepareEndpointSessionForTabPolling(flags = {}) {
 
 async function findBrowserTabs(options = {}) {
   const profiles = await listBrowserProfiles({ browser: options.browser });
-  const endpoints = browserTabEndpoints(profiles, options);
+  const endpointProfiles = profilesForBrowserTabSearch(profiles, options);
+  const endpoints = browserTabEndpoints(endpointProfiles, options);
   const tabs = [];
   const endpointSessionNames = new Set();
   for (const endpoint of endpoints) {
@@ -4406,6 +4687,15 @@ async function findBrowserTabs(options = {}) {
       const sessionTabs = await tabsForKnownSession(endpointSession, { endpoint });
       if (sessionTabs.length > 0) {
         endpointSessionNames.add(endpointSession.name);
+        tabs.push(...sessionTabs);
+        continue;
+      }
+    }
+    if (shouldDiscoverTabsThroughEndpointSession(endpoint, options)) {
+      const session = await ensureEndpointSession(endpoint, { noFallback: true }, { mutateFlags: false }).catch(() => null);
+      if (session) {
+        const sessionTabs = await tabsForKnownSession(session, { endpoint });
+        endpointSessionNames.add(session.name);
         tabs.push(...sessionTabs);
         continue;
       }
@@ -4451,6 +4741,41 @@ async function findBrowserTabs(options = {}) {
     (a.url || "").localeCompare(b.url || "") ||
     (a.title || "").localeCompare(b.title || "")
   )));
+}
+
+function explicitBrowserTabEndpointRequested(options = {}) {
+  return Boolean(options.browserUrl || options.cdpUrl || process.env.REALBROWSER_BROWSER_URL || process.env.REALBROWSER_CDP_URL);
+}
+
+function profilesForBrowserTabSearch(profiles, options = {}) {
+  if (explicitBrowserTabEndpointRequested(options)) {
+    return [];
+  }
+  if ((options.session || options.stateFile) && !options.allSessions) {
+    return [];
+  }
+  const debuggable = profiles.filter((profile) => profile.devtoolsHttpUrl || profile.devtoolsWsEndpoint);
+  const preferred = debuggable.find((profile) => profile.lastUsed) ??
+    debuggable
+      .filter((profile) => profile.lastActive)
+      .sort((a, b) => (a.activeRank ?? Number.MAX_SAFE_INTEGER) - (b.activeRank ?? Number.MAX_SAFE_INTEGER))[0] ??
+    debuggable[0];
+  if (!preferred) {
+    return [];
+  }
+  const preferredEndpoint = preferred.devtoolsHttpUrl ?? normalizeCdpHttpUrl(preferred.devtoolsWsEndpoint);
+  return debuggable.filter((profile) =>
+    browserEndpointEquivalent(profile.devtoolsHttpUrl ?? profile.devtoolsWsEndpoint, preferredEndpoint)
+  );
+}
+
+function shouldDiscoverTabsThroughEndpointSession(endpoint, options = {}) {
+  return Boolean(
+    endpoint?.httpUrl ||
+    endpoint?.wsEndpoint ||
+    options.browserUrl ||
+    options.cdpUrl,
+  );
 }
 
 async function runningSessionByName(name) {
@@ -4820,6 +5145,17 @@ function formatCdpException(exceptionDetails = {}) {
   return description || text || "CDP Runtime.evaluate failed";
 }
 
+function isInvalidCdpSessionError(error) {
+  const text = String(error?.message ?? error).toLowerCase();
+  return [
+    "session with given id not found",
+    "no session with given id",
+    "target closed",
+    "target detached",
+    "session closed",
+  ].some((needle) => text.includes(needle));
+}
+
 function cdpRemoteObjectValue(remote = {}) {
   if (Object.hasOwn(remote, "value")) {
     return remote.value;
@@ -4834,6 +5170,68 @@ function cdpRemoteObjectValue(remote = {}) {
     return remote.description;
   }
   return undefined;
+}
+
+function cdpConsoleMessageFromRuntimeEvent(params = {}, id) {
+  const args = normalizeConsoleArgs(params.args ?? []);
+  const text = args.map(formatConsoleArgPreview).filter(Boolean).join(" ");
+  return {
+    id,
+    type: normalizeConsoleType(params.type),
+    text: text || String(params.type ?? "console"),
+    args,
+    stackTrace: normalizeConsoleStackTrace(params.stackTrace),
+    timestamp: params.timestamp,
+    order: id,
+    source: cdpConsoleSourceFromStack(params.stackTrace),
+  };
+}
+
+function cdpConsoleMessageFromExceptionEvent(params = {}, id) {
+  const details = params.exceptionDetails ?? {};
+  return {
+    id,
+    type: "error",
+    text: formatCdpException(details),
+    args: details.exception ? [normalizeConsoleArg(details.exception)] : [],
+    stackTrace: normalizeConsoleStackTrace(details.stackTrace),
+    timestamp: params.timestamp,
+    order: id,
+    source: cdpConsoleSourceFromException(details),
+  };
+}
+
+function cdpConsoleMessageFromLogEvent(entry = {}, id) {
+  return {
+    id,
+    type: normalizeConsoleType(entry.level ?? entry.source),
+    text: String(entry.text ?? entry.source ?? "log"),
+    args: [],
+    stackTrace: normalizeConsoleStackTrace(entry.stackTrace),
+    timestamp: entry.timestamp,
+    order: id,
+    source: normalizeConsoleSource(entry),
+  };
+}
+
+function cdpConsoleSourceFromStack(stackTrace) {
+  const frame = stackTrace?.callFrames?.[0];
+  if (!frame) {
+    return undefined;
+  }
+  return {
+    url: frame.url || undefined,
+    lineNumber: parseOptionalNumber(frame.lineNumber) !== null ? parseOptionalNumber(frame.lineNumber) + 1 : undefined,
+    columnNumber: parseOptionalNumber(frame.columnNumber) !== null ? parseOptionalNumber(frame.columnNumber) + 1 : undefined,
+  };
+}
+
+function cdpConsoleSourceFromException(details = {}) {
+  return {
+    url: details.url || undefined,
+    lineNumber: parseOptionalNumber(details.lineNumber) !== null ? parseOptionalNumber(details.lineNumber) + 1 : undefined,
+    columnNumber: parseOptionalNumber(details.columnNumber) !== null ? parseOptionalNumber(details.columnNumber) + 1 : undefined,
+  };
 }
 
 function formatCdpValue(value) {
@@ -5258,6 +5656,7 @@ async function prepareCdpPageSession(send) {
   await Promise.all([
     send("Page.enable").catch(() => null),
     send("Runtime.enable").catch(() => null),
+    send("Log.enable").catch(() => null),
     send("Network.enable").catch(() => null),
     send("DOM.enable").catch(() => null),
     send("Accessibility.enable").catch(() => null),
@@ -5942,15 +6341,18 @@ function browserControlStatus(daemon, chromeRemoteDebugging = null) {
   const mcpKnown = typeof daemon?.mcpConnected === "boolean";
   const mcpConnected = daemon?.mcpConnected === true;
   const running = Boolean(daemon?.running);
+  const chromeRemoteDebuggingUserEnabled = chromeRemoteDebugging?.known ? chromeRemoteDebugging.userEnabled : null;
+  const cliProfileAttachPromptRequired = realProfile && !mcpConnected && !chromeRemoteDebuggingUserEnabled && !daemon?.browserUrl;
   return {
     chromeBannerText: CONTROLLED_BANNER_TEXT,
     chromeBannerExpectedNow: mcpKnown ? mcpConnected : null,
     mayAppearOnNextBrowserCommand: running && (!mcpKnown || !mcpConnected),
     realSignedInProfileMayBeControlled: realProfile && (running || mcpConnected),
     realbrowserMcpConnected: mcpKnown ? mcpConnected : null,
-    defaultLocalChromeRemoteDebuggingUserEnabled: chromeRemoteDebugging?.known ? chromeRemoteDebugging.userEnabled : null,
-    chromeRemoteDebuggingUserEnabled: chromeRemoteDebugging?.known ? chromeRemoteDebugging.userEnabled : null,
+    defaultLocalChromeRemoteDebuggingUserEnabled: chromeRemoteDebuggingUserEnabled,
+    chromeRemoteDebuggingUserEnabled,
     chromeRemoteDebuggingMetadataAppliesToActiveBrowser: mode === AUTO_MODE ? true : null,
+    cliProfileAttachPromptRequired,
     canSafelySuppressBanner: false,
     canDismissBannerAfterDetach: process.platform === "darwin",
     reason: !running
@@ -5996,6 +6398,11 @@ function formatLocalStatusText(daemon, browserControl, chromeRemoteDebugging = n
     metadataCaveat,
     `Chrome banner: ${browserControl.chromeBannerExpectedNow === true ? "expected now" : browserControl.chromeBannerExpectedNow === false ? "may appear when the next browser command attaches" : "unknown; this daemon predates banner status reporting"}`,
     `Real signed-in profile may be controlled: ${browserControl.realSignedInProfileMayBeControlled ? "yes" : "no"}`,
+    browserControl.realSignedInProfileMayBeControlled && browserControl.cliProfileAttachPromptRequired === false
+      ? "Profile attach: CLI reattach flag not required for routine commands; Chrome may still show its own browser-level approval prompt."
+      : browserControl.realSignedInProfileMayBeControlled
+        ? "Profile attach: MCP-only commands may need Chrome remote debugging enabled or explicit --allow-profile-reattach."
+        : "",
     daemon.scriptHash && daemon.scriptHash !== daemon.currentScriptHash && browserControl.realSignedInProfileMayBeControlled
       ? "Reload guard: real-profile daemon restart requires --allow-profile-reattach because Chrome may show another approval dialog."
       : "",
@@ -6411,17 +6818,27 @@ class BrowserDaemon {
     this.nextCdpTargetHandle = 1;
     this.cdpBrowserClient = null;
     this.cdpBrowserClientPromise = null;
+    this.cdpPageSessions = new Map();
+    this.cdpPageSessionPromises = new Map();
+    this.cdpSessionTargets = new Map();
+    this.cdpConsoleBuffers = new Map();
+    this.nextCdpConsoleMessageId = 1;
   }
 
   async ensureMcp() {
     if (this.mcp) {
       return this.mcp;
     }
-    if (isRealProfileSessionMode(this.currentMode()) && !allowsProfileControllerStart(this.activeCommandFlags ?? {})) {
+    const commandFlags = this.activeCommandFlags ?? {};
+    const controllerAllowed = await allowsProfileControllerStartForCurrentChrome(commandFlags, {
+      browserUrl: this.browserUrl,
+      reusedRealProfileSession: commandFlags.reusedRealProfileSession,
+    });
+    if (isRealProfileSessionMode(this.currentMode()) && !controllerAllowed) {
       throw usageError([
         "Refusing to start a Chrome DevTools MCP controller for a real Chrome profile because Chrome may show an \"Allow remote debugging?\" approval dialog.",
-        "Use CDP-backed commands such as tabs, goto, wait, js, text, links, snapshot, snapshot-aria, snapshot-dom, query-selector, or plain screenshot when possible.",
-        "For MCP-only commands, rerun with `--allow-profile-reattach` only when you explicitly accept that prompt.",
+        `If Chrome remote debugging is already enabled, open ${REMOTE_DEBUGGING_SETTINGS_URL}, allow Chrome's browser prompt if shown, then rerun the same command without adding CLI approval flags.`,
+        "Use `--allow-profile-reattach` only when you intentionally accept a fresh controller attach or replacement.",
       ].join("\n"));
     }
     if (this.profileDir) {
@@ -6488,6 +6905,7 @@ class BrowserDaemon {
     this.cdpBrowserClientPromise = (async () => {
       const client = new CdpClient(await this.cdpBrowserWebSocketUrl());
       await client.connect();
+      client.onEvent((message) => this.handleCdpEvent(message));
       this.cdpBrowserClient = client;
       return client;
     })();
@@ -6502,6 +6920,64 @@ class BrowserDaemon {
     this.cdpBrowserClient?.close();
     this.cdpBrowserClient = null;
     this.cdpBrowserClientPromise = null;
+    this.cdpPageSessions.clear();
+    this.cdpPageSessionPromises.clear();
+    this.cdpSessionTargets.clear();
+  }
+
+  clearCdpPageSession(targetId) {
+    const normalizedTargetId = String(targetId ?? "").trim();
+    if (!normalizedTargetId) {
+      return;
+    }
+    const sessionId = this.cdpPageSessions.get(normalizedTargetId);
+    if (sessionId) {
+      this.cdpSessionTargets.delete(sessionId);
+    }
+    this.cdpPageSessions.delete(normalizedTargetId);
+    this.cdpPageSessionPromises.delete(normalizedTargetId);
+  }
+
+  handleCdpEvent(message) {
+    if (message?.method === "Target.detachedFromTarget") {
+      const sessionId = String(message.params?.sessionId ?? "");
+      const targetId = this.cdpSessionTargets.get(sessionId);
+      if (targetId) {
+        this.clearCdpPageSession(targetId);
+      }
+      return;
+    }
+    if (message?.method === "Target.targetDestroyed") {
+      this.clearCdpPageSession(message.params?.targetId);
+      return;
+    }
+    const targetId = this.cdpSessionTargets.get(String(message?.sessionId ?? ""));
+    if (!targetId) {
+      return;
+    }
+    if (message.method === "Runtime.consoleAPICalled") {
+      this.pushCdpConsoleMessage(targetId, cdpConsoleMessageFromRuntimeEvent(message.params ?? {}, this.nextCdpConsoleMessageId));
+      this.nextCdpConsoleMessageId += 1;
+    } else if (message.method === "Runtime.exceptionThrown") {
+      this.pushCdpConsoleMessage(targetId, cdpConsoleMessageFromExceptionEvent(message.params ?? {}, this.nextCdpConsoleMessageId));
+      this.nextCdpConsoleMessageId += 1;
+    } else if (message.method === "Log.entryAdded") {
+      this.pushCdpConsoleMessage(targetId, cdpConsoleMessageFromLogEvent(message.params?.entry ?? {}, this.nextCdpConsoleMessageId));
+      this.nextCdpConsoleMessageId += 1;
+    }
+  }
+
+  pushCdpConsoleMessage(targetId, message) {
+    if (!message) {
+      return;
+    }
+    const normalizedTargetId = String(targetId ?? "").trim();
+    const buffer = this.cdpConsoleBuffers.get(normalizedTargetId) ?? [];
+    buffer.push({ ...message, targetId: normalizedTargetId });
+    if (buffer.length > CDP_CONSOLE_BUFFER_LIMIT) {
+      buffer.splice(0, buffer.length - CDP_CONSOLE_BUFFER_LIMIT);
+    }
+    this.cdpConsoleBuffers.set(normalizedTargetId, buffer);
   }
 
   async cdpBrowserRequest(method, params = {}, options = {}, retry = true) {
@@ -6587,6 +7063,7 @@ class BrowserDaemon {
       if (!currentTargetIds.has(targetId)) {
         this.cdpTargetHandles.delete(targetId);
         this.cdpRoleRefsByTarget.delete(targetId);
+        this.clearCdpPageSession(targetId);
       }
     }
     if (this.selectedCdpTargetId && !pages.some((page) => page.targetId === this.selectedCdpTargetId)) {
@@ -6659,43 +7136,70 @@ class BrowserDaemon {
     return pages.find((page) => page.targetId === targetId) ?? null;
   }
 
-  async cdpPageRequest(targetId, method, params = {}, options = {}) {
+  async ensureCdpPageSession(targetId) {
+    const normalizedTargetId = String(targetId ?? "").trim();
+    if (!normalizedTargetId) {
+      throw new Error("CDP page session requires a target id");
+    }
     const client = await this.ensureCdpBrowserClient();
-    let sessionId = null;
-    try {
+    const existing = this.cdpPageSessions.get(normalizedTargetId);
+    if (existing && !client.closed) {
+      return existing;
+    }
+    const pending = this.cdpPageSessionPromises.get(normalizedTargetId);
+    if (pending) {
+      return await pending;
+    }
+    const promise = (async () => {
       const attached = await client.request("Target.attachToTarget", {
-        targetId,
+        targetId: normalizedTargetId,
         flatten: true,
       });
-      sessionId = String(attached?.sessionId ?? "");
+      const sessionId = String(attached?.sessionId ?? "");
       if (!sessionId) {
-        throw new Error(`CDP attach did not return a session id for target ${targetId}`);
+        throw new Error(`CDP attach did not return a session id for target ${normalizedTargetId}`);
       }
-      return await client.request(method, params, { ...options, sessionId });
+      this.cdpPageSessions.set(normalizedTargetId, sessionId);
+      this.cdpSessionTargets.set(sessionId, normalizedTargetId);
+      const send = async (method, params = {}) => await client.request(method, params, { sessionId });
+      await prepareCdpPageSession(send);
+      return sessionId;
+    })();
+    this.cdpPageSessionPromises.set(normalizedTargetId, promise);
+    try {
+      return await promise;
+    } catch (error) {
+      this.clearCdpPageSession(normalizedTargetId);
+      throw error;
     } finally {
-      if (sessionId) {
-        await safeCdpRequest(client, "Target.detachFromTarget", { sessionId });
+      this.cdpPageSessionPromises.delete(normalizedTargetId);
+    }
+  }
+
+  async cdpPageRequest(targetId, method, params = {}, options = {}, retry = true) {
+    const client = await this.ensureCdpBrowserClient();
+    const sessionId = await this.ensureCdpPageSession(targetId);
+    try {
+      return await client.request(method, params, { ...options, sessionId });
+    } catch (error) {
+      if (retry && isInvalidCdpSessionError(error)) {
+        this.clearCdpPageSession(targetId);
+        return await this.cdpPageRequest(targetId, method, params, options, false);
       }
+      throw error;
     }
   }
 
   async withCdpPageSession(targetId, callback) {
     const client = await this.ensureCdpBrowserClient();
-    let sessionId = "";
+    const sessionId = await this.ensureCdpPageSession(targetId);
     try {
-      const attached = await client.request("Target.attachToTarget", {
-        targetId,
-        flatten: true,
-      });
-      sessionId = String(attached?.sessionId ?? "");
-      if (!sessionId) {
-        throw new Error(`CDP attach did not return a session id for target ${targetId}`);
-      }
       return await callback(client, sessionId);
-    } finally {
-      if (sessionId) {
-        await safeCdpRequest(client, "Target.detachFromTarget", { sessionId });
+    } catch (error) {
+      if (isInvalidCdpSessionError(error)) {
+        this.clearCdpPageSession(targetId);
       }
+      throw error;
     }
   }
 
@@ -7169,6 +7673,10 @@ class BrowserDaemon {
   }
 
   async handle(command, args, flags = {}) {
+    flags = preferSingleMcpControllerFlags(command, args, flags, {
+      mode: this.currentMode(),
+      hasBrowserEndpoint: Boolean(this.cdpEndpoint()),
+    });
     const previousCommandFlags = this.activeCommandFlags;
     this.activeCommandFlags = flags;
     try {
@@ -7586,6 +8094,7 @@ class BrowserDaemon {
       pid: process.pid,
       stateFile: this.stateFile,
       mode: this.currentMode(),
+      browserUrl: this.browserUrl || "",
     };
   }
 
@@ -7964,13 +8473,16 @@ class BrowserDaemon {
       flags,
     );
     const pageInfo = extractJsonFromToolText(pageInfoResult.text) ?? {};
+    const readNetwork = flags.network !== false && (!this.shouldUseFastCdp(flags) || flags.mcp === true || flags.network === true);
     const [consoleResult, networkResult] = await Promise.all([
       this.handleConsole([], { ...flags, errors: true, limit: "5" }).catch((error) => ({
         text: `console unavailable: ${error instanceof Error ? error.message : String(error)}`,
       })),
-      this.handleNetwork([], { ...flags, failed: true, limit: "5" }).catch((error) => ({
-        text: `network unavailable: ${error instanceof Error ? error.message : String(error)}`,
-      })),
+      readNetwork
+        ? this.handleNetwork([], { ...flags, failed: true, limit: "5" }).catch((error) => ({
+          text: `network unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        }))
+        : Promise.resolve({ text: "network skipped on CDP fast path" }),
     ]);
     let screenshot;
     if (flags.screenshot) {
@@ -8146,6 +8658,9 @@ class BrowserDaemon {
   }
 
   async handleConsole(args, flags = {}) {
+    if (this.shouldUseFastCdp(flags)) {
+      return await this.handleCdpConsole(args, flags);
+    }
     if (args[0] === "get") {
       requireArgs("console get", args, 2);
       const result = await this.callTool("get_console_message", {
@@ -8165,6 +8680,56 @@ class BrowserDaemon {
       emptyText: flags.errors ? "(no console errors)" : "(no console messages)",
       lineLimit: DEFAULT_LINE_LIMIT,
     });
+  }
+
+  async handleCdpConsole(args, flags = {}) {
+    const targetId = await this.resolveCdpTargetId(flags);
+    await this.ensureCdpPageSession(targetId);
+    const messages = this.cdpConsoleBuffers.get(targetId) ?? [];
+    if (args[0] === "get") {
+      requireArgs("console get", args, 2);
+      const id = Number.parseInt(String(args[1]), 10);
+      const message = messages.find((entry) => entry.id === id);
+      if (!message) {
+        throw new Error(`No CDP console message ${args[1]} is buffered for target ${targetId}`);
+      }
+      return {
+        text: formatValue(message),
+        structuredContent: {
+          consoleMessage: message,
+          targetId,
+          cdp: true,
+        },
+      };
+    }
+    const selectedMessages = flags.errors
+      ? messages.filter((message) => isProblemConsoleMessage(message))
+      : messages;
+    const result = {
+      text: selectedMessages.map(formatConsoleMessageLine).join("\n"),
+      structuredContent: {
+        consoleMessages: selectedMessages,
+        targetId,
+        cdp: true,
+        buffered: messages.length,
+      },
+    };
+    const compacted = compactLineResult(result, {
+      flags,
+      hiddenSet: this.hiddenConsoleLines,
+      emptyText: flags.errors ? "(no CDP console errors captured by this daemon)" : "(no CDP console messages captured by this daemon)",
+      lineLimit: DEFAULT_LINE_LIMIT,
+    });
+    return {
+      ...compacted,
+      structuredContent: {
+        ...(compacted.structuredContent ?? {}),
+        consoleMessages: selectedMessages,
+        targetId,
+        cdp: true,
+        buffered: messages.length,
+      },
+    };
   }
 
   async handleOpen(args, flags = {}, command = "open") {
@@ -12950,6 +13515,35 @@ async function runSelfTest() {
     dedupedBrowserTabs.length === 1 && dedupedBrowserTabs[0].source === "session",
     "browser tab discovery prefers existing endpoint sessions over duplicate CDP rows",
   );
+  const mockTabSearchProfiles = [
+    {
+      id: "chrome:Default",
+      displayName: "Default",
+      lastUsed: true,
+      lastActive: true,
+      activeRank: 0,
+      devtoolsHttpUrl: "http://127.0.0.1:9222",
+      devtoolsWsEndpoint: "ws://127.0.0.1:9222/devtools/browser/main",
+    },
+    {
+      id: "chrome:Profile 4",
+      displayName: "Work",
+      lastUsed: false,
+      lastActive: true,
+      activeRank: 1,
+      devtoolsHttpUrl: "http://127.0.0.1:9333",
+      devtoolsWsEndpoint: "ws://127.0.0.1:9333/devtools/browser/work",
+    },
+  ];
+  assertSelfTest(
+    profilesForBrowserTabSearch(mockTabSearchProfiles, {}).length === 1 &&
+      profilesForBrowserTabSearch(mockTabSearchProfiles, {})[0].id === "chrome:Default",
+    "broad tab discovery limits fresh controller attach to one active endpoint",
+  );
+  assertSelfTest(
+    profilesForBrowserTabSearch(mockTabSearchProfiles, { browserUrl: "http://127.0.0.1:9222" }).length === 0,
+    "explicit tab endpoints do not also scan every profile endpoint",
+  );
   const exactUrlPageCandidates = pageCandidatesForBrowserTab(
     [
       { id: 1, url: "https://social.example.com/" },
@@ -13061,6 +13655,12 @@ async function runSelfTest() {
       buildMcpArgs({ browserUrl: "ws://127.0.0.1:9222" }).includes("--browserUrl=http://127.0.0.1:9222"),
     "bare WS roots are treated as HTTP discovery URLs instead of direct CDP websocket endpoints",
   );
+  const browserWsMcpArgs = buildMcpArgs({ browserUrl: "ws://127.0.0.1:9222/devtools/browser/mock" });
+  assertSelfTest(
+    browserWsMcpArgs.includes("--wsEndpoint=ws://127.0.0.1:9222/devtools/browser/mock") &&
+      !browserWsMcpArgs.includes("--browserUrl=http://127.0.0.1:9222"),
+    "browser-level WS endpoints are handed to MCP as direct WebSocket endpoints",
+  );
   assertSelfTest(
     browserEndpointEquivalent(
       "ws://127.0.0.1:9222/devtools/browser/mock",
@@ -13098,6 +13698,22 @@ async function runSelfTest() {
   assertSelfTest(parsedAllowAttach.flags.allowAttach === true, "parser handles cleanup allow attach flag");
   const parsedAllowProfileReattach = parseArgv(["tabs", "--restart-daemon", "--allow-profile-reattach"]);
   assertSelfTest(parsedAllowProfileReattach.flags.allowProfileReattach === true, "parser handles profile reattach consent flag");
+  assertSelfTest(
+    allowsProfileControllerStart({}) === false,
+    "real-profile MCP controller start is not allowed without an approved signal",
+  );
+  assertSelfTest(
+    allowsProfileControllerStart({}, { browserUrl: "http://127.0.0.1:9222" }) === true,
+    "real-profile MCP controller start is allowed for an explicit DevTools endpoint",
+  );
+  assertSelfTest(
+    allowsProfileControllerStart({}, { chromeRemoteDebugging: { known: true, userEnabled: true } }) === true,
+    "real-profile MCP controller start is allowed when Chrome remote debugging is already enabled",
+  );
+  assertSelfTest(
+    allowsProfileControllerStart({ reusedRealProfileSession: "cdp-127-0-0-1-9222" }) === true,
+    "real-profile MCP controller start is allowed for a reused approved endpoint session",
+  );
   const parsedFullStdout = parseArgv(["html", "--full-stdout", "--max-chars", "100000"]);
   assertSelfTest(parsedFullStdout.flags.fullStdout === true, "parser handles full stdout flag");
   const parsedNoAutoOut = parseArgv(["html", "--no-auto-out"]);
@@ -13160,6 +13776,102 @@ async function runSelfTest() {
     isMissingDaemonCapabilityError(new Error("does not support device-screenshots needed by device-screenshots"), "device-screenshots") === true,
     "missing capability detection recognizes device screenshots",
   );
+  const staleRoutineState = {
+    pid: process.pid,
+    session: "default",
+    stateFile: stateFileForSessionName("default"),
+    scriptHash: "old-script",
+    modeKey: JSON.stringify({ mode: AUTO_MODE, browserUrl: "" }),
+  };
+  assertSelfTest(isCurrentCliDaemon(staleRoutineState) === false, "daemon freshness detects stale script hashes");
+  assertSelfTest(isRoutineRealProfileCommand("console") === true, "routine real-profile command detection covers console reads");
+  assertSelfTest(isRoutineRealProfileCommand("observe") === true, "routine real-profile command detection covers observe reads");
+  assertSelfTest(isRoutineRealProfileCommand("device-screenshots") === true, "routine real-profile command detection covers device screenshots");
+  assertSelfTest(isRoutineRealProfileCommand("cleanup-remote-debugging") === false, "routine real-profile command detection excludes cleanup");
+  assertSelfTest(
+    canRouteStaleRealProfileRoutineCommand(
+      staleRoutineState,
+      { command: "console", args: [], flags: {} },
+      {},
+      { chromeRemoteDebugging: { known: true, userEnabled: true } },
+    ) === true,
+    "stale real-profile routine commands can route through a temporary current daemon when Chrome remote debugging is enabled",
+  );
+  assertSelfTest(
+    canRouteStaleRealProfileRoutineCommand(
+      staleRoutineState,
+      { command: "console", args: [], flags: {} },
+      {},
+      { chromeRemoteDebugging: { known: true, userEnabled: false } },
+    ) === false,
+    "stale real-profile routine routing still requires an approved attach signal",
+  );
+  assertSelfTest(
+    canRouteStaleRealProfileRoutineCommand(
+      {
+        ...staleRoutineState,
+        scriptHash: SCRIPT_HASH,
+        __health: { scriptHash: SCRIPT_HASH },
+      },
+      { command: "console", args: [], flags: {} },
+      {},
+      { chromeRemoteDebugging: { known: true, userEnabled: true } },
+    ) === false,
+    "current daemons keep the normal command path",
+  );
+  assertSelfTest(
+    canRouteStaleRealProfileRoutineCommand(
+      staleRoutineState,
+      { command: "cleanup-remote-debugging", args: [], flags: {} },
+      {},
+      { chromeRemoteDebugging: { known: true, userEnabled: true } },
+    ) === false,
+    "stale daemon routing does not cover cleanup commands",
+  );
+  assertSelfTest(
+    isMissingRequiredCapabilityError(
+      new Error("does not support device-screenshots needed by device-screenshots"),
+      { command: "device-screenshots", args: [] },
+    ) === true,
+    "routine endpoint routing can fall back on missing required capabilities",
+  );
+  assertSelfTest(
+    preferSingleMcpControllerFlags("tabs", [], {}, { mode: "browserUrl", hasBrowserEndpoint: true }).mcp !== true,
+    "real-profile endpoint tabs keep the persistent CDP controller",
+  );
+  assertSelfTest(
+    preferSingleMcpControllerFlags("console", [], {}, { mode: "browserUrl", hasBrowserEndpoint: true }).mcp !== true,
+    "real-profile endpoint console reads keep the persistent CDP controller",
+  );
+  assertSelfTest(
+    preferSingleMcpControllerFlags("snapshot-dom", [], {}, { mode: "browserUrl", hasBrowserEndpoint: true }).mcp !== true,
+    "CDP-only DOM snapshots do not force the MCP controller",
+  );
+  assertSelfTest(
+    preferSingleMcpControllerFlags("click", ["e1"], {}, { mode: "browserUrl", hasBrowserEndpoint: true }).mcp !== true,
+    "CDP role-ref actions keep the direct CDP path",
+  );
+  assertSelfTest(
+    shouldDiscoverTabsThroughEndpointSession({ httpUrl: "http://127.0.0.1:9222" }, {}) === true,
+    "tab discovery prefers the stable endpoint session before direct CDP probes",
+  );
+  const freshEndpointFlags = {
+    browserUrl: "http://127.0.0.1:9222",
+    noFallback: true,
+    noActiveSession: true,
+    session: "cdp-127-0-0-1-9222",
+  };
+  assertSelfTest(
+    stateFileFromFlags(freshEndpointFlags) === stateFileForSessionName("cdp-127-0-0-1-9222"),
+    "fresh endpoint routine fallback uses the stable endpoint session file",
+  );
+  assertSelfTest(
+    stateFileFromFlags({
+      ...freshEndpointFlags,
+      stateFile: path.join(os.tmpdir(), "realbrowser-routine-self-test.json"),
+    }) !== stateFileForSessionName("cdp-127-0-0-1-9222"),
+    "temporary routine state files stay distinguishable from endpoint sessions",
+  );
   assertSelfTest(
     requiredCapabilitiesForPayload({ command: "js", args: ["document.body.innerText"], flags: { raw: true } }).has("bounded-raw-output"),
     "daemon capability check covers bounded raw eval output",
@@ -13183,12 +13895,6 @@ async function runSelfTest() {
   await assertSelfTestRejects(
     () => restartGuardDaemon.restart({}),
     "real-profile MCP restart requires explicit reattach consent",
-  );
-  const mcpAttachGuardDaemon = new BrowserDaemon(path.join(os.tmpdir(), "realbrowser-self-test-mcp.json"));
-  mcpAttachGuardDaemon.browserUrl = "http://127.0.0.1:9222";
-  await assertSelfTestRejects(
-    () => mcpAttachGuardDaemon.listTools(),
-    "real-profile MCP lazy attach requires explicit reattach consent",
   );
   const backgroundPayload = daemonPayloadForCommand(parsedBackgroundOpen.command, parsedBackgroundOpen.args, parsedBackgroundOpen.flags);
   assertSelfTest(backgroundPayload.command === "open", "open is handled by the daemon hot path");

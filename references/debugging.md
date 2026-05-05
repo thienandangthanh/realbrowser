@@ -141,28 +141,37 @@ the console lines back verbatim in a code block.
 
 For exact-tab work, verify the selected target with `tabs` plus a targeted `js`
 read before trusting copied output. Prefer the selected-tab `console` command
-after verification. Do not manually carry a Page number from `tabs` into MCP
-console reads as if it were a Chrome DevTools MCP page id; direct-CDP tab
-numbers and MCP page ids can differ. Current realbrowser maps the selected CDP
-target to the matching MCP page by URL before console reads.
+after verification. On real signed-in Chrome endpoint sessions, routine reads
+prefer the same persistent CDP daemon and page session so `tabs`, `select-tab`,
+`js`, `observe`, `console`, and screenshots do not each start a separate
+remote-debugging controller.
 
-If the page is in a real signed-in Chrome profile, `console` may refuse with a
-message about starting a Chrome DevTools MCP controller and the
-"Allow remote debugging?" prompt. Do not treat that as "console unavailable"
-when the user has already allowed remote debugging or says to proceed. In that
-case, rerun the same selected-tab console command with explicit consent:
+If the page is in a real signed-in Chrome profile, selected-tab `console` is
+CDP-backed and buffers messages while the endpoint daemon is attached. When
+Chrome remote debugging is already enabled or a persistent realbrowser endpoint
+session exists, run the same selected-tab command without adding
+`--allow-profile-reattach`; avoid asking the user twice for the same approved
+attach. Chrome can still show its own "Allow remote debugging?" prompt, and the
+user must allow that browser prompt if it appears. Treat one browser approval as
+permission for the persistent realbrowser CDP session, then reuse the same
+session for follow-up reads. Use the reattach flag only when intentionally
+replacing or restarting the controller, or when the CLI explicitly refuses a
+fresh MCP attach:
 
 ```bash
-"$REALBROWSER_CLI" console --preserve --limit 80 --allow-profile-reattach
+"$REALBROWSER_CLI" console --preserve --limit 80
 ```
 
 If the copied output is empty or appears to come from another site when the user
 expects logs, do not stop there. Run `status` and check for
 `Daemon script: <old> (current <new>; reload needed for new skill code)`. A
-stale daemon can miss current target-mapping behavior; after the user has
-accepted the real-profile prompt, rerun with `--reload-daemon
---allow-profile-reattach` or restart the daemon with `restart
---allow-profile-reattach`.
+stale daemon can miss current target-mapping behavior. Rerun the normal routine
+read first; current realbrowser can route console/screenshot commands through
+an endpoint-scoped current CDP daemon when Chrome remote debugging is already
+enabled or an explicit endpoint is in use, activates that session for follow-ups,
+and avoids disposable temporary controllers for the normal profile workflow. Use
+`--allow-profile-reattach` only for an intentional real-profile reload/restart
+or an explicit MCP-only command that refuses to attach.
 
 For startup/render bugs where a fresh load is needed:
 
@@ -180,8 +189,10 @@ only when reproduction on reload is wanted:
 "$REALBROWSER_CLI" capture-console --reload --duration 5000 --out /tmp/realbrowser-console.json
 ```
 
-If the authenticated reload capture hits the real-profile MCP approval guard and
-the user has accepted the prompt, add `--allow-profile-reattach`:
+If the authenticated reload capture hits the real-profile MCP approval guard,
+first check `status`. When Chrome remote debugging is enabled or a persistent
+endpoint session is active, rerun the normal command. Add
+`--allow-profile-reattach` only when accepting a new controller attach:
 
 ```bash
 "$REALBROWSER_CLI" capture-console --reload --duration 5000 --out /tmp/realbrowser-console.json --allow-profile-reattach

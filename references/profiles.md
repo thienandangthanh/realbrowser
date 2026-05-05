@@ -17,9 +17,15 @@ When existing cookies/login state matters, fallback is not acceptable. Use
 is available.
 
 Chrome may show "Allow remote debugging?" when a new controller attaches to a
-real signed-in profile. Reuse the existing approved session instead of restarting
-daemons. Do not use `--restart-daemon --allow-profile-reattach` unless the
-prompt tradeoff is intentional.
+real signed-in profile. Reuse the existing approved session instead of
+restarting daemons. When Chrome remote debugging is already enabled or the
+endpoint session is already running, routine commands should not need
+`--allow-profile-reattach`. Current realbrowser also keeps routine endpoint
+commands on one persistent CDP browser socket plus persistent page sessions, so
+approving the first fresh attach is enough for follow-up `tabs`, `select-tab`,
+`js`, `observe`, `console`, and screenshot commands. Do not use
+`--restart-daemon --allow-profile-reattach` unless the prompt tradeoff is
+intentional.
 
 ## Listing And Selecting Profiles
 
