@@ -55,9 +55,12 @@ lists:
    `[role="feed"]` over broad `body` fallback. Use
    `extract-items --selector <stable-container> --limit <n>` only after the
    target container is known.
-6. Use `snapshot --selector <stable-container> --compact --max-chars 2000-3000`
-   when you need accessible context or refs; otherwise use
-   `snapshot --compact --max-chars 2000-3000`.
+6. For feeds, lists, tables, chats, and other repeated content, map the
+   stable root's direct children with targeted `js` before broad snapshots. A
+   correct root such as `main` or `[role="main"]` can still produce a huge AX
+   tree. Use `snapshot --selector <small-stable-container> --compact
+   --max-chars 2000` only when you need accessible context or refs for a small
+   verified area; otherwise keep snapshots out of the content-parsing path.
 7. If item boundaries or nesting are ambiguous, write structured records to
    files and inspect them with OS-available local tools. `rg`/`jq` are optional;
    PowerShell `Select-String`/`ConvertFrom-Json` or Node work on Windows.
@@ -81,7 +84,8 @@ mkdir -p "$ARTIFACT_DIR"
 "$REALBROWSER_CLI" --handle content-read extract-items --limit 5 --max-text-chars 700
 "$REALBROWSER_CLI" --handle content-read extract-items --selector main --limit 5 --max-text-chars 700
 "$REALBROWSER_CLI" --handle content-read extract-items --selector main --item-selector article --limit 5 --out "$ARTIFACT_DIR/items.json"
-"$REALBROWSER_CLI" --handle content-read snapshot --compact --max-chars 2500
+"$REALBROWSER_CLI" --handle content-read js '(() => { const root = document.querySelector("main,[role=main],[role=feed],[role=list],[role=grid],table") || document.body; return [...root.children].slice(0,12).map((el,i)=>({i, tag:el.tagName, role:el.getAttribute("role"), text:(el.innerText||"").replace(/\s+/g," ").slice(0,240)})); })()'
+"$REALBROWSER_CLI" --handle content-read snapshot --selector '<small-stable-container>' --compact --max-chars 2000
 "$REALBROWSER_CLI" --handle content-read snapshot-dom --selector main --out "$ARTIFACT_DIR/dom.json" --limit 1800 --max-text-chars 180
 "$REALBROWSER_CLI" --handle content-read snapshot-aria --out "$ARTIFACT_DIR/aria.json" --limit 1800
 "$REALBROWSER_CLI" --handle content-read query-selector 'main,[role="main"],[role="feed"],[role="list"],[role="grid"],table,[role="article"],article' \
@@ -134,6 +138,7 @@ ARTIFACT_DIR="${TMPDIR:-/tmp}/realbrowser-content"
 mkdir -p "$ARTIFACT_DIR"
 "$REALBROWSER_CLI" query-selector 'main h1, main h2, main h3, [role="heading"]' --out "$ARTIFACT_DIR/headings.json" --limit 80 --max-text-chars 200 --max-html-chars 500
 "$REALBROWSER_CLI" extract-items --selector main --limit 8 --max-text-chars 700 --out "$ARTIFACT_DIR/items.json"
+"$REALBROWSER_CLI" js '(() => { const root = document.querySelector("main,[role=main],[role=feed],[role=list],[role=grid],table") || document.body; return [...root.children].slice(0,12).map((el,i)=>({i, tag:el.tagName, role:el.getAttribute("role"), text:(el.innerText||"").replace(/\s+/g," ").slice(0,240)})); })()'
 "$REALBROWSER_CLI" snapshot-dom --selector main --out "$ARTIFACT_DIR/dom.json" --limit 2200 --max-text-chars 180
 "$REALBROWSER_CLI" snapshot-aria --out "$ARTIFACT_DIR/aria.json" --limit 2200
 ```

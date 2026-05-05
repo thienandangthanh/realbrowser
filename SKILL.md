@@ -175,15 +175,19 @@ as `[role="article"]`, `article`, rows, cards, or message bubbles as hypotheses:
 they can match comments, replies, sidebars, composers, pinned/sponsored blocks,
 chat overlays, or hidden templates. When item order matters, report it as the
 current visible/current loaded order unless you deliberately scroll, dedupe, and
-confirm the sort/filter.
+confirm the sort/filter. Do not use `snapshot --selector <large-root>` as the
+default content parser for feeds/lists: even a correct root such as `main` or
+`[role="main"]` can expand into a large role tree. Prefer direct-child `js` or
+`extract-items` first, then use snapshots only for small verified containers,
+accessible refs, or boundary checks with a hard `--max-chars` cap.
 
 ```bash
 "$REALBROWSER_CLI" extract-items --limit 5 --max-text-chars 700
 "$REALBROWSER_CLI" extract-items --selector main --limit 5 --max-text-chars 700
 "$REALBROWSER_CLI" extract-items --selector main --item-selector article --limit 5 --out "$ARTIFACT_DIR/page-items.json"
 "$REALBROWSER_CLI" js '(() => { const root = document.querySelector("main,[role=main],[role=feed],[role=list],[role=grid],table") || document.body; return [...root.children].slice(0,12).map((el,i)=>({i, tag:el.tagName, role:el.getAttribute("role"), text:(el.innerText||"").replace(/\s+/g," ").slice(0,240)})); })()'
-"$REALBROWSER_CLI" snapshot --selector main --compact --max-chars 2500
-"$REALBROWSER_CLI" snapshot --compact --max-chars 2500
+"$REALBROWSER_CLI" snapshot --selector '<small-stable-container>' --compact --max-chars 2000
+"$REALBROWSER_CLI" snapshot --compact --max-chars 2000
 "$REALBROWSER_CLI" snapshot-dom --selector main --out "$ARTIFACT_DIR/page-dom.json" --limit 1800 --max-text-chars 180
 "$REALBROWSER_CLI" snapshot-aria --out "$ARTIFACT_DIR/page-aria.json" --limit 1800
 "$REALBROWSER_CLI" query-selector 'main,[role="main"],[role="feed"],[role="list"],[role="grid"],table,[role="article"],article' --out "$ARTIFACT_DIR/page-elements.json" --limit 60 --max-text-chars 300 --max-html-chars 800
