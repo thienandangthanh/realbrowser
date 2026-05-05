@@ -43,12 +43,16 @@ Start by classifying the browser scope: current/existing tab, signed-in profile,
 anonymous public page, console/network debug, screenshot, form interaction, or
 repeated-content extraction. Attach with the least disruption that satisfies
 that scope, verify the target with a small URL/title/visible-text read, and keep
-the first content read bounded. If the user names a profile, current tab, or
-logged-in state, that is permission to inspect and navigate within the requested
-target; it is not permission to inspect unrelated sensitive tabs or perform
-sensitive actions. Ask before submits, sends, purchases, deletes,
-security/account changes, permission grants, or broad access outside the named
-target.
+the first content read bounded. Treat target-changing browser commands as
+sequential: do not parallelize `select-tab`, `open`, `goto`, clicks, or typing
+with page reads such as `js`, `observe`, snapshots, console capture, or
+screenshots. Verify the selected URL/title after the target changes, then read;
+otherwise a read can hit a transient browser surface, stale tab, or wrong
+profile page. If the user names a profile, current tab, or logged-in state, that
+is permission to inspect and navigate within the requested target; it is not
+permission to inspect unrelated sensitive tabs or perform sensitive actions. Ask
+before submits, sends, purchases, deletes, security/account changes, permission
+grants, or broad access outside the named target.
 
 ## Browser Inspection Loop
 
@@ -69,6 +73,17 @@ Use this loop for general browsing work before picking a recipe:
 7. Act/read on current refs only, then report the result with context such as
    signed-in profile state, current visible order, current filters, or anonymous
    public state. Restore inspection-only state when practical.
+
+For generic "check/read this page" tasks, the fast path is:
+
+1. Resolve scope: public page, existing signed-in tab, or new signed-in
+   navigation.
+2. Find and select by the most specific URL or route available; use title only
+   when URL matching is not enough.
+3. Verify `href`, `title`, and `readyState`.
+4. Run one targeted extraction for the requested answer.
+5. If you click or change filters, verify the selected state before extracting
+   again.
 
 Reader ladder:
 
@@ -100,7 +115,8 @@ REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
 ```
 
 If the wording implies an existing target, verify and reuse it before opening a
-new tab:
+new tab. Run selection and verification as ordered steps; do not combine them
+with parallel tool calls:
 
 ```bash
 "$REALBROWSER_CLI" sessions
