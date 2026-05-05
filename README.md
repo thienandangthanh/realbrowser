@@ -160,8 +160,8 @@ Stopping or detaching realbrowser closes its daemon/MCP connection. If Chrome st
 Realbrowser is designed to keep Codex token use low:
 
 - Use `observe` for the first page read.
-- Use `snapshot --compact --max-chars <n>` for compact OpenClaw-style role
-  snapshot reads.
+- Use `snapshot --selector <css> --compact --max-chars <n>` for scoped,
+  compact OpenClaw-style role snapshot reads.
 - Use `snapshot-aria --out <path>` for OpenClaw-style AX node records.
 - Use `snapshot-dom --out <path>` when element records are needed for local
   inspection without dumping full HTML into the model context.

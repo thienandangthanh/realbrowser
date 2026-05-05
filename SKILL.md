@@ -105,6 +105,7 @@ screenshots or raw HTML when reading large dynamic pages such as feeds, chats,
 search results, dashboards, or virtualized lists:
 
 ```bash
+"$REALBROWSER_CLI" snapshot --selector main --compact --max-chars 2500
 "$REALBROWSER_CLI" snapshot --compact --max-chars 2500
 "$REALBROWSER_CLI" snapshot-dom --out "$ARTIFACT_DIR/page-dom.json" --limit 1800 --max-text-chars 180
 "$REALBROWSER_CLI" snapshot-aria --out "$ARTIFACT_DIR/page-aria.json" --limit 1800

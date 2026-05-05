@@ -55,10 +55,11 @@ Read this when you need command syntax beyond the common recipes in `SKILL.md`.
 - `observe [--screenshot] [--limit <n>] [--max-chars <n>]`: compact overview
   with title, URL, headings, controls, fields, console errors, and recent failed
   network lines.
-- `snapshot` / `accessibility [--efficient] [--interactive] [--compact]
-  [--depth <n>] [--max-chars <n>] [--max-nodes <n>] [--labels|--annotate]
-  [--out <path>] [--raw|--verbose]`: role-style snapshot with actionable `uid`
-  refs. `--efficient` is the normal agent preset.
+- `snapshot` / `accessibility [--selector <css>] [--efficient]
+  [--interactive] [--compact] [--depth <n>] [--max-chars <n>]
+  [--max-nodes <n>] [--labels|--annotate] [--out <path>]
+  [--raw|--verbose]`: role-style snapshot with actionable `uid` refs.
+  `--efficient` is the normal agent preset.
 - `text`, `html`, `forms`, `cookies`, `storage`, `perf`, `url`: JS-backed read
   helpers. Use `--out <path>` for large output. Cookie/storage values are
   redacted unless `--values` is passed.

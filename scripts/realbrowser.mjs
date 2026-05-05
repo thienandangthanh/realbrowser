@@ -47,6 +47,7 @@ const DAEMON_CAPABILITIES = Object.freeze([
   "query-selector",
   "snapshot-aria",
   "snapshot-dom",
+  "snapshot-selector",
   "visible-wait",
 ]);
 const AUTO_MODE = "auto";
@@ -296,7 +297,7 @@ const CLI_COMMAND_GROUPS = [
       { name: "full-screenshot", aliases: ["full-size-screenshot", "fullpage-screenshot"], usage: "realbrowser full-screenshot [path] [--viewport <WxH>] [--selector <css>] [--mobile|--mobile-emulation] [--settle-ms <ms>] [--page <id>]", summary: "Capture a full page, or stitch a dominant internal scroll container when the document itself does not scroll.", handle: true },
       { name: "area-screenshot", aliases: ["element-screenshot", "part-screenshot"], usage: "realbrowser area-screenshot [path] (--uid <uid>|--selector <css>) [--page <id>] [--raw-size]", summary: "Capture a specific element or selector area.", handle: true },
       { name: "observe", usage: "realbrowser observe [--screenshot] [--limit <n>] [--max-chars <n>] [--page <id>] [--json]", summary: "Read a compact page observation.", handle: true },
-      { name: "snapshot", aliases: ["accessibility"], usage: "realbrowser snapshot [--page <id>] [--efficient] [--interactive] [--compact] [--depth <n>] [--max-chars <n>] [--max-nodes <n>] [--labels|--annotate] [--out <path>] [--raw|--verbose] [--json]", summary: "Read the accessibility tree.", handle: true },
+      { name: "snapshot", aliases: ["accessibility"], usage: "realbrowser snapshot [--page <id>] [--selector <css>] [--efficient] [--interactive] [--compact] [--depth <n>] [--max-chars <n>] [--max-nodes <n>] [--labels|--annotate] [--out <path>] [--raw|--verbose] [--json]", summary: "Read the accessibility tree.", handle: true },
     ],
   },
   {
@@ -2729,6 +2730,11 @@ function requiredCapabilitiesForCommand(command, args = []) {
       return new Set(["snapshot-dom"]);
     case "snapshot-aria":
       return new Set(["snapshot-aria"]);
+    case "snapshot":
+    case "accessibility":
+      return args.includes("--selector") || args.some((arg) => String(arg).startsWith("--selector="))
+        ? new Set(["snapshot-selector"])
+        : new Set();
     case "query-selector":
       return new Set(["query-selector"]);
     case "links":
@@ -2759,6 +2765,9 @@ function requiredCapabilitiesForPayload(payload) {
   }
   if (flags.foregroundUntilReady) {
     required.add("foreground-readiness");
+  }
+  if ((command === "snapshot" || command === "accessibility") && flags.selector) {
+    required.add("snapshot-selector");
   }
   if (
     (
@@ -5412,15 +5421,98 @@ function renderCdpRoleTree(tree, index, output, options = {}, indentOffset = 0) 
   }
 }
 
-async function findCdpCursorInteractiveElements(send) {
+function cdpRoleSubtreeSize(tree, index) {
+  const node = tree[index];
+  if (!node) {
+    return 0;
+  }
+  let total = 1;
+  for (const child of node.children ?? []) {
+    total += cdpRoleSubtreeSize(tree, child);
+  }
+  return total;
+}
+
+async function resolveCdpSelectorBackendNodeScope(send, selector) {
+  const normalized = normalizeOptionalString(selector);
+  if (!normalized) {
+    return undefined;
+  }
+  const doc = await send("DOM.getDocument", { depth: 0 }).catch(() => null);
+  const rootNodeId = doc?.root?.nodeId;
+  if (typeof rootNodeId !== "number") {
+    throw new Error("CDP DOM root is unavailable; cannot scope snapshot by selector.");
+  }
+  const found = await send("DOM.querySelector", {
+    nodeId: rootNodeId,
+    selector: normalized,
+  }).catch((error) => {
+    throw new Error(`Invalid or unsupported selector "${normalized}": ${error?.message || error}`);
+  });
+  const nodeId = found?.nodeId;
+  if (typeof nodeId !== "number" || nodeId <= 0) {
+    throw new Error(`Selector not found: ${normalized}`);
+  }
+  const described = await send("DOM.describeNode", { nodeId }).catch(() => null);
+  const backendNodeId = described?.node?.backendNodeId;
+  if (typeof backendNodeId !== "number" || backendNodeId <= 0) {
+    throw new Error(`Selector has no backend DOM node: ${normalized}`);
+  }
+  const attr = "data-realbrowser-snapshot-scope";
+  const evaluated = await send("Runtime.evaluate", {
+    expression: `(() => {
+      const attr = ${JSON.stringify(attr)};
+      const selector = ${JSON.stringify(normalized)};
+      document.querySelectorAll("[" + attr + "]").forEach((el) => el.removeAttribute(attr));
+      const root = document.querySelector(selector);
+      if (!root) return 0;
+      const nodes = root instanceof Element ? [root, ...Array.from(root.querySelectorAll("*"))] : [];
+      for (let index = 0; index < nodes.length; index += 1) {
+        nodes[index].setAttribute(attr, String(index));
+      }
+      return nodes.length;
+    })()`,
+    returnByValue: true,
+    awaitPromise: false,
+  }).catch(() => null);
+  const marked = Number(evaluated?.result?.value ?? 0);
+  const backendNodeIds = new Set([backendNodeId]);
+  if (marked > 0) {
+    const queried = await send("DOM.querySelectorAll", {
+      nodeId: rootNodeId,
+      selector: `[${attr}]`,
+    }).catch(() => null);
+    await Promise.all((queried?.nodeIds ?? []).map(async (scopedNodeId) => {
+      const scoped = await send("DOM.describeNode", { nodeId: scopedNodeId }).catch(() => null);
+      const scopedBackendNodeId = scoped?.node?.backendNodeId;
+      if (typeof scopedBackendNodeId === "number" && scopedBackendNodeId > 0) {
+        backendNodeIds.add(Math.floor(scopedBackendNodeId));
+      }
+    }));
+  }
+  await send("Runtime.evaluate", {
+    expression: `document.querySelectorAll("[${attr}]").forEach((el) => el.removeAttribute("${attr}"))`,
+    returnByValue: true,
+  }).catch(() => {});
+  return { rootBackendNodeId: backendNodeId, backendNodeIds };
+}
+
+async function findCdpCursorInteractiveElements(send, options = {}) {
   const attr = "data-realbrowser-cdp-ci";
+  const selectorExpr = options.selector ? JSON.stringify(String(options.selector)) : "null";
   const evaluated = await send("Runtime.evaluate", {
     expression: `(() => {
       const out = [];
+      const rootSelector = ${selectorExpr};
       const roles = new Set(["button","link","textbox","checkbox","radio","combobox","listbox","menuitem","menuitemcheckbox","menuitemradio","option","searchbox","slider","spinbutton","switch","tab","treeitem"]);
       const tags = new Set(["a","button","input","select","textarea","details","summary"]);
       document.querySelectorAll("[${attr}]").forEach((el) => el.removeAttribute("${attr}"));
-      for (const el of Array.from(document.body ? document.body.querySelectorAll("*") : [])) {
+      const root = rootSelector ? document.querySelector(rootSelector) : document.body;
+      if (!root) return out;
+      const candidates = root instanceof HTMLElement
+        ? [root, ...Array.from(root.querySelectorAll("*"))]
+        : Array.from(root.querySelectorAll("*"));
+      for (const el of candidates) {
         if (!(el instanceof HTMLElement) || el.closest("[hidden],[aria-hidden='true']")) continue;
         const tagName = el.tagName.toLowerCase();
         if (tags.has(tagName)) continue;
@@ -5537,12 +5629,36 @@ async function resolveCdpIframeFrameIds(send, tree) {
 }
 
 async function buildCdpRoleSnapshotFromSession(params) {
+  const selector = normalizeOptionalString(params.selector);
+  const selectorScope = selector && !params.frameId
+    ? await resolveCdpSelectorBackendNodeScope(params.send, selector)
+    : undefined;
   const res = await params.send(
     "Accessibility.getFullAXTree",
     params.frameId ? { frameId: params.frameId } : {},
   );
   const { tree, roots } = buildCdpRoleTree(Array.isArray(res?.nodes) ? res.nodes : []);
-  const cursorElements = await findCdpCursorInteractiveElements(params.send);
+  const scopedIndexes = selectorScope
+    ? new Set(tree
+      .map((node, index) => ({ node, index }))
+      .filter((entry) => entry.node.backendDOMNodeId && selectorScope.backendNodeIds.has(entry.node.backendDOMNodeId))
+      .map((entry) => entry.index))
+    : undefined;
+  const renderRoots = scopedIndexes
+    ? [...scopedIndexes]
+      .filter((index) => {
+        let parent = tree[index]?.parent;
+        while (parent !== undefined) {
+          if (scopedIndexes.has(parent)) {
+            return false;
+          }
+          parent = tree[parent]?.parent;
+        }
+        return true;
+      })
+      .sort((left, right) => cdpRoleSubtreeSize(tree, right) - cdpRoleSubtreeSize(tree, left))
+    : roots;
+  const cursorElements = await findCdpCursorInteractiveElements(params.send, { selector });
   for (const node of tree) {
     if (node.backendDOMNodeId && cursorElements.has(node.backendDOMNodeId)) {
       const cursorInfo = cursorElements.get(node.backendDOMNodeId);
@@ -5556,7 +5672,11 @@ async function buildCdpRoleSnapshotFromSession(params) {
   const counts = new Map();
   const refsByKey = new Map();
   const refs = {};
-  for (const node of tree) {
+  for (let nodeIndex = 0; nodeIndex < tree.length; nodeIndex += 1) {
+    const node = tree[nodeIndex];
+    if (scopedIndexes && !scopedIndexes.has(nodeIndex)) {
+      continue;
+    }
     const role = String(node.role).toLowerCase();
     const shouldRef =
       INTERACTIVE_ROLES.has(role) ||
@@ -5616,8 +5736,9 @@ async function buildCdpRoleSnapshotFromSession(params) {
   }
 
   const lines = [];
-  for (const root of roots) {
-    renderCdpRoleTree(tree, root, lines, params.options ?? {});
+  for (const root of (renderRoots.length ? renderRoots : roots)) {
+    const indentOffset = selectorScope ? -(tree[root]?.depth ?? 0) : 0;
+    renderCdpRoleTree(tree, root, lines, params.options ?? {}, indentOffset);
   }
 
   if (params.recurseIframes) {
@@ -5631,6 +5752,7 @@ async function buildCdpRoleSnapshotFromSession(params) {
       const child = await buildCdpRoleSnapshotFromSession({
         ...params,
         frameId: iframe.frameId,
+        selector: undefined,
         recurseIframes: false,
       }).catch(() => null);
       if (!child?.lines?.length) {
@@ -7223,6 +7345,7 @@ class BrowserDaemon {
       return await buildCdpRoleSnapshotFromSession({
         send,
         options,
+        selector: flags.selector,
         urls: Boolean(flags.urls),
         recurseIframes: true,
         nextRef: { value: 1 },
@@ -8339,10 +8462,13 @@ class BrowserDaemon {
           },
         };
       } catch (error) {
-        if (!this.shouldFallbackToMcpAfterCdp(flags)) {
+        if (flags.selector || !this.shouldFallbackToMcpAfterCdp(flags)) {
           throw error;
         }
       }
+    }
+    if (flags.selector) {
+      throw new Error("snapshot --selector requires a CDP-backed fast snapshot; MCP fallback cannot scope accessibility snapshots.");
     }
     const snapshot = await this.callTool("take_snapshot", {
       ...this.pageArgs(flags),
@@ -13228,6 +13354,65 @@ async function runSelfTest() {
     [...STRUCTURAL_ROLES].join("|") === "application|directory|document|generic|grid|group|ignored|list|menu|menubar|none|presentation|row|rowgroup|table|tablist|toolbar|tree|treegrid",
     "structural role set matches OpenClaw",
   );
+  const selectorSnapshotMethods = [];
+  const selectorSnapshotSend = async (method, params = {}) => {
+    selectorSnapshotMethods.push({ method, params });
+    if (method === "DOM.getDocument") {
+      return { root: { nodeId: 1 } };
+    }
+    if (method === "DOM.querySelector") {
+      return params.selector === "main" ? { nodeId: 2 } : { nodeId: 0 };
+    }
+    if (method === "DOM.describeNode") {
+      return { node: { backendNodeId: 42, attributes: [] } };
+    }
+    if (method === "Accessibility.getFullAXTree") {
+      return {
+        nodes: [
+          {
+            nodeId: "1",
+            role: { value: "RootWebArea" },
+            name: { value: "Demo" },
+            childIds: ["2"],
+          },
+          {
+            nodeId: "2",
+            role: { value: "main" },
+            name: { value: "App" },
+            backendDOMNodeId: 42,
+            childIds: ["3"],
+          },
+          {
+            nodeId: "3",
+            role: { value: "button" },
+            name: { value: "Save" },
+            backendDOMNodeId: 43,
+          },
+        ],
+      };
+    }
+    if (method === "Runtime.evaluate") {
+      return { result: { value: [] } };
+    }
+    if (method === "DOM.querySelectorAll") {
+      return { nodeIds: [] };
+    }
+    return {};
+  };
+  const selectorSnapshot = await buildCdpRoleSnapshotFromSession({
+    send: selectorSnapshotSend,
+    selector: "main",
+    options: { compact: true },
+    recurseIframes: false,
+    nextRef: { value: 1 },
+  });
+  assertSelfTest(
+    selectorSnapshotMethods.some((entry) => entry.method === "DOM.querySelector" && entry.params.selector === "main") &&
+      selectorSnapshotMethods.some((entry) => entry.method === "Accessibility.getFullAXTree") &&
+      selectorSnapshot.lines[0]?.startsWith("- main") &&
+      selectorSnapshot.lines.some((line) => line.includes('button "Save"')),
+    "CDP role snapshot supports selector-scoped AX rendering",
+  );
   assertSelfTest(normalizeCdpRoleRef("ref=E12") === "e12", "CDP role refs normalize from snapshot syntax");
   assertSelfTest(!isCdpRoleRef("1_2"), "MCP uid refs stay distinct from CDP role refs");
   new Function(`return ${linksReadFunction({ filter: "docs", limit: "3", visible: true })}`)();
@@ -13290,6 +13475,8 @@ async function runSelfTest() {
   assertSelfTest(parsedHeadedOpen.flags.headless === false && parsedHeadedOpen.flags.headed === true, "parser handles headed flag");
   const parsedRawMode = parseArgv(["snapshot", "--mode=raw"]);
   assertSelfTest(parsedRawMode.flags.mode === "raw" && parsedRawMode.flags.raw === true, "parser handles output mode aliases");
+  const parsedSnapshotSelector = parseArgv(["snapshot", "--selector", "main"]);
+  assertSelfTest(parsedSnapshotSelector.flags.selector === "main", "parser handles snapshot selector flag");
   const parsedDedicatedBackend = parseArgv(["tabs", "--backend", "dev"]);
   assertSelfTest(parsedDedicatedBackend.flags.backend === "dev" && parsedDedicatedBackend.flags.dedicated === true, "parser handles dedicated backend alias");
   const parsedRealBackend = parseArgv(["tabs", "--backend=real"]);
@@ -13766,6 +13953,10 @@ async function runSelfTest() {
   assertSelfTest(
     requiredCapabilitiesForPayload({ command: "snapshot-aria", args: [] }).has("snapshot-aria"),
     "daemon capability check covers AX snapshots",
+  );
+  assertSelfTest(
+    requiredCapabilitiesForPayload({ command: "snapshot", args: [], flags: { selector: "main" } }).has("snapshot-selector"),
+    "daemon capability check covers scoped snapshots",
   );
   assertSelfTest(
     requiredCapabilitiesForPayload({ command: "query-selector", args: ["main"] }).has("query-selector"),

@@ -33,7 +33,9 @@ or virtualized lists:
 
 1. Reuse or claim the real tab/profile once. If the page does not hydrate until
    visible, use `--foreground-until-ready` with a selector/card readiness guard.
-2. Start with `snapshot --compact --max-chars 2000-3000`.
+2. Start with `snapshot --selector <stable-container> --compact --max-chars
+   2000-3000` when the target area is known; otherwise use
+   `snapshot --compact --max-chars 2000-3000`.
 3. If item boundaries or nesting are ambiguous, write OpenClaw-style records to
    files and inspect them with OS-available local tools. `rg`/`jq` are optional;
    PowerShell `Select-String`/`ConvertFrom-Json` or Node work on Windows.
