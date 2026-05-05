@@ -1,7 +1,8 @@
 # Screenshots And Responsive Viewports
 
 Read this for exact viewport screenshots, mobile captures, responsive evidence,
-or PNG dimension verification.
+or PNG dimension verification. Examples use POSIX `/tmp` paths unless noted;
+on Windows, write outputs under `$env:TEMP` or another local writable path.
 
 ## Exact Device Screenshots
 
@@ -9,7 +10,26 @@ Use this for the common "desktop/tablet/mobile screenshots" request. The command
 runs inside the daemon, pins CDP captures to the selected `targetId` when
 available, writes raw PNGs, and verifies their dimensions.
 
+Before opening a URL or creating a fresh anonymous session, search existing
+targets when the prompt implies one: follow-ups, "that tab", "current tab",
+"already open", named staging tabs, profile mentions, or anonymous/incognito
+mentions. `find-tab --all-sessions` searches real-profile endpoints and named
+anonymous sessions; select and verify the matching tab before capture.
+
 ```bash
+"$REALBROWSER_CLI" sessions
+"$REALBROWSER_CLI" find-tab "<url-or-title-fragment>" --all-sessions
+"$REALBROWSER_CLI" select-tab "<url-or-title-fragment>" --all-sessions
+"$REALBROWSER_CLI" js '({href: location.href, title: document.title, readyState: document.readyState})'
+```
+
+After `select-tab`, plain screenshot commands use the active selected session.
+Use `--session <name>`, `--handle <name>`, or `--target-id <id>` only when you
+need to pin a specific target explicitly.
+
+```bash
+"$REALBROWSER_CLI" device-screenshots /tmp/site-inbox
+# Or, for a newly opened named session:
 "$REALBROWSER_CLI" --session site-check device-screenshots /tmp/site-inbox
 ```
 
@@ -161,7 +181,7 @@ OUT="/tmp/site-mobile.png"
 ```powershell
 $RealbrowserCli = Join-Path $HOME ".codex/skills/realbrowser/scripts/realbrowser.ps1"
 $Session = "site-mobile"
-$Out = "/tmp/site-mobile.png"
+$Out = Join-Path $env:TEMP "site-mobile.png"
 
 & $RealbrowserCli mobile-screenshot https://example.com $Out `
   --session $Session `

@@ -11,11 +11,27 @@ file, run the task, and open references only when the task needs their detail.
 
 ## Quick Start
 
+Use the wrapper that matches the host OS:
+
 ```bash
+# macOS/Linux shells
 REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
 "$REALBROWSER_CLI" open https://example.com --anonymous --session task --select --timeout 20000
 "$REALBROWSER_CLI" --session task observe --max-chars 2000
 ```
+
+```powershell
+# Windows PowerShell
+$RealbrowserCli = Join-Path $HOME ".codex\skills\realbrowser\scripts\realbrowser.ps1"
+& $RealbrowserCli open https://example.com --anonymous --session task --select --timeout 20000
+& $RealbrowserCli --session task observe --max-chars 2000
+```
+
+On Windows `cmd.exe`, use `scripts\realbrowser.cmd`; `node
+scripts/realbrowser.mjs` is the portable fallback on any OS. Examples below use
+POSIX shell syntax and `/tmp` output paths for brevity. On Windows, translate
+paths to `$env:TEMP`/`%TEMP%` and use PowerShell `Select-String` /
+`ConvertFrom-Json` or Node when `rg`/`jq` are unavailable.
 
 Do not run `doctor` by default. Use it when setup is uncertain or a browser
 command fails.
@@ -150,20 +166,39 @@ change.
 For requests like "check staging site, log in if needed, open inbox, take
 desktop/tablet/mobile screenshots":
 
-1. Use a clean anonymous session unless the user explicitly needs existing
-   Chrome cookies:
+1. Before opening anything, decide whether the wording implies an existing
+   target. Treat "that tab", "existing tab", "already open", "current tab",
+   "staging tab", named browser/profile mentions, and follow-ups to recent
+   browser work as existing-tab requests:
+   ```bash
+   "$REALBROWSER_CLI" sessions
+   "$REALBROWSER_CLI" find-tab "<url-or-title-fragment>" --all-sessions
+   "$REALBROWSER_CLI" select-tab "<url-or-title-fragment>" --all-sessions
+   "$REALBROWSER_CLI" js '({href: location.href, title: document.title, readyState: document.readyState})'
+   ```
+   `--all-sessions` includes named anonymous sessions as well as real-profile
+   endpoint sessions. If the user explicitly says "anonymous", "incognito", or
+   "clean session", still search matching anonymous sessions first; open a new
+   anonymous session only when no suitable existing anonymous target exists or
+   the user asks for a fresh one.
+2. Use a clean anonymous session only for public/clean-state checks when no
+   existing target is implied or found:
    ```bash
    "$REALBROWSER_CLI" open https://site.example --anonymous --session site-check --select --timeout 30000
    ```
-2. Read compact state:
+3. Read compact state from the selected or newly opened target:
    ```bash
+   "$REALBROWSER_CLI" observe --max-chars 2000
+   # If you opened a named session instead of selecting an existing tab:
    "$REALBROWSER_CLI" --session site-check observe --max-chars 2000
    ```
-3. If login is needed, use `snapshot --efficient`, `fill-form`, `click`, then
+4. If login is needed, use `snapshot --efficient`, `fill-form`, `click`, then
    wait for the post-login page with `wait --domcontentloaded` or visible text.
-4. Navigate directly to the requested page when the route is known.
-5. For exact default desktop/tablet/mobile PNG screenshots, run:
+5. Navigate directly to the requested page when the route is known.
+6. For exact default desktop/tablet/mobile PNG screenshots, run:
    ```bash
+   "$REALBROWSER_CLI" device-screenshots /tmp/site-inbox
+   # If you opened a named session instead of selecting an existing tab:
    "$REALBROWSER_CLI" --session site-check device-screenshots /tmp/site-inbox
    ```
    The output should show the requested PNG dimensions. If `browser=<width>x<height>`
@@ -172,20 +207,27 @@ desktop/tablet/mobile screenshots":
    only when exact CSS breakpoints matter.
    For a user-facing full-size screenshot, prefer:
    ```bash
+   "$REALBROWSER_CLI" full-screenshot /tmp/site-full.png
+   # If you opened a named session instead of selecting an existing tab:
    "$REALBROWSER_CLI" --session site-check full-screenshot /tmp/site-full.png
    ```
    Add `--viewport 390x844` for mobile or `--selector <css>` for a full
    internal scroll region.
-6. If the layout hydrates slowly, add a readiness guard such as
+7. If the layout hydrates slowly, add a readiness guard such as
    `--selector main --visual-stable --settle-ms 500`.
-7. For custom device sizes, full-size internal-scroll screenshots, or specific
+8. For custom device sizes, full-size internal-scroll screenshots, or specific
    region captures, read `references/screenshots.md`.
-8. Inspect saved images with `view_image` when available, then
-   `detach --session site-check`.
+9. Inspect saved images with `view_image` when available. Detach only
+   anonymous/dedicated sessions you opened for the task; do not detach an
+   existing real-profile tab or session the user was already using.
 
 ## Decision Matrix
 
-- Public page or clean login test: use `--anonymous --session <task> --select`.
+- Public page or clean login test with no existing target implied: use
+  `--anonymous --session <task> --select`.
+- Existing tab/session implied, including a named anonymous session: run
+  `sessions` and `find-tab <query> --all-sessions`, then verify URL/title before
+  acting.
 - Existing user cookies, a named Chrome profile, or `--no-fallback`: read
   `references/profiles.md`.
 - Focus-gated or lazy pages that do not hydrate in a background tab:
@@ -206,7 +248,9 @@ desktop/tablet/mobile screenshots":
 ## Operating Loop
 
 1. Reuse existing context before opening duplicates: `sessions`, then
-   `find-tab <url-or-title> --all-sessions` when prior attempts may exist.
+   `find-tab <url-or-title> --all-sessions` when prior attempts may exist or the
+   user mentions an existing/current tab, profile, session, anonymous/incognito
+   context, or follow-up browser state.
 2. Open or claim one stable target. Use `--session <name>` for isolated flows
    and `claim ... --handle-name <task>` for longer workflows.
    For real signed-in profiles, omit `--select` on the initial `open --profile`
