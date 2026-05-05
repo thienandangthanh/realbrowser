@@ -96,17 +96,27 @@ REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
 
 For large dynamic pages such as feeds, chats, search results, dashboards, or
 virtualized lists, use compact role/DOM readers instead of full-page HTML stdout.
-Write deep reads to files and inspect those artifacts locally. For nested item
-boundaries, stale daemon handling, or selector strategy, read
+Use this path before broad `observe` when the task is to extract item content.
+`observe` is for page state, controls, and sanity checks; it is not the default
+parser for repeated or nested content. Start with `extract-items` for a compact
+one-eval item summary; fall back to raw role/DOM records when boundaries are
+ambiguous. Write deep reads to files and inspect those artifacts locally. For
+nested item boundaries, stale daemon handling, or selector strategy, read
 `references/debugging.md`.
 
 ```bash
+"$REALBROWSER_CLI" extract-items --selector main --limit 5 --max-text-chars 700
+"$REALBROWSER_CLI" extract-items --selector main --item-selector article --limit 5 --out "$ARTIFACT_DIR/page-items.json"
 "$REALBROWSER_CLI" snapshot --selector main --compact --max-chars 2500
 "$REALBROWSER_CLI" snapshot --compact --max-chars 2500
-"$REALBROWSER_CLI" snapshot-dom --out "$ARTIFACT_DIR/page-dom.json" --limit 1800 --max-text-chars 180
+"$REALBROWSER_CLI" snapshot-dom --selector main --out "$ARTIFACT_DIR/page-dom.json" --limit 1800 --max-text-chars 180
 "$REALBROWSER_CLI" snapshot-aria --out "$ARTIFACT_DIR/page-aria.json" --limit 1800
 "$REALBROWSER_CLI" query-selector 'main, [role="feed"], [role="article"], article' --out "$ARTIFACT_DIR/page-elements.json" --limit 60 --max-text-chars 300 --max-html-chars 800
 ```
+
+For huge or noisy pages, do not print or grep broad artifact matches into the
+conversation. First identify a stable root or candidate headings, then extract a
+small JSON/text summary with `jq`, Node, or a targeted `js` expression.
 
 ## Screenshot Task Fast Path
 
@@ -134,9 +144,12 @@ risk, read `references/screenshots.md`.
   `sessions` and `find-tab <query> --all-sessions`, then verify URL/title before
   acting.
 - Existing user cookies, a named Chrome profile, or `--no-fallback`: read
-  `references/profiles.md`.
+  `references/profiles.md`. Real signed-in profile opens are background-first;
+  do not foreground Chrome unless the user asked for visual handoff.
 - Focus-gated or lazy pages that do not hydrate in a background tab:
-  use explicit `--foreground-until-ready` plus `wait-ready` criteria.
+  first try background `wait-ready`, scrolls, compact extraction, and targeted
+  `js`/selector reads. Use explicit foregrounding only after those fail or when
+  the user asked to bring the browser forward.
 - Large dynamic pages, social feeds, or pages with thousands of nodes:
   read `references/debugging.md` before dumping HTML. Start with compact
   snapshots, write deep reads to files, and inspect those files with
@@ -158,18 +171,31 @@ risk, read `references/screenshots.md`.
    context, or follow-up browser state.
 2. Open or claim one stable target. Use `--session <name>` for isolated flows
    and `claim ... --handle-name <task>` for longer workflows.
-   For real signed-in profiles, omit `--select` on the initial `open --profile`
-   unless immediate automation selection is required; select or claim after the
-   tab exists. Use `--front`, `focus`, or `--foreground-until-ready` only for an
-   explicit visual handoff.
-3. Read before acting. Use `observe --max-chars 1500-2500` for page state and
-   `snapshot --efficient` when current `uid` or CDP `[ref=eN]` refs are needed.
+   For real signed-in profiles, default to background open:
+   `open --profile "<id>" "<url>" --no-fallback`. Omit `--select` on the
+   initial open unless immediate automation selection is required; select or
+   claim after the tab exists. Do not add `--front`,
+   `focus <target-or-url-fragment>`, or `--foreground-until-ready` just because a
+   page is slow or lazy. Use foregrounding only for explicit visual handoff, or
+   after background waits/scrolls/extraction fail and the foreground need is
+   worth interrupting the user.
+3. Read before acting. Use `observe --max-chars 1500-2500` for page state,
+   controls, and quick sanity checks. For large feeds, chats, search results,
+   dashboards, virtualized lists, or nested repeated items, start with the
+   OpenClaw-style extraction path (`extract-items --selector <css>`, then
+   `snapshot --compact`, `snapshot-dom --selector <css> --out` /
+   `snapshot-aria --out` / `query-selector --out` as needed) and keep large
+   artifacts out of stdout.
+   Use `snapshot --efficient` when current `uid` or CDP `[ref=eN]` refs are
+   needed.
 4. Act only on current refs. After navigation, modal changes, form submission,
    or stale-ref failures, run `observe` or `snapshot --efficient` again.
 5. Prefer visible-state waits over sleeps: `wait <text> --visible`,
    `wait --selector <css> --visible`, `wait --domcontentloaded`, or
    `wait --networkidle`. For modern lazy pages, use `wait-ready` with
-   `--selector`, `--min-cards`, `--visual-stable`, or `--no-skeletons`.
+   `--selector`, `--ready-text`, `--visual-stable`, or `--no-skeletons`. Use
+   `--min-cards` only with a known `--card-selector` or when generic card
+   detection has already matched the target content.
 6. For multi-step command streams, prefer `chain --return final` or
    `chain --return summary --trace <path>` to reduce process round trips.
 7. Keep large outputs in files: use `--out`, `--har`, `--request-file`, or
@@ -226,6 +252,18 @@ Use this for verified desktop/tablet/mobile PNG evidence.
 If cookies in a specific Chrome profile matter, read `references/profiles.md`
 before opening or attaching.
 
+For real signed-in profiles, keep the first open in the background:
+
+```bash
+"$REALBROWSER_CLI" open --profile "chrome:Default" "https://app.example/items" --no-fallback --timeout 30000
+"$REALBROWSER_CLI" find-tab "app.example/items" --all-sessions
+"$REALBROWSER_CLI" select-tab "app.example/items" --all-sessions
+```
+
+Do not add `--front`, `focus`, or `--foreground-until-ready` unless the user
+asked to see the browser or background reads have failed and foregrounding is
+required to finish the task.
+
 For a page that stalls until the tab is active, foregrounding is explicit:
 
 ```bash
@@ -235,9 +273,10 @@ For a page that stalls until the tab is active, foregrounding is explicit:
   --no-fallback \
   --foreground-until-ready \
   --selector main \
+  --card-selector ".item-card" \
   --min-cards 3 \
   --timeout 20000
-"$REALBROWSER_CLI" --handle app-items wait-ready --selector main --min-cards 3 --visual-stable
+"$REALBROWSER_CLI" --handle app-items wait-ready --selector main --card-selector ".item-card" --min-cards 3 --visual-stable
 ```
 
 ### 5. Render Or Network Debug
@@ -259,8 +298,11 @@ body conclusions.
 - Use `snapshot-aria` when you need OpenClaw-style AX node records.
 - On CDP-backed real-profile sessions, `text`, `html`, and `query-selector`
   use OpenClaw-style `getDomText` / `querySelector` primitives.
-- Use `snapshot-dom --out <path>` when you need OpenClaw-style DOM element
-  records for local inspection instead of raw HTML.
+- Use `extract-items --selector <root> --limit <n>` before broad snapshots when
+  the task is to read repeated content. It does root discovery, candidate
+  scoring, and nested-item suppression in one page eval.
+- Use `snapshot-dom --selector <css> --out <path>` when a stable container is
+  known; omit `--selector` only when full-document DOM records are intentional.
 - Use `screenshot` for visual evidence and `html --out <path>` for
   selector/debug work, not as the default page parser.
 - Do not use `--full-stdout` for large or unknown output. Prefer artifacts and
@@ -268,9 +310,11 @@ body conclusions.
 - For social/app feeds, chats, search results, or nested dynamic lists, do not
   treat full-page HTML as the parser and do not rely on removed semantic
   shortcuts such as `posts`, `blocks`, or `content-blocks`. Use
-  `snapshot --compact`, `snapshot-aria`, `snapshot-dom --out`, and
-  `query-selector --out`; use screenshots only to verify visual boundaries or
-  media-heavy content.
+  `extract-items`, `snapshot --compact`, `snapshot-aria`,
+  `snapshot-dom --selector <css> --out`, and `query-selector --out`; use
+  screenshots only to verify visual boundaries or media-heavy content. Slow
+  hydration is not by itself a reason to foreground a signed-in profile tab;
+  try background waits, scrolls, compact extraction, and targeted `js` first.
 - Use `--raw-size` only when exact browser pixels matter. Default screenshots
   are normalized for agent use.
 

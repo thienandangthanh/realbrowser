@@ -44,9 +44,11 @@ const DAEMON_CAPABILITIES = Object.freeze([
   "persistent-cdp-page-sessions",
   "persistent-cdp-ws-target-list",
   "cdp-console-buffer",
+  "extract-items",
   "query-selector",
   "snapshot-aria",
   "snapshot-dom",
+  "snapshot-dom-selector",
   "snapshot-selector",
   "visible-wait",
 ]);
@@ -62,6 +64,10 @@ const READ_STDOUT_HARD_MAX_CHARS = 40_000;
 const DEFAULT_LINE_LIMIT = 50;
 const DEFAULT_OBSERVE_LIMIT = 30;
 const DEFAULT_OBSERVE_TEXT_CHARS = 900;
+const DEFAULT_EXTRACT_ITEMS_LIMIT = 5;
+const DEFAULT_EXTRACT_ITEM_TEXT_CHARS = 700;
+const DEFAULT_EXTRACT_MIN_TEXT_CHARS = 20;
+const DEFAULT_EXTRACT_LINK_LIMIT = 4;
 const DEFAULT_SCREENSHOT_JPEG_QUALITY = 85;
 const SCREENSHOT_QUALITY_STEPS = [85, 75, 65, 55, 45, 35];
 const SCREENSHOT_SCALE_STEPS = [1, 0.82, 0.67, 0.55];
@@ -350,8 +356,9 @@ const CLI_COMMAND_GROUPS = [
     commands: [
       { name: "eval", aliases: ["js"], usage: "realbrowser eval <js> [--page <id>] [--max-chars <n>] [--out <path>] [--raw] [--json]", summary: "Run JavaScript in the page.", handle: true, minArgs: 1 },
       { name: "text", usage: "realbrowser text [selector|uid] [--page <id>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read text.", handle: true },
+      { name: "extract-items", aliases: ["items", "read-items"], usage: "realbrowser extract-items [root-selector] [--item-selector <css>|--card-selector <css>] [--limit <n>|--max-items <n>] [--min-text-chars <n>] [--max-text-chars <n>] [--link-limit <n>] [--out <path>] [--json]", summary: "Extract repeated content items with root discovery and nested-item suppression.", handle: true },
       { name: "snapshot-aria", usage: "realbrowser snapshot-aria [--limit <n>] [--out <path>] [--json]", summary: "Read OpenClaw-style AX node snapshot over CDP.", handle: true },
-      { name: "snapshot-dom", usage: "realbrowser snapshot-dom [--limit <n>|--max-nodes <n>] [--max-text-chars <n>] [--out <path>] [--json]", summary: "Read OpenClaw-style DOM element snapshot over CDP.", handle: true },
+      { name: "snapshot-dom", usage: "realbrowser snapshot-dom [--selector <css>] [--limit <n>|--max-nodes <n>] [--max-text-chars <n>] [--out <path>] [--json]", summary: "Read OpenClaw-style DOM element snapshot over CDP.", handle: true },
       { name: "query-selector", usage: "realbrowser query-selector <selector> [--limit <n>] [--max-text-chars <n>] [--max-html-chars <n>] [--out <path>] [--json]", summary: "Read OpenClaw-style selector matches over CDP.", handle: true, minArgs: 1 },
       { name: "html", usage: "realbrowser html [selector|uid] [--page <id>] [--max-chars <n>] [--out <path>] [--raw]", summary: "Read HTML.", handle: true },
       { name: "links", usage: "realbrowser links [selector|uid] [--page <id>] [--limit <n>] [--filter <text>] [--text-filter <text>] [--href-filter <text>] [--visible] [--json]", summary: "Read links.", handle: true },
@@ -631,6 +638,11 @@ const FLAG_VALUE_NAMES = new Set([
   "--viewport",
   "--viewports",
   "--href-filter",
+  "--item-selector",
+  "--link-limit",
+  "--max-items",
+  "--min-text-chars",
+  "--root-selector",
   "--card-selector",
 ]);
 
@@ -926,6 +938,30 @@ function parseArgv(argv) {
       flags.cardSelector = argv[++index];
     } else if (arg?.startsWith("--card-selector=")) {
       flags.cardSelector = arg.slice("--card-selector=".length);
+    } else if (arg === "--item-selector") {
+      flags.itemSelector = argv[++index];
+    } else if (arg?.startsWith("--item-selector=")) {
+      flags.itemSelector = arg.slice("--item-selector=".length);
+    } else if (arg === "--root-selector") {
+      flags.rootSelector = argv[++index];
+      flags.selector = flags.rootSelector;
+    } else if (arg?.startsWith("--root-selector=")) {
+      flags.rootSelector = arg.slice("--root-selector=".length);
+      flags.selector = flags.rootSelector;
+    } else if (arg === "--max-items") {
+      flags.maxItems = argv[++index];
+      flags.limit = flags.maxItems;
+    } else if (arg?.startsWith("--max-items=")) {
+      flags.maxItems = arg.slice("--max-items=".length);
+      flags.limit = flags.maxItems;
+    } else if (arg === "--min-text-chars") {
+      flags.minTextChars = argv[++index];
+    } else if (arg?.startsWith("--min-text-chars=")) {
+      flags.minTextChars = arg.slice("--min-text-chars=".length);
+    } else if (arg === "--link-limit") {
+      flags.linkLimit = argv[++index];
+    } else if (arg?.startsWith("--link-limit=")) {
+      flags.linkLimit = arg.slice("--link-limit=".length);
     } else if (arg === "--ready-text") {
       flags.readyText = argv[++index];
     } else if (arg?.startsWith("--ready-text=")) {
@@ -2727,7 +2763,13 @@ function requiredCapabilitiesForCommand(command, args = []) {
     case "is":
       return args.includes("--raw") ? new Set(["bounded-raw-output"]) : new Set();
     case "snapshot-dom":
-      return new Set(["snapshot-dom"]);
+      return args.includes("--selector") || args.some((arg) => String(arg).startsWith("--selector="))
+        ? new Set(["snapshot-dom", "snapshot-dom-selector"])
+        : new Set(["snapshot-dom"]);
+    case "extract-items":
+    case "items":
+    case "read-items":
+      return new Set(["extract-items"]);
     case "snapshot-aria":
       return new Set(["snapshot-aria"]);
     case "snapshot":
@@ -5789,12 +5831,15 @@ async function prepareCdpPageSession(send) {
 async function snapshotDomFromSession(send, options = {}) {
   const limit = Math.max(1, Math.min(5000, Math.floor(options.limit ?? 800)));
   const maxTextChars = Math.max(0, Math.min(5000, Math.floor(options.maxTextChars ?? 220)));
+  const selectorExpr = options.selector ? JSON.stringify(String(options.selector)) : "null";
   const expression = `(() => {
     const maxNodes = ${JSON.stringify(limit)};
     const maxText = ${JSON.stringify(maxTextChars)};
+    const rootSelector = ${selectorExpr};
     const lower = (value) => String(value || "").toLocaleLowerCase();
     const nodes = [];
-    const root = document.documentElement;
+    const root = rootSelector ? document.querySelector(rootSelector) : document.documentElement;
+    if (rootSelector && !root) throw new Error("Element not found: " + rootSelector);
     if (!root) return { nodes };
     const stack = [{ el: root, depth: 0, parentRef: null }];
     while (stack.length && nodes.length < maxNodes) {
@@ -5839,6 +5884,9 @@ async function snapshotDomFromSession(send, options = {}) {
     awaitPromise: true,
     returnByValue: true,
   });
+  if (evaluated?.exceptionDetails) {
+    throw new Error(formatCdpException(evaluated.exceptionDetails));
+  }
   const nodes = evaluated?.result?.value?.nodes;
   return { nodes: Array.isArray(nodes) ? nodes : [] };
 }
@@ -5920,6 +5968,317 @@ async function querySelectorFromSession(send, options = {}) {
   });
   const matches = evaluated?.result?.value;
   return { matches: Array.isArray(matches) ? matches : [] };
+}
+
+function normalizeExtractItemsOptions(options = {}) {
+  const limit = Math.max(1, Math.min(50, Math.floor(options.limit ?? DEFAULT_EXTRACT_ITEMS_LIMIT)));
+  const maxTextChars = Math.max(80, Math.min(5000, Math.floor(options.maxTextChars ?? DEFAULT_EXTRACT_ITEM_TEXT_CHARS)));
+  const minTextChars = Math.max(1, Math.min(1000, Math.floor(options.minTextChars ?? DEFAULT_EXTRACT_MIN_TEXT_CHARS)));
+  const linkLimit = Math.max(0, Math.min(20, Math.floor(options.linkLimit ?? DEFAULT_EXTRACT_LINK_LIMIT)));
+  return {
+    rootSelector: normalizeOptionalString(options.rootSelector),
+    itemSelector: normalizeOptionalString(options.itemSelector),
+    filter: normalizeOptionalString(options.filter),
+    limit,
+    maxTextChars,
+    minTextChars,
+    linkLimit,
+  };
+}
+
+function extractItemsExpressionFromOptions(options = {}) {
+  const payload = normalizeExtractItemsOptions(options);
+  return `(() => {
+    const opts = ${JSON.stringify(payload)};
+    const clean = (value, max = 1000000) => {
+      const text = String(value || "").replace(/\\s+/g, " ").trim();
+      return max > 0 && text.length > max ? text.slice(0, max) + "..." : text;
+    };
+    const lower = (value) => String(value || "").toLocaleLowerCase();
+    const cssEscape = globalThis.CSS && typeof CSS.escape === "function"
+      ? (value) => CSS.escape(String(value))
+      : (value) => String(value).replace(/[^a-zA-Z0-9_-]/g, "\\\\$&");
+    const attrQuote = (value) => String(value).replaceAll("\\\\", "\\\\\\\\").replaceAll('"', '\\\\"');
+    const visible = (el) => {
+      if (!(el instanceof Element)) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      if (rect.bottom < -100 || rect.top > innerHeight * 4) return false;
+      const style = getComputedStyle(el);
+      return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || "1") > 0;
+    };
+    const safeAll = (root, selector, cap = 5000) => {
+      try { return Array.from(root.querySelectorAll(selector)).slice(0, cap); } catch { return []; }
+    };
+    const unique = (items) => {
+      const out = [];
+      const seen = new Set();
+      for (const item of items) {
+        if (!item || seen.has(item)) continue;
+        seen.add(item);
+        out.push(item);
+      }
+      return out;
+    };
+    const selectorFor = (el) => {
+      if (!(el instanceof Element)) return "";
+      if (el.id) return "#" + cssEscape(el.id);
+      const testid = el.getAttribute("data-testid") || el.getAttribute("data-test-id");
+      if (testid) return el.tagName.toLowerCase() + "[data-testid=\\\"" + attrQuote(testid) + "\\\"]";
+      const role = el.getAttribute("role");
+      if (role) return el.tagName.toLowerCase() + "[role=\\\"" + attrQuote(role) + "\\\"]";
+      return el.tagName.toLowerCase();
+    };
+    const rootSelectors = opts.rootSelector
+      ? [opts.rootSelector]
+      : [
+          "main",
+          "[role='main']",
+          "[role='feed']",
+          "[aria-label*='feed' i]",
+          "[data-testid*='feed' i]",
+          "[data-pagelet*='Feed']",
+          "#content",
+          "#root",
+          "body",
+        ];
+    const itemSelectors = opts.itemSelector
+      ? [opts.itemSelector]
+      : [
+          "article",
+          "[role='article']",
+          "[role='listitem']",
+          "li",
+          "section",
+          "[data-testid*='post' i]",
+          "[data-testid*='item' i]",
+          "[data-testid*='card' i]",
+          "[data-pagelet*='FeedUnit']",
+          "[class*='post' i]",
+          "[class*='item' i]",
+          "[class*='card' i]",
+        ];
+    const explicitItemSelector = Boolean(opts.itemSelector);
+    const textLength = (el) => clean(el?.innerText || el?.textContent || "").length;
+    const itemMatches = (root) => unique(itemSelectors.flatMap((selector) => safeAll(root, selector, 1200)));
+    const rootCandidates = unique(rootSelectors.map((selector) => {
+      try { return { selector, el: document.querySelector(selector) }; } catch { return { selector, el: null }; }
+    }).filter((entry) => entry.el && visible(entry.el)));
+    if (!rootCandidates.length) {
+      return { url: location.href, title: document.title, root: null, rootCandidates: [], items: [], warning: "No visible root matched." };
+    }
+    const rootInfos = rootCandidates.map((entry) => {
+      const rect = entry.el.getBoundingClientRect();
+      const textChars = textLength(entry.el);
+      const itemCount = itemMatches(entry.el).filter(visible).length;
+      const role = entry.el.getAttribute("role") || "";
+      const tag = entry.el.tagName.toLowerCase();
+      const noisy = /^(nav|aside|header|footer)$/i.test(tag) || /navigation|banner|contentinfo|complementary/i.test(role);
+      const score = (itemCount * 16) + Math.min(textChars / 60, 80) + Math.min(rect.height / 80, 20) - (noisy ? 120 : 0);
+      return {
+        selector: entry.selector,
+        tag,
+        role,
+        textChars,
+        itemCount,
+        score: Math.round(score),
+        el: entry.el,
+      };
+    }).sort((a, b) => b.score - a.score);
+    const rootInfo = rootInfos[0];
+    const root = rootInfo.el;
+    const rootSelector = rootInfo.selector;
+    const baseCandidates = explicitItemSelector
+      ? itemMatches(root)
+      : unique([
+          ...itemMatches(root),
+          ...safeAll(root, ":scope > *", 400),
+          ...safeAll(root, "[role='feed'] > *", 400),
+          ...safeAll(root, "[data-virtualized] > *", 400),
+          ...safeAll(root, "main > *", 400),
+          ...safeAll(root, "div", 1800),
+        ]);
+    const viewportArea = Math.max(1, innerWidth * innerHeight);
+    const raw = [];
+    for (const el of baseCandidates) {
+      if (!(el instanceof Element) || el === root || !visible(el)) continue;
+      const rect = el.getBoundingClientRect();
+      const text = clean(el.innerText || el.textContent || "");
+      const textChars = text.length;
+      if (textChars < opts.minTextChars) continue;
+      if (!explicitItemSelector && textChars > opts.maxTextChars * 8) continue;
+      const tag = el.tagName.toLowerCase();
+      const role = el.getAttribute("role") || "";
+      const hasHeading = Boolean(el.querySelector("h1,h2,h3,h4,h5,h6,[role='heading']"));
+      const hasLinks = Boolean(el.querySelector("a[href]"));
+      const hasMedia = Boolean(el.querySelector("img,video,canvas,svg"));
+      const hasActions = Boolean(el.querySelector("button,[role='button'],a[href]"));
+      const semantic = /^(article|li|section)$/i.test(tag) || /article|listitem/i.test(role);
+      const className = String(el.className || "");
+      const dataHint = Array.from(el.attributes || []).some((attr) => /^data-/i.test(attr.name) && /post|item|card|feed|result|entry/i.test(attr.name + " " + attr.value));
+      const classHint = /post|item|card|feed|result|entry/i.test(className);
+      const areaRatio = Math.min((rect.width * rect.height) / viewportArea, 4);
+      let score = 0;
+      if (semantic) score += 40;
+      if (hasHeading) score += 18;
+      if (hasLinks) score += 8;
+      if (hasMedia) score += 5;
+      if (hasActions) score += 5;
+      if (dataHint) score += 12;
+      if (classHint) score += 8;
+      if (tag === "div" && !dataHint && !classHint && !hasHeading) score -= 8;
+      score += Math.min(textChars / 30, 35);
+      score += Math.min(areaRatio * 6, 16);
+      if (textChars > opts.maxTextChars * 4) score -= 35;
+      if (/^(nav|aside|header|footer)$/i.test(tag) || /navigation|banner|contentinfo|complementary/i.test(role)) score -= 120;
+      if (!explicitItemSelector && score < 18) continue;
+      raw.push({ el, rect, text, textChars, tag, role, score });
+      if (raw.length >= 600) break;
+    }
+    for (const candidate of raw) {
+      let nested = 0;
+      for (const other of raw) {
+        if (other !== candidate && candidate.el.contains(other.el)) nested += 1;
+      }
+      candidate.nested = nested;
+      if (!explicitItemSelector && nested > 8) candidate.score -= Math.min(45, nested * 5);
+    }
+    const filtered = raw
+      .filter((entry) => explicitItemSelector || entry.score >= 18)
+      .sort((a, b) => (a.rect.top - b.rect.top) || (b.score - a.score));
+    const selected = [];
+    for (const entry of filtered) {
+      if (selected.some((picked) => picked.el.contains(entry.el) || entry.el.contains(picked.el))) {
+        continue;
+      }
+      selected.push(entry);
+      if (selected.length >= opts.limit) break;
+    }
+    const filter = lower(opts.filter || "");
+    const items = [];
+    for (const entry of selected) {
+      const links = [];
+      const seenLinks = new Set();
+      for (const anchor of safeAll(entry.el, "a[href]", opts.linkLimit * 4 + 4)) {
+        const href = anchor.href || anchor.getAttribute("href") || "";
+        const label = clean(anchor.innerText || anchor.textContent || anchor.getAttribute("aria-label") || anchor.getAttribute("title") || "", 120);
+        const key = href + "\\n" + label;
+        if (!href || seenLinks.has(key)) continue;
+        seenLinks.add(key);
+        links.push({ text: label, href });
+        if (links.length >= opts.linkLimit) break;
+      }
+      const headings = safeAll(entry.el, "h1,h2,h3,h4,h5,h6,[role='heading']", 4)
+        .map((el) => clean(el.innerText || el.textContent || el.getAttribute("aria-label") || "", 160))
+        .filter(Boolean);
+      const title = headings[0] || links.find((link) => link.text)?.text || clean(entry.text, 120);
+      const item = {
+        index: items.length + 1,
+        tag: entry.tag,
+        ...(entry.role ? { role: entry.role } : {}),
+        selectorHint: selectorFor(entry.el),
+        title,
+        text: clean(entry.text, opts.maxTextChars),
+        textChars: entry.textChars,
+        nestedCandidates: entry.nested,
+        score: Math.round(entry.score),
+        rect: {
+          top: Math.round(entry.rect.top),
+          left: Math.round(entry.rect.left),
+          width: Math.round(entry.rect.width),
+          height: Math.round(entry.rect.height),
+        },
+        ...(links.length ? { links } : {}),
+      };
+      if (!filter || lower(item.title + " " + item.text + " " + links.map((link) => link.text + " " + link.href).join(" ")).includes(filter)) {
+        items.push(item);
+      }
+    }
+    return {
+      url: location.href,
+      title: document.title,
+      root: {
+        selector: rootSelector,
+        tag: rootInfo.tag,
+        ...(rootInfo.role ? { role: rootInfo.role } : {}),
+        textChars: rootInfo.textChars,
+        itemCount: rootInfo.itemCount,
+        score: rootInfo.score,
+      },
+      rootCandidates: rootInfos.slice(0, 5).map(({ el, ...rest }) => rest),
+      itemSelector: opts.itemSelector || null,
+      count: items.length,
+      items,
+    };
+  })()`;
+}
+
+function extractItemsMcpFunction(options = {}) {
+  return `async () => JSON.stringify(${extractItemsExpressionFromOptions(options)})`;
+}
+
+async function extractItemsFromSession(send, options = {}) {
+  const expression = extractItemsExpressionFromOptions(options);
+  const evaluated = await send("Runtime.evaluate", {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (evaluated?.exceptionDetails) {
+    throw new Error(formatCdpException(evaluated.exceptionDetails));
+  }
+  const value = evaluated?.result?.value;
+  return value && typeof value === "object"
+    ? value
+    : { url: "", title: "", root: null, rootCandidates: [], items: [] };
+}
+
+function formatExtractItemsText(payload, flags = {}) {
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  const root = payload?.root;
+  const linkDisplayLimit = flags.linkLimit === undefined
+    ? DEFAULT_EXTRACT_LINK_LIMIT
+    : Math.min(parsePositiveInteger(flags.linkLimit, "link-limit"), 20);
+  const lines = [
+    `extract-items: ${items.length} item${items.length === 1 ? "" : "s"}${root?.selector ? ` from ${root.selector}` : ""}`,
+  ];
+  if (payload?.warning) {
+    lines.push(`warning: ${payload.warning}`);
+  }
+  if (payload?.title || payload?.url) {
+    lines.push(`page: ${payload.title || "(untitled)"}${payload.url ? ` (${payload.url})` : ""}`);
+  }
+  if (root) {
+    lines.push(`root: ${root.selector || root.tag || "(unknown)"} score=${root.score ?? "?"} candidates=${root.itemCount ?? 0} text=${root.textChars ?? 0}`);
+  }
+  for (const item of items) {
+    const title = item.title ? ` ${item.title}` : "";
+    lines.push("");
+    lines.push(`${item.index}. ${title}`.trimEnd());
+    if (item.text) {
+      lines.push(`   ${item.text}`);
+    }
+    const meta = [
+      item.tag ? `tag=${item.tag}` : "",
+      item.role ? `role=${item.role}` : "",
+      Number.isFinite(item.score) ? `score=${item.score}` : "",
+      Number.isFinite(item.nestedCandidates) ? `nested=${item.nestedCandidates}` : "",
+      Number.isFinite(item.textChars) ? `text=${item.textChars}` : "",
+    ].filter(Boolean).join(" ");
+    if (meta) {
+      lines.push(`   ${meta}`);
+    }
+    for (const link of Array.isArray(item.links) ? item.links.slice(0, linkDisplayLimit) : []) {
+      lines.push(`   link: ${link.text ? `${link.text} -> ` : ""}${link.href}`);
+    }
+  }
+  const maxChars = stdoutMaxCharsFromFlags(flags, "6000");
+  const truncated = truncateText(lines.join("\n"), maxChars.value);
+  const suffix = [];
+  if (truncated.truncated) {
+    suffix.push("[...TRUNCATED - use --out for full JSON]");
+  }
+  return [truncated.text, ...suffix].filter(Boolean).join("\n");
 }
 
 function browserTabMatchesQuery(tab, query) {
@@ -7395,9 +7754,47 @@ class BrowserDaemon {
       const snap = await snapshotDomFromSession(send, {
         limit: requestedLimit ? parsePositiveInteger(requestedLimit, "dom-limit") : undefined,
         maxTextChars: requestedMaxText ? parsePositiveInteger(requestedMaxText, "max-text-chars") : undefined,
+        selector: flags.selector,
       });
       return { ...snap, targetId, cdp: true };
     });
+  }
+
+  extractItemsOptions(flags = {}) {
+    const requestedLimit = flags.maxItems ?? flags.limit;
+    const requestedMaxText = flags.maxTextChars ?? flags.maxText ?? flags.textChars;
+    const requestedMinText = flags.minTextChars;
+    const requestedLinkLimit = flags.linkLimit;
+    return {
+      rootSelector: flags.rootSelector ?? flags.selector,
+      itemSelector: flags.itemSelector ?? flags.cardSelector,
+      filter: flags.filter ?? flags.textFilter,
+      limit: requestedLimit ? parsePositiveInteger(requestedLimit, "limit") : undefined,
+      maxTextChars: requestedMaxText ? parsePositiveInteger(requestedMaxText, "max-text-chars") : undefined,
+      minTextChars: requestedMinText ? parsePositiveInteger(requestedMinText, "min-text-chars") : undefined,
+      linkLimit: requestedLinkLimit ? parsePositiveInteger(requestedLinkLimit, "link-limit") : undefined,
+    };
+  }
+
+  async extractItems(flags = {}) {
+    const targetId = await this.resolveCdpTargetId(flags);
+    const options = this.extractItemsOptions(flags);
+    return await this.withCdpPageSession(targetId, async (client, sessionId) => {
+      const send = async (method, params = {}) => await client.request(method, params, { sessionId });
+      await prepareCdpPageSession(send);
+      const result = await extractItemsFromSession(send, options);
+      return { ...result, targetId, cdp: true };
+    });
+  }
+
+  async extractItemsMcp(flags = {}) {
+    const options = this.extractItemsOptions(flags);
+    const result = await this.evaluateFunction(
+      extractItemsMcpFunction(options),
+      { ...flags, mcp: true, fast: false },
+    );
+    const payload = parseEvaluateJsonResult(result, "extract-items");
+    return { ...payload, cdp: false, mcp: true };
   }
 
   async getDomText(format, flags = {}, selector = undefined) {
@@ -7917,6 +8314,10 @@ class BrowserDaemon {
         return await this.handleSnapshotAria(args, flags);
       case "snapshot-dom":
         return await this.handleSnapshotDom(args, flags);
+      case "extract-items":
+      case "items":
+      case "read-items":
+        return await this.handleExtractItems(args, flags);
       case "query-selector":
         requireArgs(command, args, 1);
         return await this.handleQuerySelector(args, flags);
@@ -8563,6 +8964,58 @@ class BrowserDaemon {
         count: snap.nodes.length,
         targetId: snap.targetId,
         cdp: true,
+      },
+    };
+  }
+
+  async handleExtractItems(args, flags = {}) {
+    const nextFlags = { ...flags };
+    if (!nextFlags.rootSelector && !nextFlags.selector && args[0] && !args[0].startsWith("-")) {
+      nextFlags.rootSelector = args[0];
+      nextFlags.selector = args[0];
+    }
+    let payload;
+    if (this.shouldUseFastCdp(nextFlags)) {
+      try {
+        payload = await this.extractItems(nextFlags);
+      } catch (error) {
+        if (!this.shouldFallbackToMcpAfterCdp(nextFlags)) {
+          throw error;
+        }
+      }
+    }
+    if (!payload) {
+      payload = await this.extractItemsMcp(nextFlags);
+    }
+    const outPath = nextFlags.out ?? nextFlags.output;
+    if (outPath) {
+      await writeJson(outPath, payload);
+      return {
+        text: `extract-items output written to ${outPath} (${payload.count ?? payload.items?.length ?? 0} items)`,
+        structuredContent: {
+          command: "extract-items",
+          count: payload.count ?? payload.items?.length ?? 0,
+          targetId: payload.targetId,
+          cdp: Boolean(payload.cdp),
+          mcp: Boolean(payload.mcp),
+          out: outPath,
+        },
+      };
+    }
+    if (nextFlags.json) {
+      return payload;
+    }
+    const text = formatExtractItemsText(payload, nextFlags);
+    return {
+      text,
+      structuredContent: {
+        command: "extract-items",
+        count: payload.count ?? payload.items?.length ?? 0,
+        root: payload.root,
+        rootCandidates: payload.rootCandidates,
+        targetId: payload.targetId,
+        cdp: Boolean(payload.cdp),
+        mcp: Boolean(payload.mcp),
       },
     };
   }
@@ -13104,6 +13557,9 @@ function buildEvalFunction(code) {
   ) {
     return trimmed;
   }
+  if (looksLikeInvokedFunctionExpression(trimmed)) {
+    return `async () => (${code})`;
+  }
   if (needsEvalBlockWrapper(trimmed)) {
     return `async () => { ${code} }`;
   }
@@ -13412,6 +13868,74 @@ async function runSelfTest() {
       selectorSnapshot.lines.some((line) => line.includes('button "Save"')),
     "CDP role snapshot supports selector-scoped AX rendering",
   );
+  let snapshotDomSelectorExpression = "";
+  const selectorDomSnapshot = await snapshotDomFromSession(
+    async (method, params = {}) => {
+      if (method === "Runtime.evaluate") {
+        snapshotDomSelectorExpression = String(params.expression ?? "");
+        return { result: { value: { nodes: [{ ref: "n1", parentRef: null, depth: 0, tag: "main" }] } } };
+      }
+      return {};
+    },
+    { selector: "main", limit: 10, maxTextChars: 120 },
+  );
+  assertSelfTest(selectorDomSnapshot.nodes[0]?.tag === "main", "DOM snapshot returns selector-scoped nodes");
+  assertSelfTest(snapshotDomSelectorExpression.includes("document.querySelector(rootSelector)"), "DOM snapshot scopes root by selector");
+  const parsedExtractItems = parseArgv([
+    "extract-items",
+    "--selector",
+    "main",
+    "--item-selector",
+    "article",
+    "--max-items",
+    "3",
+    "--min-text-chars",
+    "10",
+    "--link-limit",
+    "2",
+  ]);
+  assertSelfTest(parsedExtractItems.command === "extract-items", "parser handles extract-items command");
+  assertSelfTest(parsedExtractItems.flags.selector === "main", "parser handles extract-items root selector");
+  assertSelfTest(parsedExtractItems.flags.itemSelector === "article", "parser handles extract-items item selector");
+  assertSelfTest(parsedExtractItems.flags.maxItems === "3" && parsedExtractItems.flags.limit === "3", "parser maps max-items to limit");
+  assertSelfTest(parsedExtractItems.flags.minTextChars === "10", "parser handles extract-items min text");
+  assertSelfTest(parsedExtractItems.flags.linkLimit === "2", "parser handles extract-items link limit");
+  const parsedExtractRootSelector = parseArgv(["extract-items", "--root-selector", "main"]);
+  assertSelfTest(
+    parsedExtractRootSelector.flags.rootSelector === "main" && parsedExtractRootSelector.flags.selector === "main",
+    "parser mirrors root-selector to selector for extract-items",
+  );
+  assertSelfTest(requiredCapabilitiesForCommand("extract-items").has("extract-items"), "extract-items routes to current daemon capability");
+  let extractItemsExpression = "";
+  const extractedItems = await extractItemsFromSession(
+    async (method, params = {}) => {
+      if (method === "Runtime.evaluate") {
+        extractItemsExpression = String(params.expression ?? "");
+        return {
+          result: {
+            value: {
+              url: "https://example.com/",
+              title: "Demo",
+              root: { selector: "main", itemCount: 1, textChars: 120, score: 50 },
+              rootCandidates: [{ selector: "main", itemCount: 1, textChars: 120, score: 50 }],
+              itemSelector: "article",
+              count: 1,
+              items: [{ index: 1, tag: "article", title: "First", text: "First item", textChars: 10, nestedCandidates: 0, score: 60 }],
+            },
+          },
+        };
+      }
+      return {};
+    },
+    { rootSelector: "main", itemSelector: "article", limit: 3, minTextChars: 10, linkLimit: 2 },
+  );
+  new Function(`return ${extractItemsExpression}`);
+  new Function(`return ${extractItemsMcpFunction({ rootSelector: "main", itemSelector: "article" })}`);
+  assertSelfTest(extractedItems.items[0]?.title === "First", "extract-items returns structured repeated content");
+  assertSelfTest(extractItemsExpression.includes("document.querySelector(selector)"), "extract-items performs root discovery in one page eval");
+  assertSelfTest(extractItemsExpression.includes("querySelectorAll(selector)"), "extract-items uses selector-based item discovery in one page eval");
+  const extractItemsText = formatExtractItemsText(extractedItems, { maxChars: "2000" });
+  assertSelfTest(extractItemsText.includes("extract-items: 1 item from main") && extractItemsText.includes("First item"), "extract-items formatter keeps compact readable output");
   assertSelfTest(normalizeCdpRoleRef("ref=E12") === "e12", "CDP role refs normalize from snapshot syntax");
   assertSelfTest(!isCdpRoleRef("1_2"), "MCP uid refs stay distinct from CDP role refs");
   new Function(`return ${linksReadFunction({ filter: "docs", limit: "3", visible: true })}`)();
@@ -14116,6 +14640,10 @@ async function runSelfTest() {
     buildEvalFunction("(() => 1)()").startsWith("async () => ("),
     "buildEvalFunction wraps invoked arrow expressions",
   );
+  assertSelfTest(
+    buildEvalFunction("(() => {\n  return 1;\n})()").startsWith("async () => ("),
+    "buildEvalFunction preserves multiline invoked expressions",
+  );
 
   const parsedScreenshotLimits = parseArgv(["screenshot", "--max-side", "2000", "--max-bytes=5mb", "--raw-size"]);
   assertSelfTest(parsedScreenshotLimits.flags.maxSide === "2000", "parser handles screenshot max-side");
@@ -14176,6 +14704,9 @@ async function runSelfTest() {
   new Function(`return (${waitForTextFunction("Example Group", 1000)})`);
   const parsedSnapshotDom = parseArgv(["snapshot-dom", "--max-text-chars", "180"]);
   assertSelfTest(parsedSnapshotDom.command === "snapshot-dom" && parsedSnapshotDom.flags.maxTextChars === "180", "parser handles DOM snapshot text budget");
+  const parsedSnapshotDomSelector = parseArgv(["snapshot-dom", "--selector", "main"]);
+  assertSelfTest(parsedSnapshotDomSelector.flags.selector === "main", "parser handles DOM snapshot selector");
+  assertSelfTest(requiredCapabilitiesForCommand("snapshot-dom", ["--selector", "main"]).has("snapshot-dom-selector"), "selector DOM snapshot routes to current daemon capability");
   const parsedSnapshotAria = parseArgv(["snapshot-aria", "--limit", "180"]);
   assertSelfTest(parsedSnapshotAria.command === "snapshot-aria" && parsedSnapshotAria.flags.limit === "180", "parser handles AX snapshot limit");
   const parsedQuerySelector = parseArgv(["query-selector", "main", "--max-html-chars", "1200"]);

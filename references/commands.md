@@ -42,8 +42,10 @@ Read this when you need command syntax beyond the common recipes in `SKILL.md`.
 - On real signed-in profiles, omit `--select` unless follow-up commands must
   immediately target the new tab. `--select` should not imply foregrounding, but
   it can require a controller attach; Chrome may surface an approval/banner over
-  the user's terminal. Use `--front`, `focus`, or `--foreground-until-ready`
-  only for explicit visual handoff.
+  the user's terminal. Default to background open plus `find-tab`/`select-tab`.
+  Use `--front`, `focus`, or `--foreground-until-ready` only for explicit visual
+  handoff, or after background waits/scrolls/extraction fail and foregrounding is
+  required to finish the task.
 - `open <url> --profile <profile-query> --anonymous --session <name> --select`:
   open profile-bound Incognito and keep later commands on the named session.
 - `navigate <url>` / `goto <url>`: navigate the selected page.
@@ -65,18 +67,25 @@ Read this when you need command syntax beyond the common recipes in `SKILL.md`.
   redacted unless `--values` is passed.
 - `links [selector|uid] [--limit <n>] [--filter <text>]
   [--text-filter <text>] [--href-filter <text>] [--visible]`: deduped links.
+- `extract-items [root-selector] [--item-selector <css>|--card-selector <css>]
+  [--limit <n>|--max-items <n>] [--min-text-chars <n>]
+  [--max-text-chars <n>] [--link-limit <n>] [--out <path>]`: one-eval
+  repeated-content reader. It uses the CDP fast path when available and the MCP
+  evaluate fallback otherwise. Use it before broader snapshots for feeds, chats,
+  dashboards, search results, and other nested dynamic lists.
 - `snapshot-aria [--limit <n>] [--out <path>]`: OpenClaw-style AX node
   records over CDP.
-- `snapshot-dom [--limit <n>|--max-nodes <n>] [--max-text-chars <n>]
-  [--out <path>]`: OpenClaw-style DOM element records over CDP.
+- `snapshot-dom [--selector <css>] [--limit <n>|--max-nodes <n>]
+  [--max-text-chars <n>] [--out <path>]`: OpenClaw-style DOM element records
+  over CDP. Use `--selector` when a stable container is known.
 - `query-selector <selector> [--limit <n>] [--max-text-chars <n>]
   [--max-html-chars <n>] [--out <path>]`: OpenClaw-style selector matches
   over CDP.
-- If `snapshot-dom`, `snapshot-aria`, or `query-selector` reports that the
-  daemon does not support the command, run `status` and `sessions`. The command
-  may exist in the current skill script while an older daemon is still running.
-  Do not detour into the OpenClaw source tree or full-page HTML parsing before
-  checking that daemon/script mismatch.
+- If `extract-items`, `snapshot-dom`, `snapshot-aria`, or `query-selector`
+  reports that the daemon does not support the command, run `status` and
+  `sessions`. The command may exist in the current skill script while an older
+  daemon is still running. Do not detour into the OpenClaw source tree or
+  full-page HTML parsing before checking that daemon/script mismatch.
 
 ## Interaction
 
@@ -104,7 +113,8 @@ Read this when you need command syntax beyond the common recipes in `SKILL.md`.
   [--card-selector <css>] [--visual-stable] [--no-skeletons] [--screenshot]`:
   wait for real visible content. This checks DOM visibility, repeated-card
   counts, loading markers, image counts, and optional content stability instead
-  of trusting `readyState` alone.
+  of trusting `readyState` alone. Use `--min-cards` with `--card-selector`
+  unless generic card detection has already been verified for the page.
 
 ## Visual, Debug, And Files
 

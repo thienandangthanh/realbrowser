@@ -52,18 +52,33 @@ or Vivaldi. Use `--json` only when exact `userDataDir`, `profilePath`,
 `open --profile <id> <url>` is the script-owned way to launch a selected UI
 profile. Do not call OS browser launchers directly from an agent. If the
 selected profile exposes no DevTools endpoint, stop and report the blocker.
-Omit `--select` by default when the user is actively working in another app:
-background open plus `find-tab`/`select-tab` keeps foregrounding explicit.
-Use `--select`, `--front`, `focus`, or `--foreground-until-ready` only when the
-task explicitly needs automation selection or visual handoff.
+Default to background opens for real signed-in profiles, especially when the
+user is actively working in another app. Background open plus
+`find-tab`/`select-tab` keeps foregrounding explicit. Omit `--select` on the
+initial open unless follow-up commands must immediately target the new tab. Use
+`--front`, `focus`, or `--foreground-until-ready` only when the task explicitly
+needs visual handoff, or after background waits/scrolls/extraction fail and the
+foreground need is worth interrupting the user.
+
+```bash
+# Do: background open in a signed-in profile.
+"$REALBROWSER_CLI" open --profile "chrome:Default" "https://example.com" --no-fallback --timeout 30000
+"$REALBROWSER_CLI" find-tab "example.com" --all-sessions
+"$REALBROWSER_CLI" select-tab "example.com" --all-sessions
+
+# Do not use unless the user asked to see Chrome or foregrounding is required.
+"$REALBROWSER_CLI" open --profile "chrome:Default" "https://example.com" --no-fallback --front
+```
 
 Browser-level endpoints can include tabs from multiple profiles. After attach,
 verify/select by URL or title before taking action.
 
 ## Foreground-Gated Pages
 
-Default profile opens are background-friendly. If a site does not finish
-hydrating until its tab is active, opt in explicitly:
+Default profile opens are background-friendly. For slow or lazy pages, first try
+background `wait-ready`, scrolls, compact extraction, and targeted `js`/selector
+reads. If a site still does not finish hydrating until its tab is active, opt in
+explicitly:
 
 ```bash
 "$REALBROWSER_CLI" claim https://example.com/items \
@@ -72,6 +87,7 @@ hydrating until its tab is active, opt in explicitly:
   --no-fallback \
   --foreground-until-ready \
   --selector main \
+  --card-selector ".item-card" \
   --min-cards 3 \
   --timeout 20000
 ```
@@ -84,7 +100,9 @@ the user's terminal.
 Use generic readiness criteria:
 
 - `--selector <css>`: a visible container must exist.
-- `--min-cards <n>`: repeated visible page items must be present.
+- `--min-cards <n>`: repeated visible page items must be present; pair it with
+  `--card-selector <css>` unless generic card detection has already been
+  verified for the target page.
 - `--card-selector <css>`: override generic card detection.
 - `--ready-text <text>`: required text must appear.
 - `--visual-stable`: text/card/image/loading-marker counts must settle.

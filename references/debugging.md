@@ -6,7 +6,10 @@ captures, cache/header proof, or large HTML/text extraction.
 ## Choosing A Read Mode
 
 - `observe`: first pass for page state, visible controls, fields, console
-  errors, and recent failed network lines.
+  errors, and recent failed network lines. Do not use it as the primary parser
+  for repeated or nested content on large pages.
+- `extract-items`: compact one-eval repeated-content extraction with root
+  discovery, candidate scoring, link capture, and nested-item suppression.
 - `snapshot --compact`: compact OpenClaw-style role snapshots.
 - `snapshot-aria`: OpenClaw-style AX node records for local inspection.
 - `snapshot-dom`: OpenClaw-style DOM element records for local inspection.
@@ -28,19 +31,30 @@ when content boundaries are ambiguous.
 "$REALBROWSER_CLI" --handle content-read chain '[["wait","Items","--visible","--timeout","15000"],["snapshot","--compact","--max-chars","2000"]]' --return final
 ```
 
-For large dynamic pages such as social feeds, dashboards, chats, search results,
-or virtualized lists:
+For large dynamic pages such as feeds, dashboards, chats, search results, or
+virtualized lists:
 
-1. Reuse or claim the real tab/profile once. If the page does not hydrate until
-   visible, use `--foreground-until-ready` with a selector/card readiness guard.
-2. Start with `snapshot --selector <stable-container> --compact --max-chars
-   2000-3000` when the target area is known; otherwise use
+1. Reuse or claim the real tab/profile once. For real signed-in profiles, keep
+   the open in the background by default. Slow hydration is not enough reason to
+   add `--front` or `--foreground-until-ready`; try background `wait-ready`,
+   scrolls, compact extraction, and targeted `js`/selector reads first. Use
+   foregrounding only when the user asked to see the browser or after background
+   reads fail and activation is required.
+2. Add `--min-cards` only when you also know the repeated-item selector or have
+   already confirmed generic card detection maps to the target content.
+3. If you need page identity, run a tiny `js` expression for URL/title/heading
+   or a tightly capped `observe`; do not start with a broad body read.
+4. Start with `extract-items --selector <stable-container> --limit <n>` when
+   the target area is known; otherwise use `extract-items --limit <n>` and let
+   root discovery pick the best visible container.
+5. Use `snapshot --selector <stable-container> --compact --max-chars 2000-3000`
+   when you need accessible context or refs; otherwise use
    `snapshot --compact --max-chars 2000-3000`.
-3. If item boundaries or nesting are ambiguous, write OpenClaw-style records to
+6. If item boundaries or nesting are ambiguous, write OpenClaw-style records to
    files and inspect them with OS-available local tools. `rg`/`jq` are optional;
    PowerShell `Select-String`/`ConvertFrom-Json` or Node work on Windows.
    Do not dump full-page HTML into stdout.
-4. Use screenshots only for visual confirmation, media-heavy posts, canvas
+7. Use screenshots only for visual confirmation, media-heavy posts, canvas
    content, or when text extraction cannot expose the visual boundary.
 
 ```bash
@@ -50,12 +64,12 @@ mkdir -p "$ARTIFACT_DIR"
   --profile "chrome:Default" \
   --handle-name feed-read \
   --no-fallback \
-  --foreground-until-ready \
-  --selector main \
-  --min-cards 2 \
   --timeout 30000
+"$REALBROWSER_CLI" --handle feed-read wait-ready --selector main --visual-stable --timeout 30000
+"$REALBROWSER_CLI" --handle feed-read extract-items --selector main --limit 5 --max-text-chars 700
+"$REALBROWSER_CLI" --handle feed-read extract-items --selector main --item-selector article --limit 5 --out "$ARTIFACT_DIR/feed-items.json"
 "$REALBROWSER_CLI" --handle feed-read snapshot --compact --max-chars 2500
-"$REALBROWSER_CLI" --handle feed-read snapshot-dom --out "$ARTIFACT_DIR/feed-dom.json" --limit 1800 --max-text-chars 180
+"$REALBROWSER_CLI" --handle feed-read snapshot-dom --selector main --out "$ARTIFACT_DIR/feed-dom.json" --limit 1800 --max-text-chars 180
 "$REALBROWSER_CLI" --handle feed-read snapshot-aria --out "$ARTIFACT_DIR/feed-aria.json" --limit 1800
 "$REALBROWSER_CLI" --handle feed-read query-selector 'main, [role="feed"], [role="article"], article' \
   --out "$ARTIFACT_DIR/feed-elements.json" \
@@ -70,14 +84,19 @@ Search the saved artifacts with whichever local tool is available:
 rg -n "needle|role|article|data-|aria" "$ARTIFACT_DIR"/feed-*.json
 ```
 
+Keep artifact inspection targeted. Broad `rg` over DOM/AX JSON can print large
+ancestor text repeatedly because OpenClaw-style DOM snapshots store bounded
+`innerText` on each node. Prefer heading/candidate extraction first, then a
+small summary around likely item roots.
+
 ```powershell
 $ArtifactDir = Join-Path $env:TEMP "realbrowser-feed"
 Select-String -Path (Join-Path $ArtifactDir "feed-*.json") -Pattern "needle|role|article|data-|aria"
 ```
 
-There is no generic `posts`, `blocks`, or `content-blocks` command. Use the
-generic snapshot/selector substrate above, then reason from the page's actual
-role and DOM records.
+There is no site-specific `posts`, `blocks`, or `content-blocks` shortcut.
+Use the generic `extract-items` reader first, then the snapshot/selector
+substrate above when the page's actual role and DOM records are needed.
 
 If `snapshot-dom`, `snapshot-aria`, or `query-selector` fails with a daemon
 capability error, check `status` before falling back to raw HTML or unrelated
@@ -100,7 +119,8 @@ A more reliable sequence is:
 ARTIFACT_DIR="${TMPDIR:-/tmp}/realbrowser-feed"
 mkdir -p "$ARTIFACT_DIR"
 "$REALBROWSER_CLI" query-selector 'main h1, main h2, main h3, [role="heading"]' --out "$ARTIFACT_DIR/headings.json" --limit 80 --max-text-chars 200 --max-html-chars 500
-"$REALBROWSER_CLI" snapshot-dom --out "$ARTIFACT_DIR/feed-dom.json" --limit 2200 --max-text-chars 180
+"$REALBROWSER_CLI" extract-items --selector main --limit 8 --max-text-chars 700 --out "$ARTIFACT_DIR/items.json"
+"$REALBROWSER_CLI" snapshot-dom --selector main --out "$ARTIFACT_DIR/feed-dom.json" --limit 2200 --max-text-chars 180
 "$REALBROWSER_CLI" snapshot-aria --out "$ARTIFACT_DIR/feed-aria.json" --limit 2200
 ```
 
@@ -117,7 +137,7 @@ ARTIFACT_DIR="${TMPDIR:-/tmp}/realbrowser-read"
 mkdir -p "$ARTIFACT_DIR"
 "$REALBROWSER_CLI" html ".target" --out "$ARTIFACT_DIR/target.html" --max-chars 2000
 "$REALBROWSER_CLI" snapshot-aria --out "$ARTIFACT_DIR/snapshot-aria.json" --limit 1200
-"$REALBROWSER_CLI" snapshot-dom --out "$ARTIFACT_DIR/snapshot-dom.json" --limit 1200 --max-text-chars 220
+"$REALBROWSER_CLI" snapshot-dom --selector ".target" --out "$ARTIFACT_DIR/snapshot-dom.json" --limit 1200 --max-text-chars 220
 "$REALBROWSER_CLI" query-selector ".target" --out "$ARTIFACT_DIR/query-selector.json" --limit 20
 ```
 
