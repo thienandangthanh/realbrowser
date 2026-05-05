@@ -10,10 +10,10 @@ captures, cache/header proof, or large HTML/text extraction.
   for repeated or nested content on large pages.
 - `extract-items`: compact one-eval repeated-content extraction with root
   discovery, candidate scoring, link capture, and nested-item suppression.
-- `snapshot --compact`: compact OpenClaw-style role snapshots.
-- `snapshot-aria`: OpenClaw-style AX node records for local inspection.
-- `snapshot-dom`: OpenClaw-style DOM element records for local inspection.
-- `query-selector`: OpenClaw-style selector match records for local inspection.
+- `snapshot --compact`: compact structured role snapshots.
+- `snapshot-aria`: structured AX node records for local inspection.
+- `snapshot-dom`: structured DOM element records for local inspection.
+- `query-selector`: structured selector match records for local inspection.
 - `screenshot`: visual evidence, canvas/image/card-heavy content, or ambiguous
   visual boundaries.
 - `snapshot --efficient`: clickable/accessible refs for interaction.
@@ -34,27 +34,38 @@ when content boundaries are ambiguous.
 For large dynamic pages such as feeds, dashboards, chats, search results, or
 virtualized lists:
 
-1. Reuse or claim the real tab/profile once. For real signed-in profiles, keep
-   the open in the background by default. Slow hydration is not enough reason to
-   add `--front` or `--foreground-until-ready`; try background `wait-ready`,
-   scrolls, compact extraction, and targeted `js`/selector reads first. Use
-   foregrounding only when the user asked to see the browser or after background
-   reads fail and activation is required.
+1. Reuse or claim the real tab/profile once. For real signed-in profiles, use
+   `--profile` only to initialize or switch the endpoint. After a profile open
+   activates the endpoint session, continue with plain session/handle commands
+   and omit `--profile`. Slow hydration is not enough reason to add `--front` or
+   `--foreground-until-ready`; try background `wait-ready`, scrolls, compact
+   extraction, and targeted `js`/selector reads first. Use foregrounding only
+   when the user asked to see the browser or after background reads fail and
+   activation is required.
 2. Add `--min-cards` only when you also know the repeated-item selector or have
    already confirmed generic card detection maps to the target content.
 3. If you need page identity, run a tiny `js` expression for URL/title/heading
    or a tightly capped `observe`; do not start with a broad body read.
-4. Start with `extract-items --selector <stable-container> --limit <n>` when
-   the target area is known; otherwise use `extract-items --limit <n>` and let
-   root discovery pick the best visible container.
-5. Use `snapshot --selector <stable-container> --compact --max-chars 2000-3000`
+4. Use targeted `find-tab <query> --all-sessions` before broad tab listings.
+   Print full tab lists only when the user needs to choose between candidates,
+   and keep any shown candidates scoped to the requested site or title.
+5. Start with `extract-items --limit <n>` when the target area is not known; it
+   prefers app/content roots such as `main`, `[role="main"]`, and
+   `[role="feed"]` over broad `body` fallback. Use
+   `extract-items --selector <stable-container> --limit <n>` only after the
+   target container is known.
+6. Use `snapshot --selector <stable-container> --compact --max-chars 2000-3000`
    when you need accessible context or refs; otherwise use
    `snapshot --compact --max-chars 2000-3000`.
-6. If item boundaries or nesting are ambiguous, write OpenClaw-style records to
+7. If item boundaries or nesting are ambiguous, write structured records to
    files and inspect them with OS-available local tools. `rg`/`jq` are optional;
    PowerShell `Select-String`/`ConvertFrom-Json` or Node work on Windows.
    Do not dump full-page HTML into stdout.
-7. Use screenshots only for visual confirmation, media-heavy posts, canvas
+8. If the page may contain API keys, auth tokens, customer data, private
+   messages, billing details, or other secrets, prefer `--out` artifacts or
+   targeted redacting `js` over raw stdout. Final responses should include only
+   the requested redacted excerpt or a summary.
+9. Use screenshots only for visual confirmation, media-heavy posts, canvas
    content, or when text extraction cannot expose the visual boundary.
 
 ```bash
@@ -66,6 +77,7 @@ mkdir -p "$ARTIFACT_DIR"
   --no-fallback \
   --timeout 30000
 "$REALBROWSER_CLI" --handle feed-read wait-ready --selector main --visual-stable --timeout 30000
+"$REALBROWSER_CLI" --handle feed-read extract-items --limit 5 --max-text-chars 700
 "$REALBROWSER_CLI" --handle feed-read extract-items --selector main --limit 5 --max-text-chars 700
 "$REALBROWSER_CLI" --handle feed-read extract-items --selector main --item-selector article --limit 5 --out "$ARTIFACT_DIR/feed-items.json"
 "$REALBROWSER_CLI" --handle feed-read snapshot --compact --max-chars 2500
@@ -85,8 +97,8 @@ rg -n "needle|role|article|data-|aria" "$ARTIFACT_DIR"/feed-*.json
 ```
 
 Keep artifact inspection targeted. Broad `rg` over DOM/AX JSON can print large
-ancestor text repeatedly because OpenClaw-style DOM snapshots store bounded
-`innerText` on each node. Prefer heading/candidate extraction first, then a
+ancestor text repeatedly because DOM snapshots store bounded `innerText` on
+each node. Prefer heading/candidate extraction first, then a
 small summary around likely item roots.
 
 ```powershell
@@ -176,7 +188,9 @@ session exists, run the same selected-tab command without adding
 attach. Chrome can still show its own "Allow remote debugging?" prompt, and the
 user must allow that browser prompt if it appears. Treat one browser approval as
 permission for the persistent realbrowser CDP session, then reuse the same
-session for follow-up reads. Use the reattach flag only when intentionally
+session for follow-up reads within the requested target. Browser approval is
+technical attach approval, not permission to broaden into unrelated sensitive
+tabs or actions. Use the reattach flag only when intentionally
 replacing or restarting the controller, or when the CLI explicitly refuses a
 fresh MCP attach:
 
@@ -226,6 +240,8 @@ network rows by default because Chrome DevTools shows those in Console. Use
 
 Console and network artifacts can contain user data, tokens, request payloads,
 or account details. Keep them local unless the user explicitly asks to share.
+For general page/content extraction, apply the same rule: do not paste raw
+stdout containing secrets; redact or summarize the requested content.
 
 Copy-output response rules:
 

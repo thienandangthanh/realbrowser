@@ -185,12 +185,21 @@ Realbrowser is designed to keep Codex token use low:
   screenshots do not each ask Chrome for a separate remote-debugging approval.
   MCP-only commands may still create an MCP controller. Pass `--force` only
   when intentionally creating a duplicate controller.
+- Treat profile selection as setup. After `open --profile ...` reuses or starts
+  an endpoint session, continue with plain session/handle commands and omit
+  `--profile` unless switching profiles. Repeating profile-targeted commands is
+  slower and can make approval or foreground behavior harder to reason about.
 - Use `snapshot --efficient` when clickable `uid` refs are needed.
 - Use `snapshot --labels` or `screenshot --labels` for annotated screenshots.
 - `open` and `newtab` open background tabs by default; pass `--front` only for an explicit visual handoff.
-- For real signed-in profile opens, do not add `--select` by default while the
-  user is working in another app. Open in the background, then use
-  `find-tab`/`select-tab` or a handle if follow-up automation needs a target.
+- For real signed-in profile work, reuse an existing endpoint tab and navigate
+  with CDP when avoiding focus matters. If a specific UI profile must be opened,
+  non-front profile app launches are blocked by default on every desktop OS
+  because the browser may foreground an existing window while handling the new
+  tab. Use `--best-effort-background` only when that focus risk is acceptable,
+  or `--front` for explicit visual handoff. After the profile/session exists,
+  continue on the activated endpoint session or claim a handle if follow-up
+  automation spans multiple steps.
 - Use compact targets from `tabs`/`find-tab` such as `t1` instead of raw target ids.
 - Use `links --filter/--text-filter/--href-filter --visible` when you need a
   small link set instead of full-page link dumps.

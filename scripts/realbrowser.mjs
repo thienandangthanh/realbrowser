@@ -317,7 +317,7 @@ const CLI_COMMAND_GROUPS = [
       { name: "clear-session", aliases: ["session-clear", "clear-active-session"], usage: "realbrowser clear-session [--json]", summary: "Clear the active session pointer." },
       { name: "find-tab", aliases: ["tabs-all", "search-tabs"], usage: "realbrowser find-tab [query] [--browser <key>] [--all-sessions] [--json]", summary: "Search tabs across browser/session inventory." },
       { name: "select-tab", aliases: ["attach-tab"], usage: "realbrowser select-tab <query> [--browser <key>] [--all-sessions] [--front] [--no-activate-session] [--json]", summary: "Select a matching tab for automation.", minArgs: 1 },
-      { name: "open-profile", aliases: ["profile-open"], usage: "realbrowser open-profile <profile-query> <url> [--browser <key>] [--select] [--no-fallback] [--timeout <ms>] [--front|--foreground-until-ready] [--json]", summary: "Open a URL in a specific browser UI profile.", minArgs: 2 },
+      { name: "open-profile", aliases: ["profile-open"], usage: "realbrowser open-profile <profile-query> <url> [--browser <key>] [--select] [--no-fallback] [--timeout <ms>] [--front|--foreground-until-ready|--best-effort-background] [--json]", summary: "Open a URL in a specific browser UI profile.", minArgs: 2 },
       { name: "cleanup-remote-debugging", aliases: ["cleanup"], usage: "realbrowser cleanup-remote-debugging [--allow-attach] [--json]", summary: "Turn off Chrome remote-debugging when possible." },
       { name: "stop", aliases: ["detach"], usage: "realbrowser stop|detach [--all-sessions] [--dismiss-banner] [--cleanup-remote-debugging] [--json]", summary: "Stop realbrowser session state." },
     ],
@@ -326,7 +326,7 @@ const CLI_COMMAND_GROUPS = [
     title: "Navigation and page actions",
     commands: [
       { name: "tabs", usage: "realbrowser tabs [--json]", summary: "List pages in the current session." },
-      { name: "open", aliases: ["newtab"], usage: "realbrowser open <url> [--front|--foreground-until-ready] [--selector <css>] [--min-cards <n>] [--anonymous|--profile <profile-query>] [--browser <key>] [--select] [--no-fallback] [--timeout <ms>] [--json]", summary: "Open a URL.", handle: false, minArgs: 1 },
+      { name: "open", aliases: ["newtab"], usage: "realbrowser open <url> [--front|--foreground-until-ready|--best-effort-background] [--selector <css>] [--min-cards <n>] [--anonymous|--profile <profile-query>] [--browser <key>] [--select] [--no-fallback] [--timeout <ms>] [--json]", summary: "Open a URL.", handle: false, minArgs: 1 },
       { name: "navigate", aliases: ["goto"], usage: "realbrowser navigate <url> [--page <id>]", summary: "Navigate the selected page.", handle: true, minArgs: 1 },
       { name: "back", usage: "realbrowser back [--page <id>]", summary: "Navigate back.", handle: true },
       { name: "forward", usage: "realbrowser forward [--page <id>]", summary: "Navigate forward.", handle: true },
@@ -434,6 +434,9 @@ const CLI_GLOBAL_FLAGS = [
   "--target-id <cdp-target-id>",
   "--select",
   "--front",
+  "--best-effort-background",
+  "--allow-focus-risk",
+  "--allow-profile-launch",
   "--foreground-until-ready",
   "--front-until-ready",
   "--ready-text <text>",
@@ -659,13 +662,16 @@ const BOOLEAN_FLAG_NAMES = new Set([
   "--all-session",
   "--all-sessions",
   "--allow-attach",
+  "--allow-focus-risk",
   "--allow-profile-reattach",
+  "--allow-profile-launch",
   "--allow-real-profile-reattach",
   "--anonymous",
   "--annotate",
   "--attach",
   "--auto-out",
   "--bring-to-front",
+  "--best-effort-background",
   "--clean-profile",
   "--cleanup-remote-debugging",
   "--clear",
@@ -1072,6 +1078,8 @@ function parseArgv(argv) {
       flags.allSessions = true;
     } else if (arg === "--front" || arg === "--bring-to-front") {
       flags.front = true;
+    } else if (arg === "--best-effort-background" || arg === "--allow-focus-risk" || arg === "--allow-profile-launch") {
+      flags.bestEffortBackground = true;
     } else if (arg === "--foreground-until-ready" || arg === "--front-until-ready") {
       flags.foregroundUntilReady = true;
       flags.front = true;
@@ -4446,6 +4454,9 @@ async function openUrlInBrowserProfile(url, profileQuery, flags = {}) {
   if (endpointOpen) {
     return endpointOpen;
   }
+  if (profileAppLaunchNeedsFocusRiskConsent(flags)) {
+    throw new Error(profileAppLaunchFocusRiskMessage(profile, url));
+  }
   const launch = await launchBrowserProfile(profile, url, flags);
   const selected = flags.select
     ? await waitAndSelectBrowserTab(url, {
@@ -4458,6 +4469,7 @@ async function openUrlInBrowserProfile(url, profileQuery, flags = {}) {
     text: [
       `Opened ${url} in ${profile.browserName} profile ${profile.profileDirectory} (${profile.displayName}).`,
       selected?.text,
+      profileLaunchBackgroundCaveat(flags),
       profile.devtoolsHttpUrl
         ? `Debug endpoint detected: ${profile.devtoolsHttpUrl}${profile.devtoolsScope === "browser" ? " (browser-level)" : ""}. Use \`realbrowser --profile "${profile.id}" tabs\` to attach, then verify/select the intended tab.`
         : `No DevToolsActivePort was found for that profile yet. If automation needs existing login state, enable Chrome remote debugging in that profile, then run \`realbrowser --profile "${profile.id}" tabs --no-fallback\`.`,
@@ -4479,6 +4491,16 @@ function readinessPageFromResult(result) {
   return result?.page ?? result?.selected?.page ?? result?.opened?.page ?? null;
 }
 
+function profileEndpointContinuationLines(sessionName, flags = {}) {
+  if (!shouldActivateSession(flags)) {
+    return [];
+  }
+  return [
+    `Activated session: ${sessionName}`,
+    "Continue with plain session commands such as `realbrowser observe`, `realbrowser js ...`, or `realbrowser extract-items ...`; omit `--profile` unless you are switching profiles.",
+  ];
+}
+
 async function foregroundBrowserAppForProfile(profile, flags = {}) {
   if (!(flags.front || flags.foregroundUntilReady) || process.platform !== "darwin") {
     return null;
@@ -4496,6 +4518,30 @@ async function foregroundBrowserAppForProfile(profile, flags = {}) {
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+function profileLaunchBackgroundCaveat(flags = {}) {
+  if (flags.front || flags.foregroundUntilReady) {
+    return "";
+  }
+  return "Best-effort background profile app launch requested; the OS or browser may still foreground an existing window. To avoid focus, reuse an existing endpoint tab and navigate with `goto` when that is acceptable.";
+}
+
+function profileAppLaunchNeedsFocusRiskConsent(flags = {}) {
+  return !flags.front &&
+    !flags.foregroundUntilReady &&
+    flags.bestEffortBackground !== true;
+}
+
+function profileAppLaunchFocusRiskMessage(profile, url) {
+  const profileLabel = [profile?.browserName, profile?.profileDirectory, profile?.displayName ? `(${profile.displayName})` : ""].filter(Boolean).join(" ");
+  return [
+    `Refusing profile app launch for ${profileLabel} because it can steal focus from the active app.`,
+    `Requested URL: ${url}`,
+    "No-focus profile opens must use an existing DevTools endpoint tab plus `goto`, or a browser-level endpoint that can safely create a tab for the selected last-used profile.",
+    "Use `realbrowser find-tab <site> --all-sessions`, `realbrowser select-tab <site> --all-sessions`, then `realbrowser goto <url>` when a reusable tab exists.",
+    "If you accept the focus risk, rerun with `--best-effort-background`; if you explicitly want handoff, use `--front`.",
+  ].join("\n");
 }
 
 async function maybeRunForegroundReadinessForProfileOpen(result, profile, flags = {}) {
@@ -4641,7 +4687,8 @@ async function openUrlViaEndpointSession(endpointSession, profile, url, flags = 
       flags: { front: Boolean(flags.front) },
     })
     : null;
-  if (flags.select && shouldActivateSession(flags)) {
+  const activatedSession = shouldActivateSession(flags);
+  if (activatedSession) {
     await writeActiveSessionName(sessionName);
   }
   return {
@@ -4651,7 +4698,7 @@ async function openUrlViaEndpointSession(endpointSession, profile, url, flags = 
       selected?.text,
       opened?.appActivation?.error ? `App foreground attempt failed: ${opened.appActivation.error}` : opened?.appActivation ? `App foreground attempt: ${opened.appActivation.command} ${opened.appActivation.args?.join(" ") ?? ""}`.trim() : "",
       opened?.ready?.text ? `Readiness:\n${opened.ready.text}` : "",
-      flags.select ? `Activated session: ${sessionName}` : "",
+      ...profileEndpointContinuationLines(sessionName, flags),
       profile.devtoolsHttpUrl
         ? `Debug endpoint reused: ${profile.devtoolsHttpUrl}${profile.devtoolsScope === "browser" ? " (browser-level)" : ""}.`
         : "",
@@ -6061,6 +6108,16 @@ function extractItemsExpressionFromOptions(options = {}) {
     const explicitItemSelector = Boolean(opts.itemSelector);
     const textLength = (el) => clean(el?.innerText || el?.textContent || "").length;
     const itemMatches = (root) => unique(itemSelectors.flatMap((selector) => safeAll(root, selector, 1200)));
+    const rootPriority = (selector, tag, role) => {
+      const selectorText = lower(selector);
+      let score = 0;
+      if (tag === "main" || role === "main" || selectorText.includes("main")) score += 70;
+      if (role === "feed" || selectorText.includes("feed")) score += 90;
+      if (selectorText.includes("content")) score += 25;
+      if (selectorText === "#root") score += 10;
+      if (tag === "body" || tag === "html" || selectorText === "body" || selectorText === "html") score -= 120;
+      return score;
+    };
     const rootCandidates = unique(rootSelectors.map((selector) => {
       try { return { selector, el: document.querySelector(selector) }; } catch { return { selector, el: null }; }
     }).filter((entry) => entry.el && visible(entry.el)));
@@ -6074,7 +6131,10 @@ function extractItemsExpressionFromOptions(options = {}) {
       const role = entry.el.getAttribute("role") || "";
       const tag = entry.el.tagName.toLowerCase();
       const noisy = /^(nav|aside|header|footer)$/i.test(tag) || /navigation|banner|contentinfo|complementary/i.test(role);
-      const score = (itemCount * 16) + Math.min(textChars / 60, 80) + Math.min(rect.height / 80, 20) - (noisy ? 120 : 0);
+      const broadDocumentRoot = tag === "body" || tag === "html";
+      const scoredItemCount = broadDocumentRoot ? Math.min(itemCount, 5) : itemCount;
+      const scoredText = broadDocumentRoot ? Math.min(textChars / 100, 20) : Math.min(textChars / 60, 80);
+      const score = (scoredItemCount * 16) + scoredText + Math.min(rect.height / 80, 20) + rootPriority(entry.selector, tag, role) - (noisy ? 120 : 0);
       return {
         selector: entry.selector,
         tag,
@@ -13934,6 +13994,10 @@ async function runSelfTest() {
   assertSelfTest(extractedItems.items[0]?.title === "First", "extract-items returns structured repeated content");
   assertSelfTest(extractItemsExpression.includes("document.querySelector(selector)"), "extract-items performs root discovery in one page eval");
   assertSelfTest(extractItemsExpression.includes("querySelectorAll(selector)"), "extract-items uses selector-based item discovery in one page eval");
+  assertSelfTest(
+    extractItemsExpression.includes("rootPriority") && extractItemsExpression.includes("Math.min(itemCount, 5)"),
+    "extract-items root discovery favors specific content roots over broad body fallback",
+  );
   const extractItemsText = formatExtractItemsText(extractedItems, { maxChars: "2000" });
   assertSelfTest(extractItemsText.includes("extract-items: 1 item from main") && extractItemsText.includes("First item"), "extract-items formatter keeps compact readable output");
   assertSelfTest(normalizeCdpRoleRef("ref=E12") === "e12", "CDP role refs normalize from snapshot syntax");
@@ -13969,6 +14033,8 @@ async function runSelfTest() {
   assertSelfTest(parsedBackgroundOpen.flags.front !== true, "open defaults to background mode");
   const parsedForegroundOpen = parseArgv(["open", "https://example.com", "--front"]);
   assertSelfTest(parsedForegroundOpen.flags.front === true, "open --front opts into focus");
+  const parsedBestEffortBackground = parseArgv(["open", "https://example.com", "--profile", "chrome:Default", "--best-effort-background"]);
+  assertSelfTest(parsedBestEffortBackground.flags.bestEffortBackground === true, "parser handles best-effort background profile launch opt-in");
   const parsedForegroundReadyOpen = parseArgv([
     "open",
     "https://example.com",
@@ -14309,6 +14375,14 @@ async function runSelfTest() {
     !canOpenProfileUrlViaEndpoint({ devtoolsScope: "browser", devtoolsHttpUrl: "http://127.0.0.1:9222", lastUsed: false }),
     "browser-level endpoint does not pretend to choose a non-last-used Chrome profile",
   );
+  assertSelfTest(
+    profileEndpointContinuationLines("cdp-127-0-0-1-9222", {}).join("\n").includes("omit `--profile`"),
+    "profile endpoint opens steer follow-up work to the reused session",
+  );
+  assertSelfTest(
+    profileEndpointContinuationLines("cdp-127-0-0-1-9222", { activateSession: false }).length === 0,
+    "profile endpoint continuation respects no-activate-session",
+  );
   const macBackgroundLaunch = macBrowserProfileLaunchCommand(
     { source: { appName: "Google Chrome" } },
     ["--profile-directory=Default", "--new-tab", "https://example.com"],
@@ -14317,6 +14391,17 @@ async function runSelfTest() {
   assertSelfTest(
     macBackgroundLaunch[0] === "open" && macBackgroundLaunch[1][0] === "-g",
     "macOS profile launches default to background mode",
+  );
+  assertSelfTest(
+    profileLaunchBackgroundCaveat({ bestEffortBackground: true }).includes("may still foreground") &&
+      profileLaunchBackgroundCaveat({ front: true }) === "",
+    "best-effort background profile launch caveat is scoped to non-front profile opens",
+  );
+  assertSelfTest(
+    profileAppLaunchNeedsFocusRiskConsent({}) &&
+      !profileAppLaunchNeedsFocusRiskConsent({ bestEffortBackground: true }) &&
+      !profileAppLaunchNeedsFocusRiskConsent({ front: true }),
+    "profile app launches require explicit focus-risk consent",
   );
   const macFrontLaunch = macBrowserProfileLaunchCommand(
     { source: { appName: "Google Chrome" } },

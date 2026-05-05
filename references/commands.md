@@ -36,16 +36,17 @@ Read this when you need command syntax beyond the common recipes in `SKILL.md`.
 - `open|claim|goto ... --foreground-until-ready`: explicitly activate the tab
   and wait for content readiness. Use for focus-gated pages only.
 - `open-profile <profile-query> <url> [--select] [--no-fallback]
-  [--timeout <ms>]`: open a URL in a selected browser UI profile.
-- `open <url> --profile <profile-query> [--select]`: launch/select a profile,
-  then attach to the matching page.
-- On real signed-in profiles, omit `--select` unless follow-up commands must
-  immediately target the new tab. `--select` should not imply foregrounding, but
-  it can require a controller attach; Chrome may surface an approval/banner over
-  the user's terminal. Default to background open plus `find-tab`/`select-tab`.
-  Use `--front`, `focus`, or `--foreground-until-ready` only for explicit visual
-  handoff, or after background waits/scrolls/extraction fail and foregrounding is
-  required to finish the task.
+  [--timeout <ms>]`: open a URL in a selected browser UI profile when a safe
+  endpoint route exists.
+- `open <url> --profile <profile-query> [--select]`: use an existing endpoint
+  route for a profile, then attach to the matching page.
+- On real signed-in profiles, prefer an existing endpoint tab plus `goto` when
+  avoiding focus matters. Profile-specific app launches can still foreground the
+  browser on desktop OSes, so non-front launches are blocked by default. Pass
+  `--best-effort-background` only when that focus risk is acceptable, or
+  `--front` for explicit visual handoff. Omit `--select` unless follow-up
+  commands must immediately target the new tab; `--select` should not imply
+  foregrounding, but it can require a controller attach.
 - `open <url> --profile <profile-query> --anonymous --session <name> --select`:
   open profile-bound Incognito and keep later commands on the named session.
 - `navigate <url>` / `goto <url>`: navigate the selected page.
@@ -73,18 +74,17 @@ Read this when you need command syntax beyond the common recipes in `SKILL.md`.
   repeated-content reader. It uses the CDP fast path when available and the MCP
   evaluate fallback otherwise. Use it before broader snapshots for feeds, chats,
   dashboards, search results, and other nested dynamic lists.
-- `snapshot-aria [--limit <n>] [--out <path>]`: OpenClaw-style AX node
-  records over CDP.
+- `snapshot-aria [--limit <n>] [--out <path>]`: structured AX node records over
+  CDP.
 - `snapshot-dom [--selector <css>] [--limit <n>|--max-nodes <n>]
-  [--max-text-chars <n>] [--out <path>]`: OpenClaw-style DOM element records
-  over CDP. Use `--selector` when a stable container is known.
+  [--max-text-chars <n>] [--out <path>]`: structured DOM element records over
+  CDP. Use `--selector` when a stable container is known.
 - `query-selector <selector> [--limit <n>] [--max-text-chars <n>]
-  [--max-html-chars <n>] [--out <path>]`: OpenClaw-style selector matches
-  over CDP.
+  [--max-html-chars <n>] [--out <path>]`: structured selector matches over CDP.
 - If `extract-items`, `snapshot-dom`, `snapshot-aria`, or `query-selector`
   reports that the daemon does not support the command, run `status` and
   `sessions`. The command may exist in the current skill script while an older
-  daemon is still running. Do not detour into the OpenClaw source tree or
+  daemon is still running. Do not detour into unrelated source trees or
   full-page HTML parsing before checking that daemon/script mismatch.
 
 ## Interaction
@@ -192,7 +192,7 @@ Read this when you need command syntax beyond the common recipes in `SKILL.md`.
   `--no-activate-session`, `--all-sessions`.
 - `--backend real|dev`, `--browser-url <url>`, `--cdp-url <url>`,
   `--profile <profile-query>`, `--browser <key>`, `--select`, `--front`,
-  `--foreground-until-ready`.
+  `--foreground-until-ready`, `--best-effort-background`.
 - `--anonymous`, `--headless`, `--headed`, `--keep-anonymous`.
 - `--force`: only where documented, especially handle replacement.
 - `--restart-daemon` / `--reload-daemon`, `--allow-profile-reattach`.

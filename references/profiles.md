@@ -16,6 +16,12 @@ When existing cookies/login state matters, fallback is not acceptable. Use
 `--no-fallback` or `REALBROWSER_NO_FALLBACK=1`, and stop if no DevTools endpoint
 is available.
 
+A named profile or current-tab request is permission to inspect and navigate
+within the requested target only. Do not use the profile as a license to browse
+unrelated sensitive tabs, private messages, admin/payment pages, or account
+settings. Ask before sends, submits, purchases, deletes, permission grants,
+security/account changes, or broad access outside the named target.
+
 Chrome may show "Allow remote debugging?" when a new controller attaches to a
 real signed-in profile. Reuse the existing approved session instead of
 restarting daemons. When Chrome remote debugging is already enabled or the
@@ -49,22 +55,44 @@ or Vivaldi. Use `--json` only when exact `userDataDir`, `profilePath`,
 "$REALBROWSER_CLI" observe --max-chars 2000
 ```
 
-`open --profile <id> <url>` is the script-owned way to launch a selected UI
-profile. Do not call OS browser launchers directly from an agent. If the
-selected profile exposes no DevTools endpoint, stop and report the blocker.
-Default to background opens for real signed-in profiles, especially when the
-user is actively working in another app. Background open plus
-`find-tab`/`select-tab` keeps foregrounding explicit. Omit `--select` on the
-initial open unless follow-up commands must immediately target the new tab. Use
+`open --profile <id> <url>` is the script-owned way to initialize or switch a
+selected UI profile. Do not call OS browser launchers directly from an agent. If
+the selected profile exposes no DevTools endpoint, stop and report the blocker.
+Default to the least disruptive route for real signed-in profiles, especially
+when the user is actively working in another app. Reusing an existing endpoint
+tab and navigating it with CDP is the lowest-focus path. A profile-specific OS
+app launch can foreground an existing browser window while handling the new tab.
+For that reason, non-front profile app launches are blocked by default on every
+desktop OS. Use `--best-effort-background` only when the user accepts the focus
+risk, or `--front` when the user explicitly wants visual handoff. On macOS,
+best-effort background uses `open -g`, but that is not a hard no-focus
+guarantee.
+
+Profile selection is setup, not the steady-state execution path. When a
+profile-routed open can reuse an existing endpoint session, realbrowser
+activates that session and prints a continuation hint. Follow-up work should use
+plain commands such as `realbrowser observe`, `realbrowser js ...`, or
+`realbrowser extract-items ...`; omit `--profile` unless switching profiles.
+This keeps one approved CDP controller warm and avoids repeatedly taking the
+profile-targeted branch.
+
+Omit `--select` on the initial profile open unless follow-up commands must
+immediately target a known existing tab rather than the newly opened target. Use
 `--front`, `focus`, or `--foreground-until-ready` only when the task explicitly
 needs visual handoff, or after background waits/scrolls/extraction fail and the
 foreground need is worth interrupting the user.
 
 ```bash
-# Do: background open in a signed-in profile.
-"$REALBROWSER_CLI" open --profile "chrome:Default" "https://example.com" --no-fallback --timeout 30000
+# Do: reuse the endpoint after the profile/session exists.
 "$REALBROWSER_CLI" find-tab "example.com" --all-sessions
 "$REALBROWSER_CLI" select-tab "example.com" --all-sessions
+"$REALBROWSER_CLI" goto "https://example.com"
+
+# If no reusable tab exists and a specific UI profile is required, opt into the
+# focus-risk path explicitly.
+"$REALBROWSER_CLI" open --profile "chrome:Default" "https://example.com" --no-fallback --best-effort-background --timeout 30000
+"$REALBROWSER_CLI" observe --max-chars 2000
+"$REALBROWSER_CLI" extract-items --limit 5 --max-text-chars 700
 
 # Do not use unless the user asked to see Chrome or foregrounding is required.
 "$REALBROWSER_CLI" open --profile "chrome:Default" "https://example.com" --no-fallback --front

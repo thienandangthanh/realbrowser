@@ -1,6 +1,6 @@
 ---
 name: realbrowser
-description: Use when you need fast local real-browser automation from Codex, including listing/selecting Chrome profiles, named browser sessions, anonymous clean-state sessions, OpenClaw-style role/DOM extraction for large dynamic pages, network/performance capture, opening tabs, taking snapshots or screenshots, clicking, typing, filling forms, reading console/network data, or debugging localhost/browser UI with Chrome DevTools MCP.
+description: Use when you need fast local real-browser automation from Codex, including listing/selecting Chrome profiles, named browser sessions, anonymous clean-state sessions, structured role/DOM extraction for large dynamic pages, network/performance capture, opening tabs, taking snapshots or screenshots, clicking, typing, filling forms, reading console/network data, or debugging localhost/browser UI with Chrome DevTools MCP.
 ---
 
 # Realbrowser
@@ -37,6 +37,19 @@ paths to `$env:TEMP`/`%TEMP%` and use PowerShell `Select-String` /
 Do not run `doctor` by default. Use it when setup is uncertain or a browser
 command fails.
 
+## Operating Contract
+
+Start by classifying the browser scope: current/existing tab, signed-in profile,
+anonymous public page, console/network debug, screenshot, form interaction, or
+repeated-content extraction. Attach with the least disruption that satisfies
+that scope, verify the target with a small URL/title/visible-text read, and keep
+the first content read bounded. If the user names a profile, current tab, or
+logged-in state, that is permission to inspect and navigate within the requested
+target; it is not permission to inspect unrelated sensitive tabs or perform
+sensitive actions. Ask before submits, sends, purchases, deletes,
+security/account changes, permission grants, or broad access outside the named
+target.
+
 ## Task Router
 
 For a simple public screenshot or responsive-capture request, do not read the
@@ -63,10 +76,34 @@ new tab:
 "$REALBROWSER_CLI" js '({href: location.href, title: document.title, readyState: document.readyState})'
 ```
 
+For a signed-in profile browse/read request, keep the first pass generic and
+tight. Use targeted `find-tab` queries before printing broad tab lists. If a
+real-profile endpoint session already exists and an existing same-site tab can
+be safely reused, select that tab and `goto` the requested URL; this is the
+lowest-focus path because it stays inside CDP. Use `open --profile ...` only
+when you must initialize/switch a specific UI profile or no reusable target
+exists. Non-front profile app launches are blocked by default because browsers
+can steal focus from the user's active app on desktop OSes; use
+`--best-effort-background` only when the user accepts that focus risk. Verify
+with one tiny
+URL/title/visible-text read, then extract only the requested content:
+
+```bash
+"$REALBROWSER_CLI" profiles --active
+"$REALBROWSER_CLI" find-tab "<site-or-title-fragment>" --all-sessions
+"$REALBROWSER_CLI" open --profile "<profile-id>" "<url>" --no-fallback --timeout 30000
+"$REALBROWSER_CLI" find-tab "<site-or-title-fragment>" --all-sessions
+"$REALBROWSER_CLI" select-tab "<site-or-title-fragment>" --all-sessions
+"$REALBROWSER_CLI" goto "<url>" --timeout 30000
+"$REALBROWSER_CLI" js '({href: location.href, title: document.title, readyState: document.readyState, text: document.body?.innerText?.slice(0, 500) || ""})'
+```
+
 Use the matching later section only when needed:
 
 - Console output or DevTools logs: read "Console Output Copy Fast Path".
-- Large dynamic pages or DOM extraction: read "OpenClaw-Style Extraction".
+- Large dynamic pages or repeated-content extraction: use "Large Dynamic Page
+  Extraction" before broad `observe`, then read `references/debugging.md` only
+  if boundaries are ambiguous.
 - Login, custom devices, full-page regions, or clipping risk: read
   "Screenshot Task Fast Path" and then `references/screenshots.md` if needed.
 - Profile cookies or signed-in browser state: read `references/profiles.md`.
@@ -92,7 +129,7 @@ REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
 "$REALBROWSER_CLI" console --preserve --limit 80
 ```
 
-## OpenClaw-Style Extraction
+## Large Dynamic Page Extraction
 
 For large dynamic pages such as feeds, chats, search results, dashboards, or
 virtualized lists, use compact role/DOM readers instead of full-page HTML stdout.
@@ -105,6 +142,7 @@ nested item boundaries, stale daemon handling, or selector strategy, read
 `references/debugging.md`.
 
 ```bash
+"$REALBROWSER_CLI" extract-items --limit 5 --max-text-chars 700
 "$REALBROWSER_CLI" extract-items --selector main --limit 5 --max-text-chars 700
 "$REALBROWSER_CLI" extract-items --selector main --item-selector article --limit 5 --out "$ARTIFACT_DIR/page-items.json"
 "$REALBROWSER_CLI" snapshot --selector main --compact --max-chars 2500
@@ -116,7 +154,10 @@ nested item boundaries, stale daemon handling, or selector strategy, read
 
 For huge or noisy pages, do not print or grep broad artifact matches into the
 conversation. First identify a stable root or candidate headings, then extract a
-small JSON/text summary with `jq`, Node, or a targeted `js` expression.
+small JSON/text summary with `jq`, Node, or a targeted `js` expression. When a
+page may contain API keys, auth tokens, customer data, private messages, billing
+details, or other secrets, avoid raw stdout: use `--out` artifacts for local
+inspection or a targeted `js` expression that redacts before returning text.
 
 ## Screenshot Task Fast Path
 
@@ -144,8 +185,12 @@ risk, read `references/screenshots.md`.
   `sessions` and `find-tab <query> --all-sessions`, then verify URL/title before
   acting.
 - Existing user cookies, a named Chrome profile, or `--no-fallback`: read
-  `references/profiles.md`. Real signed-in profile opens are background-first;
-  do not foreground Chrome unless the user asked for visual handoff.
+  `references/profiles.md`. Treat profile selection as setup/discovery. Once a
+  real-profile endpoint session exists, continue with plain session/handle
+  commands and omit `--profile` unless switching profiles. Real signed-in
+  profile opens should not steal focus: profile app launches without `--front`
+  are blocked unless `--best-effort-background` explicitly accepts the focus
+  risk. Do not request foregrounding unless the user asked for visual handoff.
 - Focus-gated or lazy pages that do not hydrate in a background tab:
   first try background `wait-ready`, scrolls, compact extraction, and targeted
   `js`/selector reads. Use explicit foregrounding only after those fail or when
@@ -171,21 +216,24 @@ risk, read `references/screenshots.md`.
    context, or follow-up browser state.
 2. Open or claim one stable target. Use `--session <name>` for isolated flows
    and `claim ... --handle-name <task>` for longer workflows.
-   For real signed-in profiles, default to background open:
-   `open --profile "<id>" "<url>" --no-fallback`. Omit `--select` on the
-   initial open unless immediate automation selection is required; select or
-   claim after the tab exists. Do not add `--front`,
+   For real signed-in profiles, first reuse the active endpoint session when
+   one exists: `open "<url>"`, `goto "<url>"`, `select-tab ...`, or `claim ...`
+   without `--profile`. Use `open --profile "<id>" "<url>" --no-fallback` only
+   to initialize or switch the profile endpoint; after it activates a session,
+   continue with plain `realbrowser ...` commands. Omit `--select` on the
+   initial profile open unless immediate automation selection is required.
+   Do not add `--front`,
    `focus <target-or-url-fragment>`, or `--foreground-until-ready` just because a
    page is slow or lazy. Use foregrounding only for explicit visual handoff, or
    after background waits/scrolls/extraction fail and the foreground need is
    worth interrupting the user.
 3. Read before acting. Use `observe --max-chars 1500-2500` for page state,
    controls, and quick sanity checks. For large feeds, chats, search results,
-   dashboards, virtualized lists, or nested repeated items, start with the
-   OpenClaw-style extraction path (`extract-items --selector <css>`, then
-   `snapshot --compact`, `snapshot-dom --selector <css> --out` /
-   `snapshot-aria --out` / `query-selector --out` as needed) and keep large
-   artifacts out of stdout.
+   dashboards, virtualized lists, tables, or nested repeated items, start with
+   the large dynamic page extraction path (`extract-items --limit <n>`, then
+   selector-scoped `snapshot`, `snapshot-dom`, `snapshot-aria`, or
+   `query-selector --out` only as needed) and keep large artifacts out of
+   stdout.
    Use `snapshot --efficient` when current `uid` or CDP `[ref=eN]` refs are
    needed.
 4. Act only on current refs. After navigation, modal changes, form submission,
@@ -244,6 +292,7 @@ Use this for verified desktop/tablet/mobile PNG evidence.
 ### 4. Existing Tab Or Profile
 
 ```bash
+"$REALBROWSER_CLI" sessions
 "$REALBROWSER_CLI" find-tab app.example --all-sessions
 "$REALBROWSER_CLI" select-tab app.example --all-sessions
 "$REALBROWSER_CLI" observe --max-chars 2000
@@ -252,12 +301,15 @@ Use this for verified desktop/tablet/mobile PNG evidence.
 If cookies in a specific Chrome profile matter, read `references/profiles.md`
 before opening or attaching.
 
-For real signed-in profiles, keep the first open in the background:
+For real signed-in profiles, reuse an existing endpoint tab when possible. If
+you must open a specific UI profile through the OS launcher, use `--front` for
+explicit visual handoff or `--best-effort-background` only when focus risk is
+acceptable. Then omit `--profile` for follow-up commands:
 
 ```bash
 "$REALBROWSER_CLI" open --profile "chrome:Default" "https://app.example/items" --no-fallback --timeout 30000
-"$REALBROWSER_CLI" find-tab "app.example/items" --all-sessions
-"$REALBROWSER_CLI" select-tab "app.example/items" --all-sessions
+"$REALBROWSER_CLI" observe --max-chars 2000
+"$REALBROWSER_CLI" extract-items --limit 5 --max-text-chars 700
 ```
 
 Do not add `--front`, `focus`, or `--foreground-until-ready` unless the user
@@ -293,33 +345,48 @@ body conclusions.
 
 - Cap routine reads: `observe --max-chars 2000`, `console --errors --limit 20`,
   `network --failed --limit 30`, `snapshot --compact --max-chars 2000`.
+- Use a tiny `js` expression for URL/title/ready-state/heading verification
+  when full page state is unnecessary.
+- Prefer targeted `find-tab <query> --all-sessions` over broad `tabs` output.
+  Print full tab lists only when candidate disambiguation is required, and then
+  keep the list scoped to the user's target.
 - On CDP-backed real-profile sessions, `snapshot --compact` reads the
-  OpenClaw-style role snapshot substrate first.
-- Use `snapshot-aria` when you need OpenClaw-style AX node records.
+  structured role snapshot substrate first.
+- Use `snapshot-aria` when you need structured AX node records.
 - On CDP-backed real-profile sessions, `text`, `html`, and `query-selector`
-  use OpenClaw-style `getDomText` / `querySelector` primitives.
-- Use `extract-items --selector <root> --limit <n>` before broad snapshots when
-  the task is to read repeated content. It does root discovery, candidate
-  scoring, and nested-item suppression in one page eval.
+  use structured `getDomText` / `querySelector` primitives.
+- Use `extract-items --limit <n>` before broad snapshots when the task is to
+  read repeated content and the root is not yet known. It favors specific roots
+  such as `main`, `[role="main"]`, and `[role="feed"]` over broad `body`
+  fallback, then does candidate scoring and nested-item suppression in one page
+  eval. Add `--selector <root>` only after the stable content container is known.
 - Use `snapshot-dom --selector <css> --out <path>` when a stable container is
   known; omit `--selector` only when full-document DOM records are intentional.
 - Use `screenshot` for visual evidence and `html --out <path>` for
   selector/debug work, not as the default page parser.
 - Do not use `--full-stdout` for large or unknown output. Prefer artifacts and
   targeted local inspection.
-- For social/app feeds, chats, search results, or nested dynamic lists, do not
-  treat full-page HTML as the parser and do not rely on removed semantic
-  shortcuts such as `posts`, `blocks`, or `content-blocks`. Use
-  `extract-items`, `snapshot --compact`, `snapshot-aria`,
+- For feeds, chats, search results, dashboards, tables, or nested dynamic
+  lists, do not treat full-page HTML as the parser and do not rely on
+  site-specific shortcuts such as `posts`, `blocks`, or `content-blocks`. Use
+  `extract-items`, selector-scoped snapshots, `snapshot-aria`,
   `snapshot-dom --selector <css> --out`, and `query-selector --out`; use
   screenshots only to verify visual boundaries or media-heavy content. Slow
   hydration is not by itself a reason to foreground a signed-in profile tab;
   try background waits, scrolls, compact extraction, and targeted `js` first.
+- If a command unexpectedly prints huge output or truncates, stop that read path
+  and switch to `--out` artifacts plus targeted local inspection.
+- If extracted content includes or may include secrets, credentials, private
+  messages, or account data, keep raw output local and return only a redacted
+  excerpt or summary.
 - Use `--raw-size` only when exact browser pixels matter. Default screenshots
   are normalized for agent use.
 
 ## Safety Notes
 
 Chrome DevTools MCP/CDP can inspect and modify browser state. Avoid sensitive
-tabs unless the user explicitly wants that. The local daemon binds to
-`127.0.0.1` and uses the bearer token in the state file for command calls.
+tabs unless the user explicitly wants that. A request to use a signed-in profile
+or current tab permits inspection within the named target, not unrelated inboxes,
+admin pages, payments, private chats, or account settings. The local daemon
+binds to `127.0.0.1` and uses the bearer token in the state file for command
+calls.
