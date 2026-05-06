@@ -1,454 +1,305 @@
 ---
 name: realbrowser
-description: Use when you need fast local real-browser automation from Codex, including listing/selecting Chrome profiles, named browser sessions, anonymous clean-state sessions, structured role/DOM extraction for repeated, lazy, or nested page content, network/performance capture, opening tabs, taking snapshots or screenshots, clicking, typing, filling forms, reading console/network data, or debugging localhost/browser UI with Chrome DevTools MCP.
+description: Use for fast target-first local Chrome/Chromium browser control with stable labeled tabs, signed-in profiles, anonymous sessions, compact reads, screenshots, console logs, network request/response capture, root-scoped page actions, uploads, guarded submits, downloads, and PDF export.
 ---
 
 # Realbrowser
 
-Use this skill for local browser checks when a real or managed Chrome session is
-more direct than generic browser tooling. Keep the first pass small: read the
-task router below, run the matching recipe when it covers the request, and open
-later sections or references only when the task needs their detail.
+Use `realbrowser` when a task needs the user's local browser state or a fast
+managed browser. The contract is target-first: resolve or create one tab target,
+then pass `-t <label>` or `--handle` on every read, action, screenshot, console,
+network, state, dialog, performance, download, or export command.
 
-## Quick Start
+The design is site-agnostic and OS-portable. Do not encode site names, UI copy,
+or language-specific picker labels into the workflow. Use generic browser
+state: profile/context, target, active root, refs, accessibility labels,
+structural selectors, viewport/topmost checks, network entries, downloads, and
+artifacts. Site-specific CSS or text is only a last-mile selector chosen after a
+scoped read proves it is correct for the current page.
 
-Use the wrapper that matches the host OS:
+## Fast Start
+
+macOS/Linux:
 
 ```bash
-# macOS/Linux shells
-REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
-"$REALBROWSER_CLI" open https://example.com --anonymous --session task --select --timeout 20000
-"$REALBROWSER_CLI" --session task observe --max-chars 2000
+REALBROWSER="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
 ```
+
+Windows PowerShell:
 
 ```powershell
-# Windows PowerShell
-$RealbrowserCli = Join-Path $HOME ".codex\skills\realbrowser\scripts\realbrowser.ps1"
-& $RealbrowserCli open https://example.com --anonymous --session task --select --timeout 20000
-& $RealbrowserCli --session task observe --max-chars 2000
+$Realbrowser = Join-Path $HOME ".codex\skills\realbrowser\scripts\realbrowser.ps1"
 ```
 
-On Windows `cmd.exe`, use `scripts\realbrowser.cmd`; `node
-scripts/realbrowser.mjs` is the portable fallback on any OS. Examples below use
-POSIX shell syntax and `/tmp` output paths for brevity. On Windows, translate
-paths to `$env:TEMP`/`%TEMP%` and use PowerShell `Select-String` /
-`ConvertFrom-Json` or Node when `rg`/`jq` are unavailable.
-
-Do not run `doctor` by default. Use it when setup is uncertain or a browser
-command fails.
-
-## Operating Contract
-
-Start by classifying the browser scope: current/existing tab, signed-in profile,
-anonymous public page, console/network debug, screenshot, form interaction, or
-repeated-content extraction. Attach with the least disruption that satisfies
-that scope, verify the target with a small URL/title/visible-text read, and keep
-the first content read bounded. Treat target-changing browser commands as
-sequential: do not parallelize `select-tab`, `open`, `goto`, clicks, or typing
-with page reads such as `js`, `observe`, snapshots, console capture, or
-screenshots. Verify the selected URL/title after the target changes, then read;
-otherwise a read can hit a transient browser surface, stale tab, or wrong
-profile page. If the user names a profile, current tab, or logged-in state, that
-is permission to inspect and navigate within the requested target; it is not
-permission to inspect unrelated sensitive tabs or perform sensitive actions. Ask
-before submits, sends, purchases, deletes, security/account changes, permission
-grants, or broad access outside the named target.
-
-## Browser Inspection Loop
-
-Use this loop for general browsing work before picking a recipe:
-
-1. Classify the scope: existing tab/profile, anonymous page, screenshot,
-   console/network, form/action, single detail read, or structured content.
-2. Acquire one stable target with the least disruption. Prefer existing
-   sessions/tabs when the prompt implies current state or a named profile.
-3. Verify cheaply with URL, title, ready state, and a small visible-text sample.
-4. Preserve state when practical: note the selected tab, URL, scroll position,
-   filter/sort, focused field, or modal before changing it.
-5. Choose the smallest reader that answers the question. Use the reader ladder
-   below instead of starting with full HTML or broad snapshots.
-6. Refine boundaries before trusting extracted content. Confirm the root,
-   direct children, current sort/filter, and whether unrelated nested content is
-   mixed in.
-7. Act/read on current refs only, then report the result with context such as
-   signed-in profile state, current visible order, current filters, or anonymous
-   public state. Restore inspection-only state when practical.
-
-For generic "check/read this page" tasks, the fast path is:
-
-1. Resolve scope: public page, existing signed-in tab, or new signed-in
-   navigation.
-2. Find and select by the most specific URL or route available; use title only
-   when URL matching is not enough.
-3. Verify `href`, `title`, and `readyState`.
-4. Run one targeted extraction for the requested answer.
-5. If you click or change filters, verify the selected state before extracting
-   again.
-
-Reader ladder:
-
-- URL/title/ready/scroll/account hints: tiny `js`.
-- Visible page state and quick controls: bounded `observe`.
-- Forms, buttons, labels, and accessible controls: `snapshot-aria`.
-- Repeated or nested content: `extract-items`, then selector-scoped records.
-- Ambiguous DOM boundaries: `query-selector --out` or `snapshot-dom --out`.
-- Exact clicking/typing refs: `snapshot --efficient`.
-- Visual, canvas, iframe, media-heavy, clipped, or responsive checks:
-  screenshots.
-- Console or network evidence: console/network capture commands; do not reload
-  unless the user asks to reproduce load-time output.
-
-## Task Router
-
-For a simple public screenshot or responsive-capture request, do not read the
-console/debug/profile sections first and do not do memory/history lookup unless
-the user refers to an existing tab, profile, credentials, prior browser state, or
-a previous failed attempt. Use a clean anonymous session, cap text reads, capture
-the images, inspect them, and detach the dedicated session:
+Anonymous page:
 
 ```bash
-REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
-"$REALBROWSER_CLI" open https://site.example --anonymous --session site-shot --select --timeout 30000
-"$REALBROWSER_CLI" --session site-shot observe --max-chars 1200
-"$REALBROWSER_CLI" --session site-shot device-screenshots /tmp/site-shot
-"$REALBROWSER_CLI" --session site-shot detach
+"$REALBROWSER" tab ensure https://example.com --anonymous --session check --label page --background
+"$REALBROWSER" read observe -t page --anonymous --session check
 ```
 
-If the wording implies an existing target, verify and reuse it before opening a
-new tab. Run selection and verification as ordered steps; do not combine them
-with parallel tool calls:
+Visible Chrome Incognito page:
 
 ```bash
-"$REALBROWSER_CLI" sessions
-"$REALBROWSER_CLI" find-tab "<url-or-title-fragment>" --all-sessions
-"$REALBROWSER_CLI" select-tab "<url-or-title-fragment>" --all-sessions
-"$REALBROWSER_CLI" js '({href: location.href, title: document.title, readyState: document.readyState})'
+"$REALBROWSER" tab ensure https://example.com --anonymous --session private --label page --front --incognito
+"$REALBROWSER" read observe -t page --anonymous --session private
 ```
 
-For a signed-in profile browse/read request, keep the first pass generic and
-tight. Use targeted `find-tab` queries before printing broad tab lists. If a
-real-profile endpoint session already exists and an existing same-site tab can
-be safely reused, select that tab and `goto` the requested URL; this is the
-lowest-focus path because it stays inside CDP. Use `open --profile ...` only
-when you must initialize/switch a specific UI profile or no reusable target
-exists. Non-front profile app launches are blocked by default because browsers
-can steal focus from the user's active app on desktop OSes; use
-`--best-effort-background` only when the user accepts that focus risk. Verify
-with one tiny
-URL/title/visible-text read, then extract only the requested content:
+`--anonymous` means isolated temporary browser state, not network anonymity and
+not Chrome's visible Incognito UI. Add `--incognito` or `--private` when the user
+explicitly wants a visible Chrome Incognito window. Incognito/private mode is
+only for anonymous managed sessions, not signed-in profiles.
+
+Signed-in profile or existing Chrome:
 
 ```bash
-"$REALBROWSER_CLI" profiles --active
-"$REALBROWSER_CLI" find-tab "<site-or-title-fragment>" --all-sessions
-"$REALBROWSER_CLI" open --profile "<profile-id>" "<url>" --no-fallback --timeout 30000
-"$REALBROWSER_CLI" find-tab "<site-or-title-fragment>" --all-sessions
-"$REALBROWSER_CLI" select-tab "<site-or-title-fragment>" --all-sessions
-"$REALBROWSER_CLI" goto "<url>" --timeout 30000
-"$REALBROWSER_CLI" js '({href: location.href, title: document.title, readyState: document.readyState, text: document.body?.innerText?.slice(0, 500) || ""})'
+"$REALBROWSER" profile list --active
+"$REALBROWSER" tab list "ninzap.dev" --profile chrome:Default
+# Creation stays background-safe; if profile app launch is required, the CLI
+# asks for explicit --best-effort-background or --front.
+"$REALBROWSER" tab ensure https://example.com --profile chrome:Default --label app --background
+"$REALBROWSER" read observe -t app --profile chrome:Default
 ```
 
-Use the matching later section only when needed:
+Do not run top-level `open`, `goto`, or selected-tab workflows. In
+`realbrowser`, creation is `tab ensure` or `tab new`, navigation is
+`tab navigate <target> <url>`, and reads/actions require a target.
 
-- Console output or DevTools logs: read "Console Output Copy Fast Path".
-- Repeated, lazy, or nested page content: use "Structured Page Extraction"
-  before broad `observe`, then read `references/debugging.md` only if
-  boundaries are ambiguous.
-- Login, custom devices, full-page regions, or clipping risk: read
-  "Screenshot Task Fast Path" and then `references/screenshots.md` if needed.
-- Profile cookies or signed-in browser state: read `references/profiles.md`.
-- Failed network, cache, headers, HAR, or performance: read
-  `references/debugging.md`.
+Profile listing shows the CDP scope. `profile` means the endpoint is scoped to
+that profile. `browser` means CDP can inspect existing browser tabs, but new
+tabs for a named profile cannot be proven safe by CDP alone. Direct WebSocket
+endpoints from `DevToolsActivePort` are the primary attach path; HTTP
+`/json/version` discovery is only a fallback. `--background` uses only
+background-safe CDP/browser paths. If profile app launch is required, the CLI
+fails with a recovery hint unless `--best-effort-background` or `--front` is
+explicit. `--best-effort-background` restores the previously active macOS app
+after launch; `--front` is the only normal path that intentionally leaves Chrome
+frontmost. Stale `DevToolsActivePort` files are ignored.
 
-## Console Output Copy Fast Path
-
-For requests like "check console log", "copy console output", or "what is in
-DevTools Console", treat the user's ask literally: select the exact existing
-tab, read the DevTools-style console lines, and paste those lines back in a
-code block. Do not summarize first, do not mix output from other matching tabs,
-and do not reload unless the user asks to reproduce startup logs. For target
-mismatches, signed-in Chrome profile details, or fresh startup capture, read
-`references/debugging.md`.
+For repeated work, set a default context without dropping target safety:
 
 ```bash
-REALBROWSER_CLI="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
-"$REALBROWSER_CLI" sessions
-"$REALBROWSER_CLI" find-tab "<url-or-title-fragment>" --all-sessions
-"$REALBROWSER_CLI" select-tab "<url-or-title-fragment>" --all-sessions
-"$REALBROWSER_CLI" js '({href: location.href, title: document.title, readyState: document.readyState})'
-"$REALBROWSER_CLI" console --preserve --limit 80
+"$REALBROWSER" session use profile:chrome:Default
+"$REALBROWSER" tab list ninzap.dev
+"$REALBROWSER" session clear
 ```
-
-## Structured Page Extraction
-
-Use this for any page where the requested answer lives inside repeated, lazy, or
-nested structures: feeds, inboxes, search results, tables, grids, chats,
-dashboards, notifications, product/catalog lists, file lists, comments, or
-virtualized panes. `observe` is for page state, controls, and sanity checks; it
-is not the default parser for item content.
-
-First identify the stable content root and direct children. Treat selectors such
-as `[role="article"]`, `article`, rows, cards, or message bubbles as hypotheses:
-they can match comments, replies, sidebars, composers, pinned/sponsored blocks,
-chat overlays, or hidden templates. When item order matters, report it as the
-current visible/current loaded order unless you deliberately scroll, dedupe, and
-confirm the sort/filter. Do not use `snapshot --selector <large-root>` as the
-default content parser for feeds/lists: even a correct root such as `main` or
-`[role="main"]` can expand into a large role tree. Prefer direct-child `js` or
-`extract-items` first, then use snapshots only for small verified containers,
-accessible refs, or boundary checks with a hard `--max-chars` cap.
-
-```bash
-"$REALBROWSER_CLI" extract-items --limit 5 --max-text-chars 700
-"$REALBROWSER_CLI" extract-items --selector main --limit 5 --max-text-chars 700
-"$REALBROWSER_CLI" extract-items --selector main --item-selector article --limit 5 --out "$ARTIFACT_DIR/page-items.json"
-"$REALBROWSER_CLI" js '(() => { const root = document.querySelector("main,[role=main],[role=feed],[role=list],[role=grid],table") || document.body; return [...root.children].slice(0,12).map((el,i)=>({i, tag:el.tagName, role:el.getAttribute("role"), text:(el.innerText||"").replace(/\s+/g," ").slice(0,240)})); })()'
-"$REALBROWSER_CLI" snapshot --selector '<small-stable-container>' --compact --max-chars 2000
-"$REALBROWSER_CLI" snapshot --compact --max-chars 2000
-"$REALBROWSER_CLI" snapshot-dom --selector main --out "$ARTIFACT_DIR/page-dom.json" --limit 1800 --max-text-chars 180
-"$REALBROWSER_CLI" snapshot-aria --out "$ARTIFACT_DIR/page-aria.json" --limit 1800
-"$REALBROWSER_CLI" query-selector 'main,[role="main"],[role="feed"],[role="list"],[role="grid"],table,[role="article"],article' --out "$ARTIFACT_DIR/page-elements.json" --limit 60 --max-text-chars 300 --max-html-chars 800
-```
-
-For huge or noisy pages, do not print or grep broad artifact matches into the
-conversation. First identify a stable root or candidate headings, then extract a
-small JSON/text summary with `jq`, Node, or a targeted `js` expression. When a
-page may contain API keys, auth tokens, customer data, private messages, billing
-details, or other secrets, avoid raw stdout: use `--out` artifacts for local
-inspection or a targeted `js` expression that redacts before returning text. If
-hydration stalls with low item counts, visible skeletons, or
-`document.visibilityState === "hidden"`, try background waits, scrolls, compact
-extraction, and targeted `js` first; foreground only when that is required to
-finish the task.
-
-## Screenshot Task Fast Path
-
-For requests like "check staging site, log in if needed, open inbox, take
-desktop/tablet/mobile screenshots", use the Task Router recipe when it covers
-the request. For exact default desktop/tablet/mobile PNG screenshots on an
-already selected or named session:
-
-```bash
-"$REALBROWSER_CLI" device-screenshots /tmp/site-inbox
-"$REALBROWSER_CLI" --session site-check device-screenshots /tmp/site-inbox
-```
-
-Inspect saved images with `view_image` when available. Detach only
-anonymous/dedicated sessions you opened for the task; do not detach an existing
-real-profile tab or session the user was already using. For login, custom
-devices, full-page/internal-scroll screenshots, mobile emulation, or clipping
-risk, read `references/screenshots.md`.
-
-## Decision Matrix
-
-- Public page or clean login test with no existing target implied: use
-  `--anonymous --session <task> --select`.
-- Existing tab/session implied, including a named anonymous session: run
-  `sessions` and `find-tab <query> --all-sessions`, then verify URL/title before
-  acting.
-- Existing user cookies, a named Chrome profile, or `--no-fallback`: read
-  `references/profiles.md`. Treat profile selection as setup/discovery. Once a
-  real-profile endpoint session exists, continue with plain session/handle
-  commands and omit `--profile` unless switching profiles. Real signed-in
-  profile opens should not steal focus: profile app launches without `--front`
-  are blocked unless `--best-effort-background` explicitly accepts the focus
-  risk. Do not request foregrounding unless the user asked for visual handoff.
-- Focus-gated or lazy pages that do not hydrate in a background tab:
-  first try background `wait-ready`, scrolls, compact extraction, and targeted
-  `js`/selector reads. Use explicit foregrounding only after those fail or when
-  the user asked to bring the browser forward.
-- Large, lazy, repeated, or deeply nested pages: use "Structured Page
-  Extraction" before dumping HTML. Start with compact item summaries, confirm
-  roots/direct children, write deep reads to files, and inspect those files with
-  OS-available local tools.
-- Exact viewport, mobile screenshot, raw PNG dimensions, or responsive capture:
-  read `references/screenshots.md`.
-- Full-size screenshots of fixed-body apps with internal scroll panes, or
-  screenshots of a specific page region: read `references/screenshots.md`.
-- Console errors, failed network requests, HAR/performance, cache/header proof,
-  or large HTML/text extraction: read `references/debugging.md`.
-- Full command syntax, global flags, or less common commands: read
-  `references/commands.md`.
 
 ## Operating Loop
 
-1. Reuse existing context before opening duplicates: `sessions`, then
-   `find-tab <url-or-title> --all-sessions` when prior attempts may exist or the
-   user mentions an existing/current tab, profile, session, anonymous/incognito
-   context, or follow-up browser state.
-2. Open or claim one stable target. Use `--session <name>` for isolated flows
-   and `claim ... --handle-name <task>` for longer workflows.
-   For real signed-in profiles, first reuse the active endpoint session when
-   one exists: `open "<url>"`, `goto "<url>"`, `select-tab ...`, or `claim ...`
-   without `--profile`. Use `open --profile "<id>" "<url>" --no-fallback` only
-   to initialize or switch the profile endpoint; after it activates a session,
-   continue with plain `realbrowser ...` commands. Omit `--select` on the
-   initial profile open unless immediate automation selection is required.
-   Do not add `--front`,
-   `focus <target-or-url-fragment>`, or `--foreground-until-ready` just because a
-   page is slow or lazy. Use foregrounding only for explicit visual handoff, or
-   after background waits/scrolls/extraction fail and the foreground need is
-   worth interrupting the user.
-   For inspection-only work, record scroll position, active filter/sort, modal,
-   or focused input before changing them when practical.
-3. Read before acting. Use `observe --max-chars 1500-2500` for page state,
-   controls, and quick sanity checks. For repeated, lazy, or nested content,
-   start with the structured extraction path (`extract-items --limit <n>`, root
-   or direct-child checks, then selector-scoped `snapshot`, `snapshot-dom`,
-   `snapshot-aria`, or `query-selector --out` only as needed) and keep large
-   artifacts out of stdout.
-   Use `snapshot --efficient` when current `uid` or CDP `[ref=eN]` refs are
-   needed.
-4. Act only on current refs. After navigation, modal changes, form submission,
-   or stale-ref failures, run `observe` or `snapshot --efficient` again.
-5. Prefer visible-state waits over sleeps: `wait <text> --visible`,
-   `wait --selector <css> --visible`, `wait --domcontentloaded`, or
-   `wait --networkidle`. For modern lazy pages, use `wait-ready` with
-   `--selector`, `--ready-text`, `--visual-stable`, or `--no-skeletons`. Use
-   `--min-cards` only with a known `--card-selector` or when generic card
-   detection has already matched the target content.
-6. For multi-step command streams, prefer `chain --return final` or
-   `chain --return summary --trace <path>` to reduce process round trips.
-7. Keep large outputs in files: use `--out`, `--har`, `--request-file`, or
-   `--response-file`, then inspect with local tools.
-8. Stop and report manual blockers: captcha, 2FA, browser permission prompts,
-   missing Chrome remote-debugging approval, or unavailable profile endpoints.
-9. Ask explicit user approval before sensitive submits, purchases, deletes,
-   security/account changes, permission grants, or hard-to-undo actions.
-10. Detach anonymous/dedicated sessions when finished. Do not routinely detach
-    real signed-in Chrome sessions; keeping one approved attach alive avoids
-    repeated remote-debugging prompts.
+1. Classify scope: existing tab, signed-in profile, anonymous page, screenshot,
+   console/network debug, repeated-content read, or form/action workflow.
+2. For current UI, logged-in state, console logs, inboxes, social sites, or
+   "already open" wording, inspect tabs before creating: `profile list --active`
+   then `tab list <query> --profile <profile>`.
+3. Acquire one stable target: `tab select --label` for an existing tab or
+   `tab ensure --label` only when no usable tab exists.
+   If `tab list --profile` warns that CDP is browser-scoped, its targets are
+   diagnostic only unless they were created by `realbrowser` through that
+   profile. Do not select or navigate a related tab from that list to satisfy a
+   named-profile open. If no proven matching tab exists, create a new tab through
+   the named profile with `tab ensure <url> --profile <profile> --label <label>
+   --best-effort-background` or ask for explicit `--front`.
+4. If multiple tabs match, do not guess. Disambiguate by URL/title/visible page
+   state before reading console, network, forms, or content.
+5. Verify small state first: `read observe -t <label>` or
+   `read size -t <label>`.
+6. Use the smallest reader: `read query`, `read items`, `read item`, compact
+   `read snapshot --selector/--urls/--cursor-interactive`, or console/network
+   commands. Avoid full HTML unless the user asks and use `--out`. Read
+   commands honor `--out`; use it for large/debug payloads you want to inspect
+   with `jq`, `rg`, or an editor instead of spending model tokens.
+   `read query` is for CSS selectors, not literal text. For text checks, use
+   `wait text`, `read text --out` plus `rg`, or `read query '<css>'
+   --text-filter '<text>'` after choosing a small CSS scope.
+7. For forms/uploads/submits, run `action state -t <label> --root active`, adding
+   `--screenshot --annotate-refs` when visual state can prevent a wrong click.
+   Checkpoint screenshots are bounded to the visible viewport/root; use
+   `screenshot area` or `screenshot full` only when you explicitly need a tall
+   artifact. If you request an annotated screenshot for action safety, inspect
+   that image before the next mutating action. Act on refs inside that root, and
+   submit once with `action submit --text <exact label>` or
+   `action submit <button-ref>`.
+8. Verify passively with a scoped read, `wait ready --screenshot`, console/network
+   check, screenshot, or URL/state change.
 
-## Five Common Recipes
+For inspection-only work, preserve user state when practical: note the starting
+filter/sort/URL, avoid unnecessary focus changes, and restore temporary filter
+or tab changes before finishing.
 
-### 1. Clean Page Check
+Never parallelize target-changing commands or mutating actions with reads on
+the same target. For example, do not run `network capture --reload` at the same
+time as `export pdf` or `screenshot` on the same tab.
 
-```bash
-"$REALBROWSER_CLI" open https://app.example --anonymous --session app-check --select --timeout 20000
-"$REALBROWSER_CLI" --session app-check observe --max-chars 2000
-"$REALBROWSER_CLI" --session app-check screenshot /tmp/app.png --raw-size
-```
+## No Repeated Allow Prompts
 
-### 2. Login With Provided Credentials
+`profile list --active` is passive: it reads `DevToolsActivePort` and checks the
+loopback port, but it must not open a CDP WebSocket or trigger Chrome's Allow
+debugging prompt. The first real CDP attach belongs to the selected
+target/context daemon.
 
-```bash
-"$REALBROWSER_CLI" --session app-check goto https://app.example/users/sign_in
-"$REALBROWSER_CLI" --session app-check snapshot --efficient --max-chars 3000
-# Replace 1_6, 1_10, and 1_12 with current snapshot refs.
-"$REALBROWSER_CLI" --session app-check fill-form '[{"uid":"1_6","value":"user@example.com"},{"uid":"1_10","value":"secret"}]'
-"$REALBROWSER_CLI" --session app-check click 1_12
-"$REALBROWSER_CLI" --session app-check wait --domcontentloaded --timeout 15000
-"$REALBROWSER_CLI" --session app-check observe --max-chars 2500
-```
+`realbrowser` should reuse the existing `DevToolsActivePort` direct WebSocket
+and its per-browser-endpoint daemon instead of starting extra browser controllers. This
+matches the `chrome-cdp`/`realbrowser` attach model: if Chrome shows an Allow
+debugging prompt, wait for the existing starting daemon rather than spawning
+another controller. Use `daemon monitor --json` to check target count, sessions,
+and buffer sizes before retrying.
 
-### 3. Exact Device Screenshots
+Do not probe several profiles in parallel when they report the same
+browser-scoped WebSocket. Pick the intended profile first, then run one
+target-acquisition command. After a labeled target is created, later `-t
+<label>` commands can infer that label's context; still passing `--profile` is
+fine, but falling back to a separate endpoint controller is not.
 
-Use this for verified desktop/tablet/mobile PNG evidence.
+If `profile list --active` returns no DevTools profiles but `profile list` shows
+the target Chrome user data is running, first check whether Chrome is showing a
+debugging approval prompt and retry the same target after approval. If there is
+still no direct WebSocket endpoint, `--best-effort-background` cannot attach to
+that existing non-debuggable browser.
 
-```bash
-"$REALBROWSER_CLI" --session app-check device-screenshots /tmp/app-inbox
-"$REALBROWSER_CLI" --session app-check device-screenshots /tmp/app-inbox --devices desktop:1440x900,tablet:768x1024,mobile:390x844
-"$REALBROWSER_CLI" --session app-check device-screenshots /tmp/app-inbox --selector main --visual-stable --settle-ms 500
-"$REALBROWSER_CLI" --session app-check full-screenshot /tmp/app-full.png --viewport 390x844
-```
-
-### 4. Existing Tab Or Profile
+Relaunch is the last-resort recovery, not the default. For signed-in tasks, do
+not end by asking the user to quit Chrome manually; ask for explicit approval to
+quit/relaunch the target browser, then continue the original task:
 
 ```bash
-"$REALBROWSER_CLI" sessions
-"$REALBROWSER_CLI" find-tab app.example --all-sessions
-"$REALBROWSER_CLI" select-tab app.example --all-sessions
-"$REALBROWSER_CLI" observe --max-chars 2000
+"$REALBROWSER" profile relaunch chrome:Default --confirm
+"$REALBROWSER" tab ensure https://example.com --profile chrome:Default --label app --background
 ```
 
-If cookies in a specific Chrome profile matter, read `references/profiles.md`
-before opening or attaching.
+Do not use `--front` unless the user explicitly wants visual handoff or hidden
+interaction is impossible. Use `--best-effort-background` only when profile app
+launch is needed; it still records provenance and tries to return focus to the
+previous app.
 
-For real signed-in profiles, reuse an existing endpoint tab when possible. If
-you must open a specific UI profile through the OS launcher, use `--front` for
-explicit visual handoff or `--best-effort-background` only when focus risk is
-acceptable. Then omit `--profile` for follow-up commands:
+## Common Workflows
+
+Read one item from a huge feed without dumping HTML:
 
 ```bash
-"$REALBROWSER_CLI" open --profile "chrome:Default" "https://app.example/items" --no-fallback --timeout 30000
-"$REALBROWSER_CLI" observe --max-chars 2000
-"$REALBROWSER_CLI" extract-items --limit 5 --max-text-chars 700
+"$REALBROWSER" read size -t group --json
+"$REALBROWSER" read items -t group --collection auto --direct-children --limit 8 --max-text-chars 700 --json
+"$REALBROWSER" read item -t group --collection auto --direct-children --index 4 --max-text-chars 4000
+"$REALBROWSER" read snapshot -t group --selector '<small-container>' --urls --cursor-interactive
 ```
 
-Do not add `--front`, `focus`, or `--foreground-until-ready` unless the user
-asked to see the browser or background reads have failed and foregrounding is
-required to finish the task.
-
-For a page that stalls until the tab is active, foregrounding is explicit:
+Copy console logs from one exact tab:
 
 ```bash
-"$REALBROWSER_CLI" claim https://app.example/items \
-  --profile "chrome:Default" \
-  --handle-name app-items \
-  --no-fallback \
-  --foreground-until-ready \
-  --selector main \
-  --card-selector ".item-card" \
-  --min-cards 3 \
-  --timeout 20000
-"$REALBROWSER_CLI" --handle app-items wait-ready --selector main --card-selector ".item-card" --min-cards 3 --visual-stable
+"$REALBROWSER" tab select "ninzap.dev" --profile chrome:Default --label ninzap
+"$REALBROWSER" console list -t ninzap --errors --limit 80
+"$REALBROWSER" console capture -t ninzap --reload --duration 3000 --out tmp/console.json
 ```
 
-### 5. Render Or Network Debug
+For "copy console output" tasks, paste DevTools-style console lines verbatim
+from the exact selected tab. Do not summarize, mix multiple matching tabs, or
+return empty output without checking whether capture needs to be armed before a
+reload.
+
+Capture network requests and a response body:
 
 ```bash
-"$REALBROWSER_CLI" capture-console https://app.example --anonymous --duration 5000 --out /tmp/app-console.json
-"$REALBROWSER_CLI" capture-network https://app.example --anonymous --duration 8000 --har /tmp/app.har
+"$REALBROWSER" network capture -t app --reload --duration 5000 --out tmp/app-network.json
+"$REALBROWSER" network capture -t app --include-body --out tmp/app-network-with-bodies.json
+"$REALBROWSER" network list -t app --filter "/api/" --json
+"$REALBROWSER" network body -t app req_12 --response --out tmp/req_12-response.json --full
 ```
 
-Read `references/debugging.md` before drawing cache, header, auth, or response
-body conclusions.
+Upload and submit:
 
-## Speed And Token Rules
+```bash
+"$REALBROWSER" action state -t app --root active --compact --screenshot --annotate-refs
+"$REALBROWSER" action fill -t app e1 "caption text"
+"$REALBROWSER" action type -t app e1 "additional text"
+"$REALBROWSER" action press -t app Escape
+"$REALBROWSER" action upload -t app --root active --input-ref e2 ~/Downloads/media.png
+"$REALBROWSER" action upload -t app --root active --trigger-ref b7 ~/Downloads/media.png
+"$REALBROWSER" wait ready -t app --visual-stable --screenshot --out tmp/upload-ready.png
+"$REALBROWSER" action submit -t app --root active --text "Submit"
+```
 
-- Cap routine reads: `observe --max-chars 2000`, `console --errors --limit 20`,
-  `network --failed --limit 30`, `snapshot --compact --max-chars 2000`.
-- Use a tiny `js` expression for URL/title/ready-state/heading verification
-  when full page state is unnecessary.
-- Prefer targeted `find-tab <query> --all-sessions` over broad `tabs` output.
-  Print full tab lists only when candidate disambiguation is required, and then
-  keep the list scoped to the user's target.
-- On CDP-backed real-profile sessions, `snapshot --compact` reads the
-  structured role snapshot substrate first.
-- Use `snapshot-aria` when you need structured AX node records.
-- On CDP-backed real-profile sessions, `text`, `html`, and `query-selector`
-  use structured `getDomText` / `querySelector` primitives.
-- Use `extract-items --limit <n>` before broad snapshots when the task is to
-  read repeated content and the root is not yet known. It favors specific roots
-  such as `main`, `[role="main"]`, and `[role="feed"]` over broad `body`
-  fallback, then does candidate scoring and nested-item suppression in one page
-  eval. Add `--selector <root>` only after the stable content container is known.
-- Use `snapshot-dom --selector <css> --out <path>` when a stable container is
-  known; omit `--selector` only when full-document DOM records are intentional.
-- Use `screenshot` for visual evidence and `html --out <path>` for
-  selector/debug work, not as the default page parser.
-- Do not use `--full-stdout` for large or unknown output. Prefer artifacts and
-  targeted local inspection.
-- For repeated, lazy, or nested pages, do not treat full-page HTML as the parser
-  and do not rely on site-specific shortcuts such as `posts`, `blocks`, or
-  `content-blocks`. Use `extract-items`, root/direct-child checks,
-  selector-scoped snapshots, `snapshot-aria`, `snapshot-dom --selector <css>
-  --out`, and `query-selector --out`; use screenshots to verify visual
-  boundaries or media-heavy content. Slow hydration is not by itself a reason to
-  foreground a signed-in profile tab; try background waits, scrolls, compact
-  extraction, and targeted `js` first.
-- If a command unexpectedly prints huge output or truncates, stop that read path
-  and switch to `--out` artifacts plus targeted local inspection.
-- If extracted content includes or may include secrets, credentials, private
-  messages, or account data, keep raw output local and return only a redacted
-  excerpt or summary.
-- Use `--raw-size` only when exact browser pixels matter. Default screenshots
-  are normalized for agent use.
+`action fill` replaces an input/editor value. `action type <ref> <text>` first
+focuses the ref, then sends native CDP text input; use it when a rich editor does
+not accept synthetic value replacement. `action submit --text` requires an exact
+accessible label from the current active root, such as `Submit`, `Save`, `Send`,
+`Post`, or the localized label actually shown by the app. Do not hardcode those
+labels in reusable flows; enumerate with `action state` and submit by ref when
+labels are ambiguous. If the root is wrong or a media picker/dialog is active,
+use `action press -t <label> Escape`, re-run `action state`, then continue.
 
-## Safety Notes
+For uploads, do not use standalone `action click` on visible media, attachment,
+or file-picker controls; that can open the OS file picker and block the user.
+Prefer `action upload --input-ref <file-input-ref> <file>`. When the app only
+creates the file input after a visible picker control is clicked, use
+`action upload --trigger-ref <picker-control-ref> <file>` so `realbrowser` arms
+and intercepts the file chooser before clicking. Plain `action click` also uses
+a short CDP file-chooser guard and reports `file_dialog_would_open` if the click
+would open a native picker.
 
-Chrome DevTools MCP/CDP can inspect and modify browser state. Avoid sensitive
-tabs unless the user explicitly wants that. A request to use a signed-in profile
-or current tab permits inspection within the named target, not unrelated inboxes,
-admin pages, payments, private chats, or account settings. The local daemon
-binds to `127.0.0.1` and uses the bearer token in the state file for command
-calls.
+Screenshots are visual checkpoints, not page parsers. Use `action state
+--screenshot --annotate-refs` for modals, editors, upload previews, covered
+buttons, disabled controls, canvas/media, and ambiguous active roots. When you
+request annotated refs, open/read the screenshot before relying on those refs for
+the next click/upload/submit. Skip screenshots for simple text/query/console/
+network reads unless visual state is the actual evidence. Checkpoint screenshots
+capture the visible viewport/root, not the full scroll height of a feed or page.
+Annotations mark the active root boundary plus visible refs, report skipped
+refs at `screenshot.annotation`, and can be bounded with `--max-labels <n>`.
+Default screenshot artifacts are normalized for agent use, matching OpenClaw's
+shape without adding image dependencies: JPEG quality 85, max side 2000px, max
+bytes 5mb, with a browser-canvas fallback when CDP's JPEG output is still too
+large. Use `--raw-size`, `--format png`, or an explicit `.png` path when exact
+browser pixels are required.
+
+Use `screenshot capture`, `screenshot area`, or `wait ready --screenshot` on
+signed-in/current profile tabs. `screenshot device` temporarily applies CDP
+viewport emulation; use it for responsive viewport evidence on anonymous or
+disposable tabs, or only on a live profile tab when the user explicitly asks for
+that target's responsive viewport output. Do not use `screenshot device` as a
+routine progress checkpoint while composing, posting, uploading, or reading a
+live signed-in tab. Use `screenshot area` or `screenshot full` when the large
+artifact itself is the requested output. Device screenshots use DPR 1 by
+default so `mobile:390x844` writes a `390x844` PNG, not a physical 2x Retina
+image. `screenshot full` first tries document full-page capture; when the
+document is fixed-height but a dominant visible scroll container exists, it
+stitches that container and preserves visible header/footer UI outside it, so
+app-shell pages do not produce a false one-viewport "full" artifact or drop a
+bottom composer. Pass `--selector <scroll-container>` when you already know the
+specific panel/list to stitch and want only that panel.
+
+Screenshots and PDF:
+
+```bash
+"$REALBROWSER" screenshot capture -t app --selector '[role=dialog]' tmp/dialog.png --annotate-refs
+"$REALBROWSER" screenshot capture -t app tmp/app.jpg --max-side 1600 --max-bytes 2mb
+"$REALBROWSER" screenshot full -t app --selector '[data-scroll-root]' tmp/panel-full.png
+"$REALBROWSER" screenshot device -t page --anonymous --session responsive --devices desktop:1440x900,tablet:768x1024,mobile:390x844 --visual-stable --settle-ms 300 tmp/page
+"$REALBROWSER" export pdf -t app tmp/app.pdf --print-background
+```
+
+## References
+
+Open these only when the task needs detail:
+
+- `references/commands.md`: command tree, output, errors, and JSON contract.
+- `references/workflows.md`: profile, anonymous, feed, action, upload, network,
+  screenshot, download, and PDF workflows.
+- `references/design-notes.md`: what was copied from chrome-cdp, gstack, and
+  OpenClaw and the long-term daemon/API model.
+
+## Safety Rules
+
+- `--background` means safe CDP/background creation. Use `--front` only for
+  explicit handoff or when hidden/unfocused interaction is impossible.
+- Signed-in profile mutation requires a proven target label or handle.
+- Browser-scoped CDP is not treated as proof of existing-tab profile ownership.
+  Prefer labels/handles and verify URL/title before actions.
+- Uploads and final actions stay inside the active root. Do not use global
+  selectors for file upload or submit.
+- Screenshots are target-bound visual evidence. Use them early when visual state
+  affects action safety, but do not replace scoped DOM/query readers with
+  screenshot parsing on huge pages.
+- Final actions enumerate button-like candidates inside the active root. Label
+  submits are exact-match by default; prefer a button ref when several controls
+  contain similar words. Click once, then verify passively.
+- Cookies/storage/headers are redacted unless `--values` is explicit.
+- Large HTML, network bodies, HAR, console dumps, traces, screenshots, PDFs,
+  and downloads should go to `--out` or artifact paths, not stdout.

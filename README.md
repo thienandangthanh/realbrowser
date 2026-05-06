@@ -1,322 +1,172 @@
 # Realbrowser
 
-Realbrowser exists so Codex can use the browser a developer is actually using, faster than Codex Computer Use and without forcing a slow separate Playwright browser.
+Realbrowser is a Codex skill and small local CLI for fast target-first browser
+automation against Chrome/Chromium. It is built for the cases where the useful
+state is in the browser the developer is already using: signed-in profiles,
+cookies, local storage, active tabs, console logs, network traffic, downloads,
+and local app state.
 
-The default Codex browser automation path is useful, but it is not enough for web development when the state that matters lives in a signed-in Chrome profile: cookies, local storage, feature flags, extensions, active tabs, console logs, and network traffic. Realbrowser combines the fast local workflow patterns from gstack with the native real-browser direction from OpenClaw, giving Codex one fast local CLI while still keeping a dedicated fallback profile for cases where attaching to the real browser is unavailable or unsafe.
+The current CLI is grouped and target-first:
+
+```bash
+realbrowser [global flags] <group> <command> [args] [flags]
+```
+
+Acquire or create one tab target first, then pass `-t <label>` or `--handle` to
+reads, actions, screenshots, console, network, state, dialogs, performance,
+downloads, and exports.
 
 ## What It Provides
 
 - A Codex skill named `realbrowser`.
-- A local CLI at `scripts/realbrowser`.
-- A persistent loopback daemon for fast follow-up commands.
-- Chrome DevTools MCP integration for real Chrome attach.
-- Direct CDP fast paths for cheap endpoint/profile operations such as tab list,
-  open, select, navigation, JavaScript evaluation, and simple page reads, using
-  DevTools HTTP where possible and one persistent CDP socket per daemon when a
-  WebSocket is needed.
-- A dedicated profile fallback at `~/.realbrowser/profile`.
-- Short tab targets for daemon sessions, tab listing/selection, navigation, compact observations, OpenClaw-style role/DOM snapshots, efficient snapshots, clicks, typing, forms, JavaScript evaluation, capped console and network inspection, OpenClaw-style normalized screenshots, annotated labels, pre-armed dialog handling, user-agent emulation, and download interception.
+- A zero-dependency Node CLI at `scripts/realbrowser.mjs`.
+- Portable wrappers:
+  - `scripts/realbrowser` for macOS/Linux shells.
+  - `scripts/realbrowser.ps1` for PowerShell.
+  - `scripts/realbrowser.cmd` for Windows `cmd.exe`.
+- Signed-in profile attach through Chrome/Chromium DevTools endpoints.
+- Anonymous managed sessions for clean browser state.
+- Stable labeled tab targets.
+- Compact page reads, structured item extraction, screenshots, console logs,
+  network request/response capture, uploads, guarded submits, downloads, and PDF
+  export.
 
-## Why Not Just Playwright?
-
-Playwright is excellent for isolated automation, but this project is for the opposite case: debugging a real browser session with the same login and state the developer already has. Realbrowser uses direct CDP for cheap operations when a concrete endpoint is known, and Chrome DevTools MCP for high-level operations such as snapshots, screenshots, refs, console/network buffers, and emulation.
-
-## Skill Architecture
-
-Realbrowser is a Codex skill first and a small CLI second. Keep the project thin,
-portable, and copyable:
-
-- `SKILL.md` contains the agent workflow and should stay concise.
-- `scripts/realbrowser.mjs` is the main zero-dependency implementation.
-- `scripts/realbrowser`, `scripts/realbrowser.cmd`, and
-  `scripts/realbrowser.ps1` are portability wrappers only.
-
-Prefer improving section boundaries inside `scripts/realbrowser.mjs` over
-splitting it into an app-style module tree. A larger tree makes the skill harder
-to copy, inspect, and run from a fresh Codex environment. Split code only when a
-boundary has become stable enough to justify the extra files, such as shared
-logic used by multiple scripts, a state/session store that needs isolated tests,
-or a protocol adapter that can be validated independently.
-
-Within the single file, prefer metadata-driven structure over scattered special
-cases. Commands should be described in the command registry, help and minimum
-argument validation should come from that metadata, parser edge cases should be
-validated before the daemon starts, and each CLI/state regression should add a
-self-test. This keeps the portable script maintainable without turning the skill
-into a full package.
-
-The intended internal order is:
-
-1. Constants, platform data, and profile definitions.
-2. Command registry, help text, parser, and validation.
-3. State, sessions, handles, and locking.
-4. Browser/profile discovery and launch.
-5. Daemon lifecycle and MCP RPC adapter.
-6. Command handlers.
-7. Output formatting and self-tests.
-
-## Quick Start
-
-Requirements:
+## Requirements
 
 - Node.js 22 or newer.
-- `npm`/`npx`, used to run `chrome-devtools-mcp`.
-- Chrome or a Chromium-family browser supported by Chrome DevTools MCP.
+- Chrome or a Chromium-family browser.
+- A local machine where Chrome DevTools access is acceptable for the requested
+  profile/session.
+
+## Quick Start
 
 macOS/Linux:
 
 ```bash
-./scripts/realbrowser doctor
-./scripts/realbrowser tabs
-./scripts/realbrowser open http://localhost:3000
-./scripts/realbrowser observe
-./scripts/realbrowser snapshot --efficient
+REALBROWSER="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
+"$REALBROWSER" help
 ```
 
 Windows PowerShell:
 
 ```powershell
-.\scripts\realbrowser.ps1 doctor
-.\scripts\realbrowser.ps1 tabs
-.\scripts\realbrowser.ps1 open http://localhost:3000
-.\scripts\realbrowser.ps1 observe
-.\scripts\realbrowser.ps1 snapshot --efficient
+$Realbrowser = Join-Path $HOME ".codex\skills\realbrowser\scripts\realbrowser.ps1"
+& $Realbrowser help
 ```
 
-Windows `cmd.exe`:
-
-```bat
-scripts\realbrowser.cmd doctor
-scripts\realbrowser.cmd tabs
-scripts\realbrowser.cmd open http://localhost:3000
-scripts\realbrowser.cmd observe
-scripts\realbrowser.cmd snapshot --efficient
-```
-
-Portable Node entrypoint on any OS:
+Portable Node entrypoint:
 
 ```bash
-node scripts/realbrowser.mjs doctor
+node scripts/realbrowser.mjs help
 ```
 
-Use `--backend dev` for the dedicated fallback profile:
+Run the built-in checks:
 
 ```bash
-./scripts/realbrowser --backend dev doctor --deep
+./scripts/realbrowser self-test
 ```
 
-Use `--browser-url` or `REALBROWSER_BROWSER_URL` when you have an explicit Chrome DevTools endpoint:
+## Common Flows
+
+Anonymous page:
 
 ```bash
-REALBROWSER_BROWSER_URL=http://127.0.0.1:9222 ./scripts/realbrowser tabs
+./scripts/realbrowser tab ensure https://example.com --anonymous --session check --label page --background
+./scripts/realbrowser read observe -t page --anonymous --session check
 ```
 
-## Chrome Remote Debugging Approval
-
-When using the default real-browser mode, realbrowser starts Chrome DevTools MCP with `--autoConnect`. Current Chrome DevTools MCP documents that auto-connect works with Chrome 144+ and requires remote debugging to be enabled from `chrome://inspect/#remote-debugging`.
-
-Chrome may show an "Allow remote debugging?" dialog because this grants an external app full control of the real signed-in profile. Treat `Allow` as permission for Chrome's browser-level prompt; realbrowser cannot bypass it. Once Chrome remote debugging is enabled or an approved realbrowser endpoint session is running, routine commands such as `tabs`, `select-tab`, `js`, selected-tab `console`, `screenshot`, and `device-screenshots` should run without adding `--allow-profile-reattach`. Use that flag for intentional controller replacement/restart or explicit MCP-only work, not as a default follow-up habit. The Chrome prompt can reappear after:
-
-- `realbrowser stop` or `realbrowser restart`.
-- Code changes while developing realbrowser.
-- Switching backend/mode/state files.
-- Chrome or Chrome DevTools MCP closing and reconnecting.
-
-To reduce prompts, keep the daemon warm and avoid restarting it during normal browser work. For real signed-in profile endpoint sessions, routine operations prefer one persistent CDP browser socket plus persistent page sessions; MCP is reserved for commands that still need MCP-only data such as preserved network capture. The first fresh attach may still show Chrome's browser-level approval; follow-up `tabs`, `select-tab`, `js`, `observe`, `console`, `screenshot`, and `device-screenshots` should reuse the same endpoint session. If you need a pre-opened debug endpoint, launch Chrome with a localhost-only DevTools port and use `REALBROWSER_BROWSER_URL=http://127.0.0.1:9222`, but do that only on a trusted machine because a DevTools port can control the browser. `status` reports whether the CLI reattach flag is needed for routine profile work.
-
-Chrome may expose a profile's browser WebSocket while returning 404 for
-`/json/list`; realbrowser handles that through the approved persistent daemon
-by falling back to `Target.getTargets` over the daemon's CDP socket. It should
-not create transient WebSocket probes in polling loops because those can show
-the approval dialog repeatedly. Keep the approved daemon alive instead of
-repeatedly reattaching.
-
-## Chrome Controlled Banner
-
-Chrome may also show "Chrome is being controlled by automated test software" while realbrowser or Chrome DevTools MCP is attached, or while Chrome remote debugging remains enabled. This is expected for a real signed-in profile. Realbrowser should not try to hide or suppress this banner because it is Chrome's safety signal that another local process can inspect or control the browser.
-
-Use `realbrowser status` for a side-effect-light control check. It does not start the browser backend by default. Use `realbrowser status --deep`, `realbrowser tabs`, or any page command only when you intentionally want to attach.
-
-Per Chrome's remote debugging flow, the banner can remain visible when Chrome still has remote debugging enabled or another debugging client is attached. Realbrowser can close its own daemon/MCP connection, but it should not use OS-specific process/port probing or hidden browser mutations to clear Chrome's UI. The portable cleanup path is the Chrome UI: use the banner's button or `chrome://inspect/#remote-debugging`.
-
-Relevant official references:
-
-- Chrome DevTools MCP active-session flow: <https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session>
-- Chrome DevTools Protocol HTTP/WebSocket endpoints: <https://chromedevtools.github.io/devtools-protocol/>
-- Chrome DevTools MCP troubleshooting: <https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/troubleshooting.md>
-
-To detach realbrowser:
+Visible Chrome Incognito window:
 
 ```bash
-./scripts/realbrowser stop
-# same behavior:
-./scripts/realbrowser detach
+./scripts/realbrowser tab ensure https://example.com --anonymous --session private --label page --front --incognito
+./scripts/realbrowser read observe -t page --anonymous --session private
 ```
 
-Stopping or detaching realbrowser closes its daemon/MCP connection. If Chrome still shows the banner afterward, Chrome remote debugging is still enabled or another tool is attached. Use the banner's "Turn off in settings" button, or open `chrome://inspect/#remote-debugging` and turn off remote debugging.
-
-## Fast Agent Defaults
-
-Realbrowser is designed to keep Codex token use low:
-
-- Use `observe` for the first page read.
-- Use `snapshot --selector <css> --compact --max-chars <n>` for scoped,
-  compact OpenClaw-style role snapshot reads.
-- Use `snapshot-aria --out <path>` for OpenClaw-style AX node records.
-- Use `snapshot-dom --out <path>` when element records are needed for local
-  inspection without dumping full HTML into the model context.
-- Use `query-selector <selector> --out <path>` for OpenClaw-style selector
-  match records.
-- For large dynamic pages such as Facebook-style feeds, chats, dashboards, or
-  virtualized lists, start with compact snapshots, then write
-  `snapshot-dom`/`snapshot-aria`/`query-selector` results to files and inspect
-  those files with OS-available tools. `rg`/`jq` are optional; PowerShell
-  `Select-String`/`ConvertFrom-Json` or Node work on Windows. Do not use
-  full-page HTML stdout as the default parser.
-- Managed anonymous/dedicated sessions run headless by default. Use `--headed`
-  or `--front` only for an explicit visual handoff.
-- Managed anonymous/dedicated sessions idle-shutdown after
-  `REALBROWSER_IDLE_TIMEOUT_MS` milliseconds, defaulting to 30 minutes; real
-  signed-in profile sessions stay alive to avoid repeated approval prompts.
-- Use `wait <text>` or readiness waits instead of shell sleeps.
-- Use profile/endpoint sessions when possible. For a real signed-in browser,
-  routine operations prefer one persistent CDP browser socket plus persistent
-  page sessions so `tabs`, `select-tab`, `js`, `observe`, console reads, and
-  screenshots do not each ask Chrome for a separate remote-debugging approval.
-  MCP-only commands may still create an MCP controller. Pass `--force` only
-  when intentionally creating a duplicate controller.
-- Treat profile selection as setup. After `open --profile ...` reuses or starts
-  an endpoint session, continue with plain session/handle commands and omit
-  `--profile` unless switching profiles. Repeating profile-targeted commands is
-  slower and can make approval or foreground behavior harder to reason about.
-- Use `snapshot --efficient` when clickable `uid` refs are needed.
-- Use `snapshot --labels` or `screenshot --labels` for annotated screenshots.
-- `open` and `newtab` open background tabs by default; pass `--front` only for an explicit visual handoff.
-- For real signed-in profile work, reuse an existing endpoint tab and navigate
-  with CDP when avoiding focus matters. If a specific UI profile must be opened,
-  non-front profile app launches are blocked by default on every desktop OS
-  because the browser may foreground an existing window while handling the new
-  tab. Use `--best-effort-background` only when that focus risk is acceptable,
-  or `--front` for explicit visual handoff. After the profile/session exists,
-  continue on the activated endpoint session or claim a handle if follow-up
-  automation spans multiple steps.
-- Use compact targets from `tabs`/`find-tab` such as `t1` instead of raw target ids.
-- Use `links --filter/--text-filter/--href-filter --visible` when you need a
-  small link set instead of full-page link dumps.
-- For console copy requests, `select-tab`, verify URL/title, then use the
-  selected-tab `console` command. Do not add `--allow-profile-reattach` when
-  Chrome remote debugging is already enabled or the endpoint session is already
-  running. Keep the endpoint session active so follow-up reads reuse the same
-  persistent CDP page session.
-- Use `console --errors --limit 20` and `network --failed --limit 30`.
-- Use project-specific `--handle-out tmp/realbrowser-handles/<task>.json`
-  paths for parallel Codex tabs. Existing handle files are not overwritten
-  unless `--force` is passed.
-- Use `errors` and `requests` if you want OpenClaw-style aliases.
-- Use `chain --return final` for navigate/wait/read flows and
-  `chain --return summary --trace ~/.realbrowser/trace.json` when intermediate
-  step evidence matters. `chain` records per-step and total durations for speed
-  review.
-- If a running daemon predates the edited skill, current realbrowser keeps
-  routine CDP-backed reads moving without asking for CLI reattach approval when
-  Chrome remote debugging is already enabled or an explicit endpoint is in use.
-  It prefers an endpoint-scoped current daemon, activates that session for
-  follow-ups, and refreshes stale endpoint state instead of creating disposable
-  temporary controllers. Use `--restart-daemon --allow-profile-reattach` only
-  when you intentionally want to replace a real-profile controller.
-- Use `--raw`, `--verbose`, `--max-chars`, or `--out <path>` only when the compact result is not enough.
-
-The implementation intentionally copies the proven shape of OpenClaw's efficient browser snapshots and gstack's compact localhost command loop while keeping the backend attached to the user's real Chrome session when possible.
-
-## Screenshots
-
-Real Chrome often captures at physical pixels. On a Retina/HiDPI display, a normal viewport screenshot can be 1.5x or 2x larger than the CSS viewport. Realbrowser follows OpenClaw's screenshot-size target, but keeps the skill portable by using Chrome/MCP capture settings instead of a native image-processing dependency.
-
-Default screenshot normalization:
-
-- Max side: `2000` px.
-- Max file size target: `5mb`.
-- When no output path or format is provided, normalized screenshots default to JPEG at quality `85`.
-- If the physical capture would be too large, realbrowser temporarily captures with a smaller emulated screenshot viewport and then resets emulation.
-- Exact raw browser pixels are still available with `--raw-size` or `--no-normalize`.
-
-Examples:
+Signed-in profile:
 
 ```bash
-./scripts/realbrowser screenshot
-./scripts/realbrowser screenshot /tmp/page.jpeg --max-side 1600 --max-bytes 2mb
-./scripts/realbrowser screenshot /tmp/page.png --raw-size
-REALBROWSER_SCREENSHOT_MAX_SIDE=1280 ./scripts/realbrowser screenshot
-REALBROWSER_SCREENSHOT_NORMALIZE=0 ./scripts/realbrowser screenshot
+./scripts/realbrowser profile list --active
+./scripts/realbrowser tab list "localhost" --profile chrome:Default
+./scripts/realbrowser tab ensure http://localhost:3000 --profile chrome:Default --label app --background
+./scripts/realbrowser read observe -t app --profile chrome:Default
 ```
 
-## Verbose And Full Output
-
-Default output is intentionally compact for agent token efficiency. Use these when you need more detail:
+Console and network evidence:
 
 ```bash
-./scripts/realbrowser snapshot --verbose
-./scripts/realbrowser snapshot --raw
-./scripts/realbrowser text --max-chars 50000
-./scripts/realbrowser html --out /tmp/page.html
-./scripts/realbrowser network get 12 --request-file /tmp/request.txt --response-file /tmp/response.json --raw
-REALBROWSER_OUTPUT=verbose ./scripts/realbrowser observe
-REALBROWSER_OUTPUT=raw ./scripts/realbrowser snapshot
+./scripts/realbrowser console list -t app --errors --limit 50
+./scripts/realbrowser console capture -t app --reload --duration 3000 --out tmp/console.json
+./scripts/realbrowser network capture -t app --reload --duration 5000 --out tmp/network.json
+./scripts/realbrowser network body -t app req_12 --response --out tmp/req_12-response.json --full
 ```
 
-Windows PowerShell equivalents:
-
-```powershell
-.\scripts\realbrowser.ps1 snapshot --verbose
-.\scripts\realbrowser.ps1 snapshot --raw
-$env:REALBROWSER_OUTPUT = "raw"; .\scripts\realbrowser.ps1 snapshot
-Remove-Item Env:\REALBROWSER_OUTPUT
-```
-
-Output modes:
-
-- Compact default: capped, model-friendly output.
-- `--verbose` or `REALBROWSER_OUTPUT=verbose`: raises caps and requests more detail where the backend supports it.
-- `--raw` or `REALBROWSER_OUTPUT=raw`: bypasses realbrowser compaction and prints the underlying adapter response.
-- `--out <path>` and `--request-file`/`--response-file`: write large data to disk instead of putting it in the agent transcript.
-- `--` stops option parsing. Use it before literal text or JavaScript that starts with a known flag, for example `realbrowser type -- --raw`.
-
-## Platform Support
-
-Realbrowser is implemented in Node.js and is intended to run on macOS, Linux, and Windows.
-
-- macOS and Linux can run `scripts/realbrowser` directly.
-- Windows PowerShell should prefer `scripts\realbrowser.ps1`, which passes arguments as an array. `scripts\realbrowser.cmd` is available for `cmd.exe`; `node scripts\realbrowser.mjs` also works.
-- Screenshot normalization is dependency-free and uses Chrome DevTools MCP capture/emulation calls, so no native image library is required.
-- Real-browser attach depends on Chrome DevTools MCP and the local browser's remote debugging support. If attach is unavailable, use `--backend dev` for the dedicated profile.
-- Profile discovery and `open --profile` run where the browser runs. In WSL,
-  Parallels, Docker, SSH, or other split-host setups, use the host-side wrapper
-  or connect to the host browser's forwarded CDP endpoint with `--browser-url`.
-- CDP download interception requires Node's built-in `WebSocket` support, available in current Node 22+ builds.
-- Screenshots, snapshots, console, network, JavaScript evaluation, clicks, typing, dialogs, and downloads are protocol-driven and do not require the browser window to be focused.
-
-## Verification
+Actions and uploads:
 
 ```bash
-node --check scripts/realbrowser.mjs
-node scripts/realbrowser.mjs self-test
+./scripts/realbrowser action state -t app --root active --compact --screenshot --annotate-refs
+./scripts/realbrowser action fill -t app e1 "caption text"
+./scripts/realbrowser action upload -t app --root active --input-ref e2 ~/Downloads/media.png
+./scripts/realbrowser action submit -t app --root active --text "Submit"
 ```
 
-These commands run a syntax check and a small self-test for compact snapshots, truncation, and capped log output. Live browser smoke checks should additionally verify:
+Screenshots and exports:
 
 ```bash
-./scripts/realbrowser doctor --deep
-./scripts/realbrowser open http://localhost:3000
-./scripts/realbrowser observe --screenshot
-./scripts/realbrowser snapshot --efficient --labels
-./scripts/realbrowser console --errors --limit 20
-./scripts/realbrowser network --failed --limit 30
+./scripts/realbrowser screenshot capture -t app tmp/app.png
+./scripts/realbrowser screenshot full -t app tmp/app-full.png
+./scripts/realbrowser screenshot device -t page --anonymous --session responsive --devices desktop:1440x900,tablet:768x1024,mobile:390x844 tmp/page
+./scripts/realbrowser export pdf -t app tmp/page.pdf --print-background
 ```
 
-## Safety Model
+## Operating Model
 
-The daemon binds only to `127.0.0.1` and requires a bearer token stored in its state file. Realbrowser can inspect and change browser state, so agents should avoid sensitive tabs unless the user explicitly asks for that. Agents must ask before submitting sensitive data, making purchases, deleting data, changing account/security settings, granting permissions, or taking actions that are hard to undo.
+Use the smallest command that answers the question:
 
-## License
+- `profile list --active` to discover usable signed-in profile endpoints.
+- `tab list`, `tab select`, `tab ensure`, and `tab new` to acquire a target.
+- `read observe`, `read size`, `read query`, `read items`, `read item`, and
+  `read snapshot` for compact page state and structured content.
+- `action state` before mutating the page, then act on current refs.
+- `console` and `network` for debugging evidence.
+- `screenshot` and `export pdf` for visual artifacts.
 
-MIT. See `LICENSE`.
+Do not start from broad HTML or whole-page dumps. Use `--out` for large reads,
+network bodies, HAR files, screenshots, and traces so they can be inspected with
+local tools instead of sent through model context.
+
+## Profile Safety
+
+With `--profile`, existing browser tabs may be diagnostic only when CDP is
+browser-scoped and the tab was not created by Realbrowser through that profile.
+If a named-profile open needs a proven target, create a new tab through the
+profile with `tab ensure <url> --profile <profile> --label <label>`.
+
+`--anonymous` creates isolated temporary browser state. It is not network
+anonymity and is not the same as Chrome's visible Incognito UI. Add
+`--incognito` or `--private` only when a visible private window is explicitly
+needed.
+
+Realbrowser should keep signed-in profile work in the background when possible.
+Use `--front` only for explicit visual handoff. Use `--best-effort-background`
+when the CLI reports that a profile app launch is required and the focus risk is
+acceptable.
+
+## Development Notes
+
+Realbrowser is intentionally thin and portable:
+
+- Keep workflow guidance in `SKILL.md`.
+- Keep command details in `references/commands.md` and
+  `references/workflows.md`.
+- Keep the implementation in `scripts/realbrowser.mjs` unless a boundary becomes
+  stable enough to justify another file.
+- Add or update `self-test` coverage for parser, help, state, and CLI behavior
+  regressions.
+
+Useful checks:
+
+```bash
+./scripts/realbrowser --version
+./scripts/realbrowser help
+./scripts/realbrowser self-test
+```
