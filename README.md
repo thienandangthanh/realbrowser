@@ -1,6 +1,6 @@
 # Realbrowser
 
-Realbrowser is a Codex skill and small local CLI for fast target-first browser
+Realbrowser is an agent skill and small local CLI for fast target-first browser
 automation against Chrome/Chromium. It is built for the cases where the useful
 state is in the browser the developer is already using: signed-in profiles,
 cookies, local storage, active tabs, console logs, network traffic, downloads,
@@ -18,16 +18,17 @@ downloads, and exports.
 
 ## What It Provides
 
-- A Codex skill named `realbrowser`.
-- A zero-dependency Node CLI at `scripts/realbrowser.mjs`.
+- An agent skill named `realbrowser` (works with Claude Code, Codex, and other
+  agent platforms).
+- A zero-dependency Node CLI at `skills/realbrowser/scripts/realbrowser.mjs`.
 - Portable wrappers:
-  - `scripts/realbrowser` for macOS/Linux shells.
-  - `scripts/realbrowser.ps1` for PowerShell.
-  - `scripts/realbrowser.cmd` for Windows `cmd.exe`.
+  - `skills/realbrowser/scripts/realbrowser` for macOS/Linux shells.
+  - `skills/realbrowser/scripts/realbrowser.ps1` for PowerShell.
+  - `skills/realbrowser/scripts/realbrowser.cmd` for Windows `cmd.exe`.
 - Signed-in profile attach through Chrome/Chromium DevTools endpoints.
 - Anonymous managed sessions for clean browser state.
-- Stable labeled tab targets, scoped per owner/Codex session.
-- Target leases for mutating commands so parallel Codex sessions do not
+- Stable labeled tab targets, scoped per owner/session.
+- Target leases for mutating commands so parallel sessions do not
   accidentally navigate, close, or click each other's tabs.
 - Compact page reads, structured item extraction, screenshots, console logs,
   network request/response capture, uploads, guarded submits, downloads, and PDF
@@ -40,47 +41,55 @@ downloads, and exports.
 - A local machine where Chrome DevTools access is acceptable for the requested
   profile/session.
 
-## Quick Start
+## Installation
 
-macOS/Linux:
+### Claude Code
 
-```bash
-REALBROWSER="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
-"$REALBROWSER" help
-```
-
-Windows PowerShell:
-
-```powershell
-$Realbrowser = Join-Path $HOME ".codex\skills\realbrowser\scripts\realbrowser.ps1"
-& $Realbrowser help
-```
-
-Portable Node entrypoint:
+Install as a Claude Code plugin from a local path:
 
 ```bash
-node scripts/realbrowser.mjs help
+claude plugin add /path/to/realbrowser
+```
+
+Or from a git repository:
+
+```bash
+claude plugin add https://github.com/<owner>/realbrowser
+```
+
+The skill auto-activates when tasks involve browser interaction, screenshots,
+console logs, network debugging, or form automation.
+
+### Codex
+
+Place the repo under `$HOME/.codex/skills/realbrowser` and use the
+`agents/openai.yaml` configuration.
+
+### Standalone CLI
+
+```bash
+node skills/realbrowser/scripts/realbrowser.mjs help
 ```
 
 Run the built-in checks:
 
 ```bash
-./scripts/realbrowser self-test
+skills/realbrowser/scripts/realbrowser self-test
 ```
 
 ## Common Flows
 
-Parallel Codex sessions:
+Parallel sessions:
 
 ```bash
 export REALBROWSER_OWNER=my-project
-./scripts/realbrowser session use profile:chrome:Default
-./scripts/realbrowser tab ensure http://localhost:3000 --profile chrome:Default --label app --background
-./scripts/realbrowser read observe -t app
+realbrowser session use profile:chrome:Default
+realbrowser tab ensure http://localhost:3000 --profile chrome:Default --label app --background
+realbrowser read observe -t app
 ```
 
 `REALBROWSER_OWNER` or `--owner <id>` scopes labels and default context. Without
-an explicit owner, Realbrowser uses the current Codex/terminal session when one is
+an explicit owner, Realbrowser uses the current agent/terminal session when one is
 available, falling back to the project path. Mutating commands claim a target
 lease; if another owner already owns that tab, rerun with `--take-lease` only when
 you intentionally want to take it over. `tab ensure` creates a fresh tab instead
@@ -89,51 +98,51 @@ of reusing another owner's URL match.
 Anonymous page:
 
 ```bash
-./scripts/realbrowser tab ensure https://example.com --anonymous --session check --label page --background
-./scripts/realbrowser read observe -t page --anonymous --session check
+realbrowser tab ensure https://example.com --anonymous --session check --label page --background
+realbrowser read observe -t page --anonymous --session check
 ```
 
 Visible Chrome Incognito window:
 
 ```bash
-./scripts/realbrowser tab ensure https://example.com --anonymous --session private --label page --front --incognito
-./scripts/realbrowser read observe -t page --anonymous --session private
+realbrowser tab ensure https://example.com --anonymous --session private --label page --front --incognito
+realbrowser read observe -t page --anonymous --session private
 ```
 
 Signed-in profile:
 
 ```bash
-./scripts/realbrowser profile list --active
-./scripts/realbrowser tab list "localhost" --profile chrome:Default
-./scripts/realbrowser tab ensure http://localhost:3000 --profile chrome:Default --label app --background
-./scripts/realbrowser read observe -t app --profile chrome:Default
+realbrowser profile list --active
+realbrowser tab list "localhost" --profile chrome:Default
+realbrowser tab ensure http://localhost:3000 --profile chrome:Default --label app --background
+realbrowser read observe -t app --profile chrome:Default
 ```
 
 Console and network evidence:
 
 ```bash
-./scripts/realbrowser console list -t app --errors --limit 50
-./scripts/realbrowser console capture -t app --reload --duration 3000 --out tmp/console.json
-./scripts/realbrowser network capture -t app --reload --duration 5000 --out tmp/network.json
-./scripts/realbrowser network body -t app req_12 --response --out tmp/req_12-response.json --full
+realbrowser console list -t app --errors --limit 50
+realbrowser console capture -t app --reload --duration 3000 --out tmp/console.json
+realbrowser network capture -t app --reload --duration 5000 --out tmp/network.json
+realbrowser network body -t app req_12 --response --out tmp/req_12-response.json --full
 ```
 
 Actions and uploads:
 
 ```bash
-./scripts/realbrowser action state -t app --root active --compact --screenshot --annotate-refs
-./scripts/realbrowser action fill -t app e1 "caption text"
-./scripts/realbrowser action upload -t app --root active --input-ref e2 ~/Downloads/media.png
-./scripts/realbrowser action submit -t app --root active --text "Submit"
+realbrowser action state -t app --root active --compact --screenshot --annotate-refs
+realbrowser action fill -t app e1 "caption text"
+realbrowser action upload -t app --root active --input-ref e2 ~/Downloads/media.png
+realbrowser action submit -t app --root active --text "Submit"
 ```
 
 Screenshots and exports:
 
 ```bash
-./scripts/realbrowser screenshot capture -t app tmp/app.png
-./scripts/realbrowser screenshot full -t app tmp/app-full.png
-./scripts/realbrowser screenshot device -t page --anonymous --session responsive --devices desktop:1440x900,tablet:768x1024,mobile:390x844 tmp/page
-./scripts/realbrowser export pdf -t app tmp/page.pdf --print-background
+realbrowser screenshot capture -t app tmp/app.png
+realbrowser screenshot full -t app tmp/app-full.png
+realbrowser screenshot device -t page --anonymous --session responsive --devices desktop:1440x900,tablet:768x1024,mobile:390x844 tmp/page
+realbrowser export pdf -t app tmp/page.pdf --print-background
 ```
 
 ## Operating Model
@@ -176,22 +185,47 @@ signed-in real Chrome profile can still require Chrome's approval once; managed
 anonymous sessions avoid signed-in-profile approval but do not contain the user's
 logged-in state.
 
+## Plugin Structure
+
+```
+realbrowser/
+├── .claude-plugin/
+│   └── plugin.json              # Claude Code plugin manifest
+├── skills/
+│   └── realbrowser/
+│       ├── SKILL.md             # Skill instructions
+│       ├── scripts/             # CLI and wrappers
+│       │   ├── realbrowser      # macOS/Linux shell wrapper
+│       │   ├── realbrowser.cmd  # Windows cmd wrapper
+│       │   ├── realbrowser.ps1  # PowerShell wrapper
+│       │   └── realbrowser.mjs  # Node CLI implementation
+│       └── references/          # Detailed documentation
+│           ├── commands.md
+│           ├── workflows.md
+│           └── design-notes.md
+├── agents/
+│   └── openai.yaml              # Codex agent configuration
+├── README.md
+├── CHANGELOG.md
+└── LICENSE
+```
+
 ## Development Notes
 
 Realbrowser is intentionally thin and portable:
 
-- Keep workflow guidance in `SKILL.md`.
-- Keep command details in `references/commands.md` and
-  `references/workflows.md`.
-- Keep the implementation in `scripts/realbrowser.mjs` unless a boundary becomes
-  stable enough to justify another file.
+- Keep workflow guidance in `skills/realbrowser/SKILL.md`.
+- Keep command details in `skills/realbrowser/references/commands.md` and
+  `skills/realbrowser/references/workflows.md`.
+- Keep the implementation in `skills/realbrowser/scripts/realbrowser.mjs` unless
+  a boundary becomes stable enough to justify another file.
 - Add or update `self-test` coverage for parser, help, state, and CLI behavior
   regressions.
 
 Useful checks:
 
 ```bash
-./scripts/realbrowser --version
-./scripts/realbrowser help
-./scripts/realbrowser self-test
+skills/realbrowser/scripts/realbrowser --version
+skills/realbrowser/scripts/realbrowser help
+skills/realbrowser/scripts/realbrowser self-test
 ```

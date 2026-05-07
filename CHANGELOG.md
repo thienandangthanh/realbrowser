@@ -1,15 +1,42 @@
 # Changelog
 
+## 0.3.0 - 2026-05-07
+
+Added Claude Code plugin support.
+
+Added:
+
+- `.claude-plugin/plugin.json` manifest for Claude Code plugin auto-discovery.
+- `skills/realbrowser/` directory structure following the Claude Code plugin
+  convention (SKILL.md, scripts, and references inside the skill subdirectory).
+- Enhanced SKILL.md description for better auto-triggering in Claude Code.
+
+Changed:
+
+- Moved `SKILL.md`, `scripts/`, and `references/` into `skills/realbrowser/`
+  for Claude Code skill auto-discovery.
+- Replaced Codex-specific path (`$HOME/.codex/skills/...`) with portable
+  skill-relative path references.
+- Replaced Codex-specific language with agent-generic terms throughout docs.
+- Updated `README.md` with Claude Code installation instructions and new
+  directory layout.
+
+Compatibility:
+
+- `agents/openai.yaml` retained at root for Codex compatibility.
+- The CLI implementation (`scripts/realbrowser.mjs`) is unchanged; only docs
+  and directory layout were updated.
+
 ## 0.2.1 - 2026-05-07
 
-This release hardens `0.2.0` for parallel Codex sessions and lower-approval
+This release hardens `0.2.0` for parallel sessions and lower-approval
 real-browser workflows.
 
 Added:
 
 - Owner-scoped labels, default context, and element refs via `--owner` /
   `REALBROWSER_OWNER`.
-- Target leases for mutating commands so parallel Codex sessions do not
+- Target leases for mutating commands so parallel sessions do not
   accidentally control each other's tabs.
 - Owner-separated anonymous daemons while keeping real signed-in browser
   endpoints shared per physical browser endpoint.
@@ -28,7 +55,7 @@ Changed:
   the target lease check passes.
 - Full, responsive/device, and annotated screenshots/checkpoints are
   lease-guarded because they temporarily scroll, emulate, or draw page overlays.
-- Expanded docs for multi-Codex operation, Chrome approval prompt limits, and
+- Expanded docs for multi-session operation, Chrome approval prompt limits, and
   release validation.
 
 Fixed:

@@ -1,6 +1,6 @@
 ---
 name: realbrowser
-description: Use for fast target-first local Chrome/Chromium browser control with stable labeled tabs, signed-in profiles, anonymous sessions, compact reads, screenshots, console logs, network request/response capture, root-scoped page actions, uploads, guarded submits, downloads, and PDF export.
+description: Use for fast target-first local Chrome/Chromium browser control with stable labeled tabs, signed-in profiles, anonymous sessions, compact reads, screenshots, console logs, network request/response capture, root-scoped page actions, uploads, guarded submits, downloads, and PDF export. Use this skill whenever the task involves the user's actual Chrome browser — inspecting open tabs, reading console errors, capturing network traffic, taking screenshots of live pages, filling forms, uploading files, or any browser automation that needs signed-in state or existing browser context. Also use for anonymous page reads, responsive screenshots, and PDF generation via CDP.
 ---
 
 # Realbrowser
@@ -19,16 +19,20 @@ scoped read proves it is correct for the current page.
 
 ## Fast Start
 
+The `realbrowser` CLI is bundled at `scripts/realbrowser` (Node entry:
+`scripts/realbrowser.mjs`) relative to this skill's directory. Construct the
+`REALBROWSER` variable from the skill base directory shown above.
+
 macOS/Linux:
 
 ```bash
-REALBROWSER="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
+REALBROWSER="<skill-directory>/scripts/realbrowser"
 ```
 
 Windows PowerShell:
 
 ```powershell
-$Realbrowser = Join-Path $HOME ".codex\skills\realbrowser\scripts\realbrowser.ps1"
+$Realbrowser = Join-Path "<skill-directory>" "scripts\realbrowser.ps1"
 ```
 
 Anonymous page:
@@ -84,7 +88,7 @@ For repeated work, set a default context without dropping target safety:
 "$REALBROWSER" session clear
 ```
 
-Default contexts, labels, and element refs are owner-scoped. When multiple Codex
+Default contexts, labels, and element refs are owner-scoped. When multiple
 sessions are open, set a stable owner for the project/session if the environment
 does not already provide one:
 
