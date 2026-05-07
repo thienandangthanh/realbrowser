@@ -143,6 +143,12 @@ Important command semantics:
 - `tab navigate <target> <link-ref>` can navigate `l1` refs emitted by
   `read snapshot --urls`.
 - `read size` measures HTML/text/node counts and recommends a reader.
+- `read tree` fetches Chrome's ARIA accessibility tree via CDP. Composable
+  flags: `--interactive`/`-i` (interactive roles only), `--compact`/`-c` (skip
+  unnamed structural nodes), `--depth N`/`-d N` (limit tree depth),
+  `--diff`/`-D` (show only changes since last snapshot), `--selector` (scope to
+  CSS subtree). Refs (`b1`, `l1`, `e1`) bridge back to DOM for clicks/actions.
+  Output is 5-20x more compact than `read snapshot` for typical pages.
 - `read query` returns refs such as `l1`, `b1`, `f1`, and `e1`; filters such as
   `--visible`, `--enabled`, `--topmost`, `--href-filter`, `--text-filter`, and
   `--fields` keep output small.

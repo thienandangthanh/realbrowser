@@ -126,14 +126,17 @@ Read-only commands can still inspect the target after it is explicitly selected.
    state before reading console, network, forms, or content.
 5. Verify small state first: `read observe -t <label>` or
    `read size -t <label>`.
-6. Use the smallest reader: `read query`, `read items`, `read item`, compact
-   `read snapshot --selector/--urls/--cursor-interactive`, or console/network
-   commands. Avoid full HTML unless the user asks and use `--out`. Read
-   commands honor `--out`; use it for large/debug payloads you want to inspect
-   with `jq`, `rg`, or an editor instead of spending model tokens.
-   `read query` is for CSS selectors, not literal text. For text checks, use
-   `wait text`, `read text --out` plus `rg`, or `read query '<css>'
-   --text-filter '<text>'` after choosing a small CSS scope.
+6. Use the smallest reader that gives you what you need:
+   `read tree -i -c` (ARIA tree, interactive + compact) for interaction planning,
+   `read tree --diff` after an action to see only what changed,
+   `read query` for targeted CSS lookups, `read items`/`read item` for feeds,
+   `read snapshot` for DOM structure. Avoid full HTML unless the user asks.
+   Use `--out` for large/debug payloads instead of spending model tokens.
+   `read query` expects CSS selectors only — `:has-text()`, `:text()`, and other
+   Playwright pseudo-selectors are not valid CSS and will fail. Use
+   `--text-filter '<text>'` for text-based matching.
+   Use `wait ready --visual-stable` instead of `sleep N && screenshot capture`
+   for page readiness checks.
 7. For forms/uploads/submits, run `action state -t <label> --root active`, adding
    `--screenshot --annotate-refs` when visual state can prevent a wrong click.
    Checkpoint screenshots are bounded to the visible viewport/root; use
@@ -142,8 +145,8 @@ Read-only commands can still inspect the target after it is explicitly selected.
    that image before the next mutating action. Act on refs inside that root, and
    submit once with `action submit --text <exact label>` or
    `action submit <button-ref>`.
-8. Verify passively with a scoped read, `wait ready --screenshot`, console/network
-   check, screenshot, or URL/state change.
+8. Verify passively with `read tree --diff`, `wait ready --visual-stable`,
+   a scoped read, console/network check, screenshot, or URL/state change.
 
 For inspection-only work, preserve user state when practical: note the starting
 filter/sort/URL, avoid unnecessary focus changes, and restore temporary filter

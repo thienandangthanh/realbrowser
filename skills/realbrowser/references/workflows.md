@@ -166,6 +166,45 @@ If the page offers a stable sort URL/filter that changes "most relevant" into a
 chronological/current order, apply that early and verify the heading once before
 spending tokens on deeper DOM exploration.
 
+## ARIA Tree (Compact Interaction Planning)
+
+`read tree` fetches Chrome's accessibility tree via CDP. It is 5-20x more compact
+than DOM-based snapshots and is the primary tool for interaction planning.
+
+```bash
+realbrowser read tree -t app -i -c
+realbrowser read tree -t app --interactive --compact --depth 4
+realbrowser read tree -t app --selector main -i -c
+```
+
+Composable short flags: `-i` (interactive only), `-c` (compact: skip unnamed
+structural nodes), `-d N` (depth limit), `-D` (diff against previous snapshot).
+
+After an action, use `--diff` to see only what changed:
+
+```bash
+realbrowser action click -t app b3
+realbrowser read tree -t app -i -c -D
+```
+
+The diff output shows only added/removed lines, saving tokens on verify steps.
+Refs from `read tree` (`b1`, `l1`, `e1`) work with all action commands (`action
+click`, `action fill`, `action type`, `action submit`).
+
+For large pages, combine flags: `read tree -i -c -d 3 --selector main` gives
+the interactive elements in the main landmark, limited to depth 3. This is
+typically 20-50 lines instead of 200+ for a full DOM snapshot.
+
+Boolean state checks are available via `read is`:
+
+```bash
+realbrowser read is visible e1 -t app
+realbrowser read is enabled b3 -t app
+realbrowser read is checked e5 -t app
+```
+
+Each returns bare `true` or `false` (2 tokens).
+
 ## Form, Upload, Submit
 
 ```bash

@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 
-const VERSION = "0.2.1";
+const VERSION = "0.3.0";
 const STATE_SCHEMA_VERSION = "owner-lease-1";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
@@ -67,7 +67,7 @@ const GROUPS = {
   daemon: ["status", "doctor", "monitor", "restart", "stop"],
   tab: ["list", "select", "ensure", "new", "navigate", "label", "focus", "close", "handoff", "resume"],
   handle: ["create", "list", "release"],
-  read: ["observe", "size", "snapshot", "query", "query-selector", "items", "item", "text", "html", "links", "forms", "url", "is"],
+  read: ["observe", "size", "tree", "snapshot", "query", "query-selector", "items", "item", "text", "html", "links", "forms", "url", "is"],
   wait: ["ready", "selector", "text", "url", "load", "network"],
   action: ["state", "root", "click", "fill", "type", "press", "key", "upload", "submit", "hover", "select"],
   screenshot: ["capture", "full", "area", "device", "responsive"],
@@ -81,6 +81,12 @@ const GROUPS = {
   devtools: ["list", "raw"],
   chain: ["run"],
 };
+
+const INTERACTIVE_ROLES = new Set([
+  "button", "link", "textbox", "checkbox", "radio", "combobox",
+  "listbox", "menuitem", "menuitemcheckbox", "menuitemradio",
+  "option", "searchbox", "slider", "spinbutton", "switch", "tab", "treeitem",
+]);
 
 const TARGET_REQUIRED_GROUPS = new Set([
   "read", "wait", "action", "screenshot", "console", "network", "state", "dialog", "perf", "download", "export", "devtools",
@@ -103,11 +109,11 @@ const VALUE_FLAGS = new Set([
   "--min-text-chars", "--link-limit", "--min-items", "--max-items", "--ready-selector",
   "--ready-text", "--min-cards", "--params", "--var", "--set", "--ref",
   "--foreach", "--reuse", "--wait", "--duration", "--har", "--settle-ms",
-  "--depth", "--max-nodes", "--max-labels", "--max-stitch-captures",
+  "-d", "--depth", "--max-nodes", "--max-labels", "--max-stitch-captures",
 ]);
 
 const BOOLEAN_FLAGS = new Set([
-  "-h", "--help", "--version", "--json", "--plain", "--quiet", "-q", "--verbose",
+  "-h", "--help", "--version", "--json", "--plain", "--quiet", "-q", "--verbose", "-i", "-c", "-D",
   "--debug", "--values", "--background", "--front", "--best-effort-background",
   "--allow-browser-scope-target",
   "--no-fallback", "--anonymous", "--incognito", "--private", "--headless", "--headed", "--full", "--full-page",
@@ -428,6 +434,7 @@ function setFlag(flags, name, value) {
     "-o": "out", "--out": "out", "--output": "out",
     "-h": "help", "--help": "help",
     "-q": "quiet", "--quiet": "quiet",
+    "-i": "interactive", "-c": "compact", "-D": "diff", "-d": "depth",
   })[name] || name.replace(/^--/, "").replace(/-([a-z])/g, (_, c) => c.toUpperCase());
   if (key === "set") {
     flags.set ??= [];
@@ -1548,6 +1555,7 @@ class BrowserDaemon {
       this.cdp.send("Page.enable", {}, sessionId).catch(() => {}),
       this.cdp.send("DOM.enable", {}, sessionId).catch(() => {}),
       this.cdp.send("Network.enable", {}, sessionId).catch(() => {}),
+      this.cdp.send("Accessibility.enable", {}, sessionId).catch(() => {}),
     ]);
     this.cdp.on("Runtime.consoleAPICalled", (params, message) => {
       if (message.sessionId !== sessionId) return;
@@ -1929,6 +1937,11 @@ BrowserDaemon.prototype.read = async function read(command, args, flags) {
     const payload = await this.callFunction(tab.targetId, fn, [Number(flags.limit || 50)]);
     return await maybeWriteReadOut(result({ text: formatValue(payload), target: tab, [command]: payload }), flags, payload, command, { omit: [command] });
   }
+  if (command === "tree") {
+    if (flags.selector && /^[riefblc]\d+$/i.test(flags.selector)) flags.selector = this.selectorFor(tab.targetId, flags.selector);
+    const payload = await this.ariaTree(tab.targetId, flags);
+    return await maybeWriteReadOut(result({ text: payload.tree, target: tab, ...payload }), flags, payload.tree, "tree", { text: true, omit: ["tree", "refs"] });
+  }
   if (command === "is") {
     const [state, ref] = args;
     if (!state || !ref) throw usage("read is requires <state> <ref|selector>");
@@ -1940,7 +1953,7 @@ BrowserDaemon.prototype.read = async function read(command, args, flags) {
 
 BrowserDaemon.prototype.storeRefs = function storeRefs(targetId, refs) {
   const key = this.refStoreKey(targetId);
-  const store = this.refStores.get(key) || { generation: 0, refs: {}, snapshot: "" };
+  const store = this.refStores.get(key) || { generation: 0, refs: {}, snapshot: "", ariaSnapshot: "" };
   store.generation += 1;
   store.refs = refs;
   store.stale = false;
@@ -1974,12 +1987,75 @@ BrowserDaemon.prototype.snapshot = async function snapshot(targetId, flags) {
   const previous = this.refStores.get(this.refStoreKey(targetId)) || { generation: 0, refs: {}, snapshot: "" };
   let output = text;
   if (flags.diff) {
-    output = simpleDiff(previous.snapshot || "", text);
+    output = lineDiff(previous.snapshot || "", text);
   }
   this.storeRefs(targetId, payload.refs || {});
   const store = this.refStores.get(this.refStoreKey(targetId));
   if (store) store.snapshot = text;
   return { ...payload, snapshot: output, stats: { ...(payload.stats || {}), chars: output.length, diff: Boolean(flags.diff) } };
+};
+
+BrowserDaemon.prototype.ariaTree = async function ariaTree(targetId, flags) {
+  const sessionId = await this.attach(targetId);
+  const depthLimit = Number(flags.depth || 0) || undefined;
+  let axNodes;
+  if (flags.selector) {
+    const doc = await this.cdp.send("DOM.getDocument", { depth: 0 }, sessionId);
+    const { nodeId } = await this.cdp.send("DOM.querySelector", { nodeId: doc.root.nodeId, selector: flags.selector }, sessionId);
+    if (!nodeId) throw new CliError(`selector not found: ${flags.selector}`, { code: "not_found", exitCode: 3 });
+    const described = await this.cdp.send("DOM.describeNode", { nodeId }, sessionId);
+    const result = await this.cdp.send("Accessibility.getPartialAXTree", { backendNodeId: described.node.backendNodeId, depth: depthLimit || 12 }, sessionId);
+    axNodes = result.nodes;
+  } else {
+    const result = await this.cdp.send("Accessibility.getFullAXTree", { depth: depthLimit }, sessionId);
+    axNodes = result.nodes;
+  }
+  const formatted = formatAxTreeV2(axNodes, {
+    interactive: Boolean(flags.interactive),
+    compact: Boolean(flags.compact),
+    depth: Number(flags.depth || 50),
+    limit: Number(flags.limit || flags.maxNodes || 800),
+  });
+  const previous = this.refStores.get(this.refStoreKey(targetId)) || { generation: 0, refs: {}, snapshot: "", ariaSnapshot: "" };
+  let output = formatted.text;
+  if (flags.diff) {
+    output = lineDiff(previous.ariaSnapshot || "", formatted.text);
+  }
+  const refs = {};
+  if (formatted.interactiveNodes.length > 0) {
+    await this.assignAriaRefs(targetId, sessionId, formatted.interactiveNodes, refs);
+  }
+  this.storeRefs(targetId, refs);
+  const store = this.refStores.get(this.refStoreKey(targetId));
+  if (store) store.ariaSnapshot = formatted.text;
+  return {
+    tree: output,
+    refs,
+    stats: { lines: formatted.lines, chars: output.length, refs: Object.keys(refs).length, nodes: axNodes.length, diff: Boolean(flags.diff), truncated: formatted.truncated },
+  };
+};
+
+BrowserDaemon.prototype.assignAriaRefs = async function assignAriaRefs(targetId, sessionId, interactiveNodes, refs) {
+  await this.cdp.send("Runtime.evaluate", { expression: 'document.querySelectorAll("[data-realbrowser-ref]").forEach(el => el.removeAttribute("data-realbrowser-ref"))' }, sessionId).catch(() => {});
+  const backendIds = interactiveNodes.map((n) => n.backendDOMNodeId).filter(Boolean);
+  if (backendIds.length === 0) return;
+  let nodeIds;
+  try {
+    const result = await this.cdp.send("DOM.getDocument", { depth: 0 }, sessionId);
+    const pushed = await this.cdp.send("DOM.pushNodesByBackendIds", { backendNodeIds: backendIds }, sessionId);
+    nodeIds = pushed.nodeIds;
+  } catch { return; }
+  for (let i = 0; i < interactiveNodes.length; i++) {
+    const node = interactiveNodes[i];
+    const ref = node.ref;
+    if (!ref) continue;
+    const nodeId = nodeIds?.[backendIds.indexOf(node.backendDOMNodeId)];
+    if (!nodeId || nodeId === 0) continue;
+    try {
+      await this.cdp.send("DOM.setAttributeValue", { nodeId, name: "data-realbrowser-ref", value: ref }, sessionId);
+      refs[ref] = { ref, selector: `[data-realbrowser-ref="${ref}"]`, role: node.role, name: node.name || undefined };
+    } catch { /* skip unstampable nodes */ }
+  }
 };
 
 BrowserDaemon.prototype.wait = async function wait(command, args, flags) {
@@ -2035,7 +2111,9 @@ BrowserDaemon.prototype.action = async function action(command, args, flags) {
   await this.attach(tab.targetId);
   const preflight = await this.callFunction(tab.targetId, actionPreflightFunction, []);
   if (command === "state" || command === "root") {
-    const payload = await this.callFunction(tab.targetId, actionStateFunction, [actionOptions(args, flags)]);
+    const opts = actionOptions(args, flags);
+    if (opts.rootSelector && /^[riefblc]\d+$/i.test(opts.rootSelector)) opts.rootSelector = this.selectorFor(tab.targetId, opts.rootSelector);
+    const payload = await this.callFunction(tab.targetId, actionStateFunction, [opts]);
     this.storeRefs(tab.targetId, payload.refs || {});
     if (flags.screenshot) {
       const selector = activeRootScreenshotSelector(payload);
@@ -3137,6 +3215,7 @@ function browserBases() {
     const local = process.env.LOCALAPPDATA || path.join(home, "AppData/Local");
     return [
       { browser: "chrome", name: "Google Chrome", appName: "Google Chrome", userDataDir: path.join(local, "Google/Chrome/User Data") },
+      { browser: "chromium", name: "Chromium", appName: "Chromium", userDataDir: path.join(local, "Chromium/User Data") },
       { browser: "brave", name: "Brave", appName: "Brave Browser", userDataDir: path.join(local, "BraveSoftware/Brave-Browser/User Data") },
       { browser: "edge", name: "Microsoft Edge", appName: "Microsoft Edge", userDataDir: path.join(local, "Microsoft/Edge/User Data") },
     ];
@@ -3178,43 +3257,75 @@ function endpointBrowserUrl(endpoint) {
 }
 
 async function captureForegroundAppForBackgroundLaunch({ front = false } = {}) {
-  if (front || process.platform !== "darwin") return null;
+  if (front) return null;
   const enabled = String(process.env.REALBROWSER_RESTORE_FOCUS ?? "1").toLowerCase();
   if (["0", "false", "no", "off"].includes(enabled)) return null;
-  const script = [
-    'tell application "System Events"',
-    '  set frontApp to first application process whose frontmost is true',
-    '  set appName to name of frontApp',
-    '  set bundleId to ""',
-    '  try',
-    '    set bundleId to bundle identifier of frontApp',
-    '  end try',
-    '  return bundleId & linefeed & appName',
-    'end tell',
-  ].join("\n");
-  const result = await runProcessOutput("osascript", ["-e", script], 1_000).catch(() => null);
-  if (!result?.ok) return null;
-  const [bundleId = "", name = ""] = String(result.stdout || "").trim().split(/\r?\n/);
-  if (!bundleId && !name) return null;
-  return { platform: "darwin", bundleId, name };
+  if (process.platform === "darwin") {
+    const script = [
+      'tell application "System Events"',
+      '  set frontApp to first application process whose frontmost is true',
+      '  set appName to name of frontApp',
+      '  set bundleId to ""',
+      '  try',
+      '    set bundleId to bundle identifier of frontApp',
+      '  end try',
+      '  return bundleId & linefeed & appName',
+      'end tell',
+    ].join("\n");
+    const result = await runProcessOutput("osascript", ["-e", script], 1_000).catch(() => null);
+    if (!result?.ok) return null;
+    const [bundleId = "", name = ""] = String(result.stdout || "").trim().split(/\r?\n/);
+    if (!bundleId && !name) return null;
+    return { platform: "darwin", bundleId, name };
+  }
+  if (process.platform === "linux") {
+    const result = await runProcessOutput("xdotool", ["getactivewindow"], 1_000).catch(() => null);
+    if (!result?.ok) return null;
+    const windowId = String(result.stdout || "").trim();
+    if (!windowId) return null;
+    return { platform: "linux", windowId };
+  }
+  if (IS_WINDOWS) {
+    const result = await runProcessOutput("powershell", ["-NoProfile", "-Command",
+      'Add-Type -Name W -Namespace T -MemberDefinition \'[DllImport("user32.dll")]public static extern IntPtr GetForegroundWindow();[DllImport("user32.dll")]public static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);\';$h=[T.W]::GetForegroundWindow();$p=0;[T.W]::GetWindowThreadProcessId($h,[ref]$p)|Out-Null;$p',
+    ], 3_000).catch(() => null);
+    if (!result?.ok) return null;
+    const pid = String(result.stdout || "").trim();
+    if (!pid) return null;
+    return { platform: "win32", pid };
+  }
+  return null;
 }
 
 async function restoreForegroundAppAfterBackgroundLaunch(focusRestore, { delayMs = 0 } = {}) {
-  if (!focusRestore || process.platform !== "darwin") return null;
+  if (!focusRestore) return null;
   if (delayMs > 0) await sleep(delayMs);
-  const bundleId = String(focusRestore.bundleId || "");
-  const name = String(focusRestore.name || "");
-  if (!bundleId && !name) return null;
-  const script = [
-    bundleId ? `try\n  tell application id ${appleScriptString(bundleId)} to activate\n  return "bundle"\nend try` : "",
-    name ? `try\n  tell application ${appleScriptString(name)} to activate\n  return "name"\nend try` : "",
-    'return "not-restored"',
-  ].filter(Boolean).join("\n");
-  return await runProcessOutput("osascript", ["-e", script], 1_500).catch((error) => ({
-    ok: false,
-    stdout: "",
-    stderr: error.message || String(error),
-  }));
+  if (focusRestore.platform === "darwin") {
+    const bundleId = String(focusRestore.bundleId || "");
+    const name = String(focusRestore.name || "");
+    if (!bundleId && !name) return null;
+    const script = [
+      bundleId ? `try\n  tell application id ${appleScriptString(bundleId)} to activate\n  return "bundle"\nend try` : "",
+      name ? `try\n  tell application ${appleScriptString(name)} to activate\n  return "name"\nend try` : "",
+      'return "not-restored"',
+    ].filter(Boolean).join("\n");
+    return await runProcessOutput("osascript", ["-e", script], 1_500).catch((error) => ({
+      ok: false, stdout: "", stderr: error.message || String(error),
+    }));
+  }
+  if (focusRestore.platform === "linux") {
+    return await runProcessOutput("xdotool", ["windowactivate", focusRestore.windowId], 1_000).catch((error) => ({
+      ok: false, stdout: "", stderr: error.message || String(error),
+    }));
+  }
+  if (focusRestore.platform === "win32") {
+    return await runProcessOutput("powershell", ["-NoProfile", "-Command",
+      `Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.Interaction]::AppActivate(${focusRestore.pid})`,
+    ], 2_000).catch((error) => ({
+      ok: false, stdout: "", stderr: error.message || String(error),
+    }));
+  }
+  return null;
 }
 
 function appleScriptString(value) {
@@ -3739,7 +3850,7 @@ function actionStateFunction(opts = {}) {
     el.removeAttribute("data-realbrowser-ref");
     el.removeAttribute("data-realbrowser-root");
   });
-  const root = opts.root === "page" ? (document.body || document.documentElement) : activeRootElementSourceEval();
+  const root = opts.root === "page" ? (document.body || document.documentElement) : opts.rootSelector ? (document.querySelector(opts.rootSelector) || activeRootElementSourceEval()) : activeRootElementSourceEval();
   root.setAttribute("data-realbrowser-root", "r1");
   const refs = { r1: { ref: "r1", selector: '[data-realbrowser-root="r1"]', tag: root.tagName.toLowerCase() } };
   const counters = {};
@@ -5041,8 +5152,9 @@ function itemsOptions(args, flags) {
 
 function actionOptions(args, flags) {
   return {
-    root: flags.root || (flags.activeRoot ? "active" : "active"),
+    root: flags.root || (flags.activeRoot ? "active" : undefined),
     activeRoot: flags.root ? Boolean(flags.root === "active" || flags.activeRoot) : true,
+    rootSelector: flags.root && flags.root !== "active" && flags.root !== "page" ? flags.root : undefined,
     compact: Boolean(flags.compact),
     limit: Number(flags.limit || 30),
     text: flags.text,
@@ -5052,7 +5164,7 @@ function actionOptions(args, flags) {
 
 function waitReadyOptions(args, flags, timeout = DEFAULT_TIMEOUT) {
   return {
-    selector: flags.selector || flags.readySelector || args[0] || "",
+    selector: flags.selector || flags.readySelector || "",
     text: flags.text || flags.readyText || "",
     minItems: Number(flags.minItems || flags.minCards || 0),
     visualStable: Boolean(flags.visualStable),
@@ -6079,50 +6191,153 @@ function webpDimensionsFromBuffer(buf) {
   return null;
 }
 
-function formatAxTree(nodes, flags = {}) {
-  const byId = new Map(nodes.map((node) => [node.nodeId, node]));
-  const children = new Map();
-  for (const node of nodes) {
-    if (!node.parentId) continue;
-    if (!children.has(node.parentId)) children.set(node.parentId, []);
-    children.get(node.parentId).push(node);
-  }
-  const lines = [];
-  const visited = new Set();
-  const maxNodes = Number(flags.limit || flags.maxNodes || 1200);
-  const maxDepth = Number(flags.depth || 12);
-  function show(node) {
-    const role = node.role?.value || "";
-    const name = node.name?.value || "";
-    const value = node.value?.value;
-    if (flags.interactive && !/button|link|textbox|checkbox|radio|combobox|option|menuitem|tab|switch|slider|spinbutton/i.test(role)) return false;
-    if (flags.compact && ["none", "generic", "ignored", "presentation"].includes(role) && !name && !value) return false;
-    return role && role !== "none" && !(name === "" && (value === "" || value == null));
-  }
-  function visit(node, depth) {
-    if (!node || visited.has(node.nodeId) || lines.length >= maxNodes || depth > maxDepth) return;
-    visited.add(node.nodeId);
-    if (show(node)) {
-      const role = node.role?.value || "";
-      const name = node.name?.value ? ` "${node.name.value}"` : "";
-      const value = node.value?.value != null ? ` value=${JSON.stringify(node.value.value)}` : "";
-      lines.push(`${"  ".repeat(Math.min(depth, 10))}- ${role}${name}${value}`);
-    }
-    const ordered = [...(node.childIds || []).map((id) => byId.get(id)).filter(Boolean), ...(children.get(node.nodeId) || [])];
-    for (const child of ordered) visit(child, depth + 1);
-  }
-  for (const node of nodes.filter((node) => !node.parentId || !byId.has(node.parentId))) visit(node, 0);
-  for (const node of nodes) visit(node, 0);
-  return lines.length ? lines : ["(empty snapshot)"];
+function ariaRefKind(role) {
+  if (role === "link") return "l";
+  if (/^(button|menuitem|menuitemcheckbox|menuitemradio|tab|switch)$/.test(role)) return "b";
+  return "e";
 }
 
-function simpleDiff(before, after) {
+function formatAxTreeV2(nodes, opts = {}) {
+  const byId = new Map(nodes.map((n) => [n.nodeId, n]));
+  for (const node of nodes) {
+    node._children = (node.childIds || []).map((id) => byId.get(id)).filter(Boolean);
+  }
+  const roots = nodes.filter((n) => !n.parentId || !byId.has(n.parentId));
+  const lines = [];
+  const interactiveNodes = [];
+  const visited = new Set();
+  const maxLines = Number(opts.limit || 800);
+  const maxDepth = Number(opts.depth || 50);
+  let truncated = false;
+  const SKIP_ROLES = new Set(["none", "generic", "presentation", "InlineTextBox", "LineBreak"]);
+  function getProp(node, name) { return node.properties?.find((p) => p.name === name)?.value?.value; }
+  function isInteractive(role) { return INTERACTIVE_ROLES.has(role); }
+  function shouldShow(node) {
+    if (node.ignored) return false;
+    const role = node.role?.value || "";
+    if (!role || SKIP_ROLES.has(role)) return false;
+    if (opts.interactive && !isInteractive(role)) return false;
+    const name = node.name?.value || "";
+    const value = node.value?.value;
+    if (opts.compact && !isInteractive(role) && !name && value == null) return false;
+    return true;
+  }
+  function stateAttrs(node) {
+    const attrs = [];
+    for (const prop of node.properties || []) {
+      const v = prop.value?.value;
+      if (prop.name === "disabled" && v) attrs.push("[disabled]");
+      if (prop.name === "checked" && v != null) attrs.push(`[checked=${v}]`);
+      if (prop.name === "expanded" && v != null) attrs.push(`[expanded=${v}]`);
+      if (prop.name === "pressed" && v != null) attrs.push(`[pressed=${v}]`);
+      if (prop.name === "selected" && v) attrs.push("[selected]");
+      if (prop.name === "required" && v) attrs.push("[required]");
+      if (prop.name === "readonly" && v) attrs.push("[readonly]");
+      if (prop.name === "level" && v != null) attrs.push(`[level=${v}]`);
+      if (prop.name === "focused" && v) attrs.push("[focused]");
+      if (prop.name === "modal" && v) attrs.push("[modal]");
+    }
+    return attrs.join(" ");
+  }
+  function visit(node, depth) {
+    if (!node || visited.has(node.nodeId)) return;
+    visited.add(node.nodeId);
+    if (lines.length >= maxLines) { truncated = true; return; }
+    const show = shouldShow(node);
+    if (show && depth <= maxDepth) {
+      const role = node.role?.value || "";
+      const name = node.name?.value;
+      const value = node.value?.value;
+      const nameStr = name ? ` "${name.length > 120 ? name.slice(0, 117) + "..." : name}"` : "";
+      const valueStr = value != null ? ` value="${String(value).slice(0, 80)}"` : "";
+      const attrs = stateAttrs(node);
+      const focusable = getProp(node, "focusable");
+      const isInt = isInteractive(role);
+      const refPrefix = isInt || focusable ? `${ariaRefKind(role)}? ` : "";
+      lines.push(`${"  ".repeat(Math.min(depth, 10))}- ${refPrefix}${role}${nameStr}${attrs ? " " + attrs : ""}${valueStr}`);
+      if ((isInt || focusable) && node.backendDOMNodeId) {
+        const idx = interactiveNodes.length;
+        interactiveNodes.push({ role, name: name || "", backendDOMNodeId: node.backendDOMNodeId });
+        lines[lines.length - 1] = lines[lines.length - 1].replace(/^(\s*- )[ebl]\? /, `$1REF${idx} `);
+      } else {
+        lines[lines.length - 1] = lines[lines.length - 1].replace(/[ebl]\? /, "");
+      }
+    }
+    for (const child of node._children || []) {
+      visit(child, show && depth <= maxDepth ? depth + 1 : depth);
+    }
+  }
+  for (const root of roots) visit(root, 0);
+  const text = lines.length ? finalizeAriaRefs(lines, interactiveNodes) : "(empty tree)";
+  return { text, interactiveNodes, lines: lines.length, truncated };
+}
+
+function finalizeAriaRefs(lines, interactiveNodes) {
+  const counters = {};
+  const text = lines.map((line) => {
+    const match = line.match(/^(\s*- )REF(\d+) /);
+    if (!match) return line;
+    const node = interactiveNodes[Number(match[2])];
+    const kind = ariaRefKind(node.role);
+    counters[kind] = (counters[kind] || 0) + 1;
+    const ref = `${kind}${counters[kind]}`;
+    node.ref = ref;
+    return line.replace(`REF${match[2]} `, `${ref} `);
+  }).join("\n");
+  return text;
+}
+
+function lineDiff(before, after, contextLines = 2) {
   if (!before) return `${after}\n\n(no previous snapshot to diff against)`;
-  const a = new Set(before.split("\n"));
-  const b = new Set(after.split("\n"));
+  if (before === after) return "(no changes)";
+  const a = before.split("\n");
+  const b = after.split("\n");
+  let prefixLen = 0;
+  while (prefixLen < a.length && prefixLen < b.length && a[prefixLen] === b[prefixLen]) prefixLen++;
+  let suffixLen = 0;
+  while (suffixLen < a.length - prefixLen && suffixLen < b.length - prefixLen && a[a.length - 1 - suffixLen] === b[b.length - 1 - suffixLen]) suffixLen++;
+  const aSlice = a.slice(prefixLen, a.length - suffixLen);
+  const bSlice = b.slice(prefixLen, b.length - suffixLen);
+  const m = aSlice.length;
+  const n = bSlice.length;
+  if (m === 0 && n === 0) return "(no changes)";
+  const dp = Array.from({ length: m + 1 }, () => new Uint16Array(n + 1));
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = aSlice[i - 1] === bSlice[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+  const ops = [];
+  let i = m, j = n;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && aSlice[i - 1] === bSlice[j - 1]) {
+      ops.push({ type: " ", line: aSlice[i - 1], aIdx: prefixLen + i - 1, bIdx: prefixLen + j - 1 });
+      i--; j--;
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      ops.push({ type: "+", line: bSlice[j - 1], bIdx: prefixLen + j - 1 });
+      j--;
+    } else {
+      ops.push({ type: "-", line: aSlice[i - 1], aIdx: prefixLen + i - 1 });
+      i--;
+    }
+  }
+  ops.reverse();
+  const changed = new Set();
+  for (let k = 0; k < ops.length; k++) {
+    if (ops[k].type !== " ") {
+      for (let c = Math.max(0, k - contextLines); c <= Math.min(ops.length - 1, k + contextLines); c++) changed.add(c);
+    }
+  }
   const out = ["--- previous snapshot", "+++ current snapshot"];
-  for (const line of a) if (!b.has(line)) out.push(`- ${line}`);
-  for (const line of b) if (!a.has(line)) out.push(`+ ${line}`);
+  let inHunk = false;
+  for (let k = 0; k < ops.length; k++) {
+    if (changed.has(k)) {
+      if (!inHunk) { out.push(""); inHunk = true; }
+      out.push(`${ops[k].type} ${ops[k].line}`);
+    } else {
+      if (inHunk) { out.push("  ..."); inHunk = false; }
+    }
+  }
   return out.join("\n");
 }
 
@@ -6287,6 +6502,9 @@ All read commands require -t/--target or --handle.
 
   read observe -t app
   read size -t app --json
+  read tree -t app --interactive --compact --diff
+  read tree -t app --selector main --depth 4
+  read tree -t app -i -c -D
   read query -t app "button,input" --limit 20 --json
   read items -t app --root "[role=feed]" --direct-children --limit 8
   read item -t app --collection auto --direct-children --index 4 --max-text-chars 4000
@@ -6608,6 +6826,38 @@ async function runSelfTest() {
   assert(substituted[2] === "https://example.com" && substituted[4] === "ex" && substituted[5] === "file.png", "chain variable substitution");
   const profiles = await listProfiles().catch(() => []);
   assert(Array.isArray(profiles), "profile list returns array");
+  // lineDiff tests
+  assert(lineDiff("a\nb\nc", "a\nb\nc") === "(no changes)", "lineDiff identical");
+  assert(lineDiff("", "hello") === "hello\n\n(no previous snapshot to diff against)", "lineDiff first call");
+  const d1 = lineDiff("a\nb\nc", "a\nx\nc");
+  assert(d1.includes("- b") && d1.includes("+ x"), "lineDiff single change");
+  const d2 = lineDiff("a\na\nb", "a\na\nc");
+  assert(d2.includes("- b") && d2.includes("+ c"), "lineDiff duplicate lines preserved");
+  // ariaRefKind tests
+  assert(ariaRefKind("button") === "b" && ariaRefKind("link") === "l" && ariaRefKind("textbox") === "e", "ariaRefKind mapping");
+  assert(ariaRefKind("menuitem") === "b" && ariaRefKind("tab") === "b" && ariaRefKind("checkbox") === "e", "ariaRefKind extended mapping");
+  assert(ariaRefKind("tabpanel") === "e" && ariaRefKind("tablist") === "e" && ariaRefKind("toolbar") === "e", "ariaRefKind non-button roles");
+  // formatAxTreeV2 tests
+  const mockNodes = [
+    { nodeId: "1", role: { value: "document" }, name: { value: "Test" }, childIds: ["2", "3"], properties: [] },
+    { nodeId: "2", parentId: "1", role: { value: "button" }, name: { value: "Submit" }, childIds: [], backendDOMNodeId: 10, properties: [{ name: "focusable", value: { value: true } }] },
+    { nodeId: "3", parentId: "1", role: { value: "link" }, name: { value: "Home" }, childIds: [], backendDOMNodeId: 11, properties: [{ name: "focusable", value: { value: true } }] },
+  ];
+  const tree = formatAxTreeV2(mockNodes, { interactive: false, compact: false });
+  assert(tree.text.includes("document") && tree.text.includes("button") && tree.text.includes("link"), "formatAxTreeV2 basic output");
+  assert(tree.interactiveNodes.length === 2, "formatAxTreeV2 interactive nodes");
+  const treeI = formatAxTreeV2(mockNodes, { interactive: true, compact: false });
+  assert(!treeI.text.includes("document") && treeI.text.includes("button"), "formatAxTreeV2 interactive filter");
+  // read tree parser
+  const readTree = parseCli(["read", "tree", "-t", "app", "-i", "-c", "-D", "-d", "4"]);
+  assert(readTree.group === "read" && readTree.command === "tree", "read tree parser group/command");
+  assert(readTree.flags.interactive === true && readTree.flags.compact === true && readTree.flags.diff === true && readTree.flags.depth === "4", "read tree short flags");
+  // bug fix regressions
+  const aopts = actionOptions([], {});
+  assert(aopts.root === undefined, "actionOptions no flags yields undefined root");
+  assert(actionOptions([], { root: "e5" }).rootSelector === "e5", "actionOptions ref root passes rootSelector");
+  const wopts = waitReadyOptions(["/tmp/ready.png"], { screenshot: true }, 10000);
+  assert(wopts.selector === "", "waitReadyOptions does not use positional arg as selector");
   stdout("realbrowser self-test passed\n");
 }
 

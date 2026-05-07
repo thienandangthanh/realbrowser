@@ -1,11 +1,21 @@
 # Changelog
 
-## 0.3.0 - 2026-05-07
+## 0.3.0 - 2026-05-08
 
-Added Claude Code plugin support.
+Added ARIA tree, token efficiency improvements, bug fixes, and Claude Code
+plugin support.
 
 Added:
 
+- `read tree` command: compact ARIA accessibility tree via CDP
+  `Accessibility.getFullAXTree`. 5-20x more compact than DOM-based snapshots.
+  Composable flags: `--interactive`/`-i`, `--compact`/`-c`, `--depth N`/`-d N`,
+  `--diff`/`-D`, `--selector`. Refs bridge to DOM for click/fill/type.
+- Short flag aliases: `-i` (interactive), `-c` (compact), `-D` (diff), `-d`
+  (depth) for compact CLI usage.
+- Linux focus restore via `xdotool` for `--best-effort-background`.
+- Windows focus restore via PowerShell for `--best-effort-background`.
+- Windows Chromium user data directory in `browserBases()`.
 - `.claude-plugin/plugin.json` manifest for Claude Code plugin auto-discovery.
 - `skills/realbrowser/` directory structure following the Claude Code plugin
   convention (SKILL.md, scripts, and references inside the skill subdirectory).
@@ -13,6 +23,14 @@ Added:
 
 Changed:
 
+- Replaced set-based `simpleDiff` with proper LCS-based `lineDiff` that
+  preserves line ordering, handles duplicates, and shows context lines.
+- `--best-effort-background` focus restore now works on Linux (xdotool) and
+  Windows (PowerShell) in addition to macOS (osascript).
+- SKILL.md operating loop updated: `read tree -i -c` as primary interaction
+  reader, `read tree --diff` as verify-after-action pattern, explicit warning
+  against Playwright pseudo-selectors, preference for `wait ready --visual-stable`
+  over `sleep N && screenshot capture`.
 - Moved `SKILL.md`, `scripts/`, and `references/` into `skills/realbrowser/`
   for Claude Code skill auto-discovery.
 - Replaced Codex-specific path (`$HOME/.codex/skills/...`) with portable
@@ -20,6 +38,23 @@ Changed:
 - Replaced Codex-specific language with agent-generic terms throughout docs.
 - Updated `README.md` with Claude Code installation instructions and new
   directory layout.
+- Set the script version to `0.3.0`.
+
+Fixed:
+
+- `wait ready --screenshot <path>` no longer treats the output path as a CSS
+  selector (was using `args[0]` as selector fallback).
+- `action state --root <ref>` now resolves ref-based and CSS selector roots
+  instead of always falling back to `activeRootElementSourceEval()`.
+- Dead ternary in `actionOptions` (`"active" : "active"`) replaced with correct
+  conditional.
+- `ariaRefKind` regex now uses grouping so roles like `tabpanel` and `tablist`
+  are not misclassified as button refs.
+- `assignAriaRefs` uses pre-assigned `node.ref` from `finalizeAriaRefs` instead
+  of recomputing counters, preventing ref mismatch when `pushNodesByBackendIds`
+  partially fails.
+- Windows focus capture uses `GetForegroundWindow` via P/Invoke instead of
+  `Get-Process` sort, which could return the wrong window.
 
 Compatibility:
 

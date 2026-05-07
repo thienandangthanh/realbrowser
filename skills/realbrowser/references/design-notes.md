@@ -143,3 +143,16 @@ Long-term invariants:
   Chromium-family browser. Shell wrappers are thin launchers; the browser
   protocol work lives in Node/CDP. It avoids shell-specific loops and quoting
   traps by supporting `chain`.
+- `read tree` uses CDP `Accessibility.getFullAXTree` for compact ARIA-based page
+  representation. This is preferred over in-page JavaScript DOM walking because:
+  the browser computes correct accessible names (resolving `aria-labelledby`
+  chains, `<label for>` associations, `title` fallbacks), correct implicit roles
+  (HTML semantics), and correct state inheritance (disabled propagation, hidden
+  subtrees). The resulting tree is 5-20x more compact than DOM-based snapshots
+  for typical pages. Refs from `read tree` bridge back to DOM via
+  `DOM.pushNodesByBackendIds` + `DOM.setAttributeValue` so existing click/fill/type
+  code works unchanged. `read tree` and `read snapshot` maintain separate diff
+  baselines so `--diff` on each diffs against its own history.
+- Focus restore on `--best-effort-background` uses platform-native tools:
+  `osascript` on macOS, `xdotool` on Linux, PowerShell on Windows. All degrade
+  gracefully if the platform tool is not installed.
