@@ -12,6 +12,8 @@ Global flags:
 -t, --target <label|targetId|prefix>   Target for reads/actions
 --handle <name|path>                   Saved target handle
 --context <id>                         profile:..., anonymous:..., session:..., endpoint:...
+--owner <id>                           Scope labels/defaults/leases to a Codex run or project
+--global                               Use the shared global owner namespace intentionally
 -p, --profile <profile>                Browser profile, e.g. chrome:Default
 --anonymous --session <name>           Isolated managed browser context
 --browser-url <url>                    Explicit CDP endpoint
@@ -23,6 +25,7 @@ Global flags:
 --front                                Explicit foreground handoff
 --incognito, --private                 Visual Chrome Incognito UI for anonymous sessions
 --allow-browser-scope-target           Explicit opt-in to cross-profile target risk
+--take-lease                           Intentionally take a target leased by another owner
 --confirm                              Explicit approval for disruptive commands
 --force                                Guarded opt-in for risky operations
 --timeout <ms>                         Operation timeout
@@ -99,7 +102,8 @@ Exit codes:
 2 usage/validation failure
 3 target not found, ambiguous, or stale
 4 context/profile cannot be proven safe
-5 action preflight/final guard failure
+5 action preflight/final guard failure, target lease conflict, raw mutation guard, or browser-wide state guard
+6 local state lock timeout
 ```
 
 JSON rules:
@@ -117,6 +121,18 @@ Important command semantics:
 - `tab ensure <url> --label L` reuses a live label or exact URL before creating;
   in browser-scoped profile contexts, reuse is limited to tabs proven to have
   been created through that named profile.
+- Labels, default context, and element refs are scoped by owner. Use
+  `--owner <id>` or `REALBROWSER_OWNER=<id>` when several Codex sessions are open
+  and should not share labels such as `app` or overwrite each other's `b1`/`e1`
+  action refs.
+- Mutating commands claim/check a target lease. If a target is leased by another
+  owner, navigation, focus, close, actions, reload captures, state changes,
+  viewport/full screenshots, annotated screenshots/checkpoints, downloads, trace
+  control, dialog arming, and mutating raw CDP calls fail until the caller
+  intentionally uses `--take-lease` or `--force`. Leases age out after
+  `REALBROWSER_LEASE_STALE_MS` milliseconds, defaulting to seven days.
+  `tab ensure` skips another owner's URL match and creates a fresh tab instead
+  of reusing that tab.
 - `--anonymous` means isolated temporary browser state. Add `--incognito` or
   `--private` only when a managed anonymous session should open as Chrome's
   visible Incognito UI. Incognito/private mode is not supported with signed-in
@@ -191,7 +207,8 @@ Important command semantics:
 - `network body --full` requires `--out` unless `--force`; default stdout is
   capped and JSON-safe.
 - `state headers`, `state permissions`, and `state clipboard` cover testing
-  flows without opening DevTools.
+  flows without opening DevTools. Permission grant/reset uses Chrome
+  browser-wide APIs and requires `--force`.
 - `daemon monitor --json` reports live CDP health, target count, sessions, and
   per-target buffer sizes without dumping page content. If a daemon is starting
   while Chrome waits for Allow debugging, retrying the same command should wait
@@ -212,10 +229,16 @@ session use profile:chrome:Default
 session use anonymous:check
 session use endpoint:http://127.0.0.1:9222
 session clear
+session clear --all
+session stop [query]
+session stop [query] --all
 ```
 
 Default context never replaces target selection. It only removes repeated
-`--profile`/`--anonymous --session` flags for follow-up commands.
+`--profile`/`--anonymous --session` flags for follow-up commands. Defaults are
+stored per owner; `session clear` clears the current owner, and `session clear
+--all` removes every owner default. `session stop` is also owner-scoped unless
+`--all` is explicit.
 
 Keyboard actions:
 

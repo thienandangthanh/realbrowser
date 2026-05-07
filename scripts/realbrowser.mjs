@@ -17,7 +17,8 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
+const STATE_SCHEMA_VERSION = "owner-lease-1";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
 const IS_WINDOWS = process.platform === "win32";
@@ -44,8 +45,21 @@ const ARTIFACT_DIR = process.env.REALBROWSER_ARTIFACT_DIR || path.join(os.tmpdir
 const LABELS_FILE = path.join(STATE_DIR, "labels.json");
 const LABEL_META_FILE = path.join(STATE_DIR, "label-meta.json");
 const TARGET_META_FILE = path.join(STATE_DIR, "target-meta.json");
+const LEASES_FILE = path.join(STATE_DIR, "target-leases.json");
 const HANDLES_DIR = path.join(STATE_DIR, "handles");
 const DEFAULT_CONTEXT_FILE = path.join(STATE_DIR, "default-context.json");
+const OWNER_ENV_KEYS = [
+  "REALBROWSER_OWNER",
+  "CODEX_THREAD_ID",
+  "CODEX_SESSION_ID",
+  "CODEX_SESSION",
+  "OPENAI_SESSION_ID",
+  "CLAUDE_SESSION_ID",
+  "TERM_SESSION_ID",
+  "ITERM_SESSION_ID",
+];
+const OWNER_SCOPE_SEPARATOR = "@@owner:";
+const LEASE_STALE_MS = parseOptionalIntegerEnv("REALBROWSER_LEASE_STALE_MS", 7 * 24 * 60 * 60 * 1000);
 
 const GROUPS = {
   profile: ["list", "inspect", "relaunch"],
@@ -74,7 +88,7 @@ const TARGET_REQUIRED_GROUPS = new Set([
 
 const VALUE_FLAGS = new Set([
   "-t", "--target", "-p", "--profile", "-o", "--out", "--output",
-  "--context",
+  "--context", "--owner",
   "--handle", "--handle-out", "--handle-name", "--browser", "--browser-url",
   "--session", "--label", "--timeout", "--max-chars", "--limit", "--selector",
   "--root", "--input", "--input-ref", "--element", "--trigger", "--trigger-ref", "--text", "--value-file", "--from", "--return", "--trace",
@@ -106,6 +120,7 @@ const BOOLEAN_FLAGS = new Set([
   "--screenshot", "--annotate-refs", "--annotate", "--labels", "--mobile-emulation", "--mobile",
   "--no-skeletons", "--latest", "--active", "--stdin", "--final", "--cdp",
   "--system", "--deep", "--allow-file-dialog", "--no-normalize", "--normalize",
+  "--take-lease", "--all", "--global",
 ]);
 
 class CliError extends Error {
@@ -430,10 +445,70 @@ function normalizeFlags(flags) {
   if (flags.private) flags.incognito = true;
   if (flags.front) flags.background = false;
   if (flags.incognito && !flags.profile && !flags.browserUrl && !flags.context) flags.anonymous = true;
-  if (flags.anonymous && !flags.session) flags.session = "anonymous";
+  if (flags.anonymous && !flags.session) {
+    flags.session = "anonymous";
+  }
   if (flags.session && !flags.profile && !flags.browserUrl && !flags.context) flags.anonymous = true;
   if (flags.timeout) flags.timeout = Number(flags.timeout);
   if (!Number.isFinite(flags.timeout)) flags.timeout = DEFAULT_TIMEOUT;
+}
+
+function normalizeOwner(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  return value.replace(/[^A-Za-z0-9_.:@/-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 96);
+}
+
+function explicitOwnerSelected(flags = {}) {
+  return Boolean(flags.owner || flags.global || process.env.REALBROWSER_OWNER);
+}
+
+function resolveOwner(flags = {}) {
+  if (flags.global) return "global";
+  for (const key of OWNER_ENV_KEYS) {
+    const value = key === "REALBROWSER_OWNER" ? flags.owner || process.env[key] : process.env[key];
+    const owner = normalizeOwner(value);
+    if (owner) return owner;
+  }
+  return fallbackOwner();
+}
+
+function fallbackOwner() {
+  const root = nearestProjectRoot(process.cwd()) || process.cwd();
+  const base = sanitizeOwnerComponent(path.basename(root) || "workspace");
+  const hash = crypto.createHash("sha256").update(root).digest("hex").slice(0, 10);
+  return normalizeOwner(`${base}-${hash}`);
+}
+
+function sanitizeOwnerComponent(value) {
+  return String(value || "workspace").replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "workspace";
+}
+
+function nearestProjectRoot(start) {
+  let current = path.resolve(start || process.cwd());
+  while (current && current !== path.dirname(current)) {
+    if (fs.existsSync(path.join(current, ".git"))) return current;
+    if (fs.existsSync(path.join(current, "package.json"))) return current;
+    current = path.dirname(current);
+  }
+  return path.resolve(start || process.cwd());
+}
+
+function ownerScopedContextKey(contextKey, owner) {
+  return `${contextKey}${OWNER_SCOPE_SEPARATOR}${normalizeOwner(owner) || "default"}`;
+}
+
+function baseContextKeyFromScopedKey(key) {
+  return String(key || "").split(OWNER_SCOPE_SEPARATOR)[0];
+}
+
+function ownerFromScopedContextKey(key) {
+  const index = String(key || "").indexOf(OWNER_SCOPE_SEPARATOR);
+  return index >= 0 ? String(key).slice(index + OWNER_SCOPE_SEPARATOR.length) : "";
+}
+
+function anonymousContextKey(flags, session) {
+  return flags.incognito ? `anonymous-incognito:${session}` : `anonymous:${session}`;
 }
 
 function defaultCommand(group) {
@@ -469,20 +544,23 @@ function requireTarget(parsed) {
 }
 
 async function resolveContext(flags, parsed = {}) {
+  const ownerExplicit = explicitOwnerSelected(flags);
+  flags.owner = resolveOwner(flags);
   const explicitBeforeDefaults = hasExplicitContext(flags) || Boolean(flags.handle);
   if (flags.context) {
     mergeContextFlags(flags, contextFlagsFromString(flags.context));
   }
   if (!explicitBeforeDefaults && !hasExplicitContext(flags) && flags.target) {
-    mergeContextFlags(flags, contextFlagsForKnownTarget(flags.target));
+    mergeContextFlags(flags, contextFlagsForKnownTarget(flags.target, flags.owner));
   }
   if (!explicitBeforeDefaults && !hasExplicitContext(flags)) {
-    mergeContextFlags(flags, await defaultContextFlags());
+    mergeContextFlags(flags, await defaultContextFlags(flags.owner));
   }
   if (flags.session && !flags.profile && !flags.browserUrl) flags.anonymous = true;
   if (flags.handle) {
     const handle = await readHandle(flags.handle);
     if (!flags.target) flags.target = handle.target || handle.label || handle.targetId;
+    if (handle.context?.owner && !ownerExplicit) flags.owner = normalizeOwner(handle.context.owner);
     validateHandleContext(flags, handle);
     if (handle.context?.profile && !flags.profile) flags.profile = handle.context.profile;
     if (handle.context?.browserUrl && !flags.browserUrl) flags.browserUrl = handle.context.browserUrl;
@@ -497,14 +575,15 @@ async function resolveContext(flags, parsed = {}) {
     });
   }
   if (flags.browserUrl) {
-    return { kind: "endpoint", key: `endpoint:${flags.browserUrl}`, browserUrl: flags.browserUrl, flags: publicContextFlags(flags) };
+    return { kind: "endpoint", key: `endpoint:${flags.browserUrl}`, owner: flags.owner, browserUrl: flags.browserUrl, flags: publicContextFlags(flags) };
   }
   if (flags.anonymous) {
     const session = flags.session || "anonymous";
     return {
       kind: "anonymous",
-      key: flags.incognito ? `anonymous-incognito:${session}` : `anonymous:${session}`,
+      key: anonymousContextKey(flags, session),
       session,
+      owner: flags.owner,
       incognito: Boolean(flags.incognito),
       headless: flags.headed ? false : !flags.front,
       flags: publicContextFlags(flags),
@@ -529,6 +608,7 @@ async function resolveContext(flags, parsed = {}) {
         return {
           kind: "profile-launch",
           key: `profile:${profile.id}`,
+          owner: flags.owner,
           profile,
           allowFocusRisk: Boolean(flags.front || flags.bestEffortBackground),
           front: Boolean(flags.front),
@@ -558,6 +638,7 @@ async function resolveContext(flags, parsed = {}) {
     return {
       kind: "profile",
       key: `profile:${profile.id}`,
+      owner: flags.owner,
       profile,
       browserUrl: endpointBrowserUrl(endpoint),
       endpointScope: endpoint.scope || "unknown",
@@ -566,14 +647,15 @@ async function resolveContext(flags, parsed = {}) {
   }
   const endpoint = await findAnyDevtoolsEndpoint();
   if (endpoint) {
-    return { kind: "endpoint", key: `endpoint:${endpoint}`, browserUrl: endpoint, flags: publicContextFlags(flags) };
+    return { kind: "endpoint", key: `endpoint:${endpoint}`, owner: flags.owner, browserUrl: endpoint, flags: publicContextFlags(flags) };
   }
   if (parsed.group === "tab" && ["ensure", "new"].includes(parsed.command)) {
     const session = flags.session || "default";
     return {
       kind: "anonymous",
-      key: flags.incognito ? `anonymous-incognito:${session}` : `anonymous:${session}`,
+      key: anonymousContextKey(flags, session),
       session,
+      owner: flags.owner,
       incognito: Boolean(flags.incognito),
       headless: flags.headed ? false : !flags.front,
       flags: publicContextFlags(flags),
@@ -619,38 +701,40 @@ function contextFlagsFromString(raw) {
   return { anonymous: true, session: value };
 }
 
-function contextFlagsForKnownTarget(target) {
+function contextFlagsForKnownTarget(target, owner) {
   const raw = String(target || "").replace(/^label:/, "").trim();
   if (!raw || raw.startsWith("cdp:")) return {};
   const labels = readJson(LABELS_FILE) || {};
   const matches = [];
   for (const [contextKey, contextLabels] of Object.entries(labels)) {
     if (!contextLabels || typeof contextLabels !== "object") continue;
+    const scopedOwner = ownerFromScopedContextKey(contextKey);
+    if (scopedOwner && scopedOwner !== owner) continue;
     if (contextLabels[raw]) matches.push(contextKey);
   }
-  const unique = [...new Set(matches)];
+  const unique = [...new Set(matches.map(baseContextKeyFromScopedKey))];
   return unique.length === 1 ? contextFlagsFromString(unique[0]) : {};
 }
 
-async function defaultContextFlags() {
-  const envContext = process.env.REALBROWSER_CONTEXT || process.env.REALBROWSER_CONTEXT;
+async function defaultContextFlags(owner) {
+  const envContext = process.env.REALBROWSER_CONTEXT;
   if (envContext) return contextFlagsFromString(envContext);
-  if (process.env.REALBROWSER_BROWSER_URL || process.env.REALBROWSER_BROWSER_URL) {
-    return { browserUrl: process.env.REALBROWSER_BROWSER_URL || process.env.REALBROWSER_BROWSER_URL };
+  if (process.env.REALBROWSER_BROWSER_URL) {
+    return { browserUrl: process.env.REALBROWSER_BROWSER_URL };
   }
-  if (process.env.REALBROWSER_PROFILE || process.env.REALBROWSER_PROFILE) {
-    return { profile: process.env.REALBROWSER_PROFILE || process.env.REALBROWSER_PROFILE };
+  if (process.env.REALBROWSER_PROFILE) {
+    return { profile: process.env.REALBROWSER_PROFILE };
   }
-  if (process.env.REALBROWSER_SESSION || process.env.REALBROWSER_SESSION) {
-    return { anonymous: true, session: process.env.REALBROWSER_SESSION || process.env.REALBROWSER_SESSION };
+  if (process.env.REALBROWSER_SESSION) {
+    return { anonymous: true, session: process.env.REALBROWSER_SESSION };
   }
-  const saved = readJson(DEFAULT_CONTEXT_FILE);
-  return saved?.flags || {};
+  return defaultContextEntryForOwner(owner)?.flags || {};
 }
 
 function validateHandleContext(flags, handle) {
   const context = handle.context || {};
   const mismatches = [];
+  if (flags.owner && context.owner && flags.owner !== context.owner) mismatches.push(`owner ${flags.owner} != ${context.owner}`);
   if (flags.profile && context.profile && flags.profile !== context.profile) mismatches.push(`profile ${flags.profile} != ${context.profile}`);
   if (flags.browserUrl && context.browserUrl && flags.browserUrl !== context.browserUrl) mismatches.push("browser-url differs");
   if (flags.session && context.session && flags.session !== context.session) mismatches.push(`session ${flags.session} != ${context.session}`);
@@ -665,12 +749,14 @@ function validateHandleContext(flags, handle) {
 
 function publicContextFlags(flags) {
   return {
+    owner: flags.owner,
     profile: flags.profile,
     browser: flags.browser,
     browserUrl: flags.browserUrl,
     anonymous: Boolean(flags.anonymous),
     session: flags.session,
     incognito: Boolean(flags.incognito),
+    global: Boolean(flags.global),
     front: Boolean(flags.front),
     background: flags.background !== false,
   };
@@ -722,7 +808,7 @@ async function ensureDaemon(context) {
     await fsp.rm(stateFile, { force: true }).catch(() => {});
     const token = crypto.randomBytes(24).toString("hex");
     const contextPath = `${stateFile}.context.json`;
-    await writeJsonFile(contextPath, { context, token, stateFile, labelsFile: LABELS_FILE, labelMetaFile: LABEL_META_FILE, targetMetaFile: TARGET_META_FILE, artifactDir: ARTIFACT_DIR });
+    await writeJsonFile(contextPath, { context, token, stateFile, labelsFile: LABELS_FILE, labelMetaFile: LABEL_META_FILE, targetMetaFile: TARGET_META_FILE, leasesFile: LEASES_FILE, artifactDir: ARTIFACT_DIR });
     const child = spawn(process.execPath, [SCRIPT_PATH, "__daemon", contextPath], {
       detached: true,
       stdio: "ignore",
@@ -732,6 +818,7 @@ async function ensureDaemon(context) {
     await writeJsonFile(stateFile, {
       pid: child.pid,
       version: VERSION,
+      runtimeSchema: STATE_SCHEMA_VERSION,
       startedAt: new Date().toISOString(),
       context,
       starting: true,
@@ -751,7 +838,7 @@ async function ensureDaemon(context) {
 async function readyDaemonStateFromFile(stateFile, context) {
   const existing = readJson(stateFile);
   if (!existing) return null;
-  if (existing.version !== VERSION) {
+  if (existing.version !== VERSION || existing.runtimeSchema !== STATE_SCHEMA_VERSION) {
     if (processAlive(existing.pid)) await stopDaemonState(existing).catch(() => {});
     await fsp.rm(stateFile, { force: true }).catch(() => {});
     return null;
@@ -813,8 +900,8 @@ async function reusableDaemonForContext(context, preferredStateFile = "") {
   for (const file of listStateFiles()) {
     if (file === preferredStateFile) continue;
     const state = readJson(file);
-    if (!state || state.version !== VERSION || !processAlive(state.pid)) continue;
-    if (contextBrowserUrl(state) !== browserUrl) continue;
+    if (!state || state.version !== VERSION || state.runtimeSchema !== STATE_SCHEMA_VERSION || !processAlive(state.pid)) continue;
+    if (!browserEndpointsMatch(contextBrowserUrl(state), browserUrl)) continue;
     try {
       const health = await httpRequest({
         method: "GET",
@@ -843,7 +930,7 @@ async function waitForDaemonState(stateFile, timeoutMs) {
         next: next.error.next || [`state: ${stateFile}`],
       });
     }
-    if (next?.port && next?.token && processAlive(next.pid)) return next;
+    if (next?.port && next?.token && next.version === VERSION && next.runtimeSchema === STATE_SCHEMA_VERSION && processAlive(next.pid)) return next;
     if (next?.pid && !processAlive(next.pid)) return null;
     await sleep(100);
   }
@@ -861,6 +948,7 @@ async function runDaemon(args) {
     await writeJsonFile(boot.stateFile, {
       pid: process.pid,
       version: VERSION,
+      runtimeSchema: STATE_SCHEMA_VERSION,
       startedAt: new Date().toISOString(),
       context: boot.context,
       starting: true,
@@ -870,6 +958,7 @@ async function runDaemon(args) {
     await writeJsonFile(boot.stateFile, {
       pid: process.pid,
       version: VERSION,
+      runtimeSchema: STATE_SCHEMA_VERSION,
       startedAt: new Date().toISOString(),
       context: boot.context,
       error: {
@@ -891,6 +980,7 @@ class BrowserDaemon {
     this.labelsFile = boot.labelsFile || LABELS_FILE;
     this.labelMetaFile = boot.labelMetaFile || LABEL_META_FILE;
     this.targetMetaFile = boot.targetMetaFile || TARGET_META_FILE;
+    this.leasesFile = boot.leasesFile || LEASES_FILE;
     this.artifactDir = boot.artifactDir || ARTIFACT_DIR;
     this.cdp = new CDP();
     this.browserUrl = "";
@@ -906,6 +996,7 @@ class BrowserDaemon {
     this.labels = readJson(this.labelsFile) || {};
     this.labelMeta = readJson(this.labelMetaFile) || {};
     this.targetMeta = readJson(this.targetMetaFile) || {};
+    this.leases = readJson(this.leasesFile) || {};
     this.anonymousProcess = null;
     this.anonymousDir = null;
     this.server = null;
@@ -945,6 +1036,7 @@ class BrowserDaemon {
       port,
       token,
       version: VERSION,
+      runtimeSchema: STATE_SCHEMA_VERSION,
       startedAt: new Date().toISOString(),
       context: this.publicContext(),
       browserUrl: this.browserUrl,
@@ -1042,10 +1134,48 @@ class BrowserDaemon {
     await restoreForegroundAppAfterBackgroundLaunch(focusRestore, { delayMs: 250 }).catch(() => {});
     return { focusRestore };
   }
+  owner() {
+    return normalizeOwner(this.context.owner) || "default";
+  }
+  contextScopeKey() {
+    return ownerScopedContextKey(this.context.key, this.owner());
+  }
+  labelsForContext({ includeLegacy = true } = {}) {
+    const scoped = this.labels[this.contextScopeKey()] || {};
+    if (!includeLegacy) return scoped;
+    return { ...(this.labels[this.context.key] || {}), ...scoped };
+  }
+  labelMetaForContext({ includeLegacy = true } = {}) {
+    const scoped = this.labelMeta[this.contextScopeKey()] || {};
+    if (!includeLegacy) return scoped;
+    return { ...(this.labelMeta[this.context.key] || {}), ...scoped };
+  }
+  leaseContextKey() {
+    return this.context.key;
+  }
+  targetMetaForTarget(targetId) {
+    return this.targetMeta?.[this.contextScopeKey()]?.[targetId] || this.targetMeta?.[this.context.key]?.[targetId];
+  }
+  leasesForContext() {
+    return this.leases[this.leaseContextKey()] || {};
+  }
+  leaseForTarget(targetId) {
+    const matches = [];
+    const direct = this.leasesForContext()[targetId];
+    if (direct) matches.push(direct);
+    for (const contextLeases of Object.values(this.leases || {})) {
+      if (!contextLeases || typeof contextLeases !== "object") continue;
+      const lease = contextLeases[targetId];
+      if (!lease) continue;
+      if (!lease.browserUrl || !this.browserUrl || browserEndpointsMatch(lease.browserUrl, this.browserUrl)) matches.push(lease);
+    }
+    return newestLease(matches);
+  }
   publicContext() {
     return {
       kind: this.context.kind,
       key: this.context.key,
+      owner: this.owner(),
       profile: this.context.profile?.id,
       anonymous: this.context.kind === "anonymous",
       session: this.context.session,
@@ -1061,10 +1191,12 @@ class BrowserDaemon {
       ok: true,
       pid: process.pid,
       version: VERSION,
+      runtimeSchema: STATE_SCHEMA_VERSION,
       context: this.publicContext(),
       browserUrl: this.browserUrl,
       targets: targets.map((target) => ({ suggestedTarget: target.suggestedTarget, title: target.title, url: target.url })),
       targetCount: targets.length,
+      owner: this.owner(),
       buffers: {
         console: bufferSizes(this.consoleBuffers),
         network: bufferSizes(this.networkBuffers),
@@ -1076,8 +1208,10 @@ class BrowserDaemon {
   async installTargetLifecycleHooks() {
     this.cdp.on("Target.targetDestroyed", ({ targetId }) => {
       this.sessions.delete(targetId);
-      const store = this.refStores.get(targetId);
-      if (store) store.stale = true;
+      for (const [key, store] of this.refStores.entries()) {
+        if (key.endsWith(`:${targetId}`)) store.stale = true;
+      }
+      this.releaseTargetLeaseEverywhere(targetId).catch(() => {});
     });
     await this.cdp.send("Target.setDiscoverTargets", { discover: true }).catch(() => {});
   }
@@ -1088,6 +1222,10 @@ class BrowserDaemon {
       this.context = payload.context;
     }
     try {
+      this.labels = readJson(this.labelsFile) || {};
+      this.labelMeta = readJson(this.labelMetaFile) || {};
+      this.targetMeta = readJson(this.targetMetaFile) || {};
+      this.leases = readJson(this.leasesFile) || {};
       const { group, command, args = [], flags = {} } = payload;
       if (group === "tab") return await this.tab(command, args, flags);
       if (group === "handle") return await this.handle(command, args, flags);
@@ -1117,7 +1255,7 @@ class BrowserDaemon {
   }
   assertRequestContextCompatible(context = {}) {
     const requestBrowserUrl = contextBrowserUrl(context);
-    if (!requestBrowserUrl || !this.browserUrl || requestBrowserUrl === this.browserUrl) return;
+    if (!requestBrowserUrl || !this.browserUrl || browserEndpointsMatch(requestBrowserUrl, this.browserUrl)) return;
     throw new CliError("request context does not match daemon browser endpoint", {
       code: "daemon_context_mismatch",
       exitCode: 4,
@@ -1133,17 +1271,19 @@ class BrowserDaemon {
   }
   async tabs() {
     const raw = await this.tabsRaw();
-    const labelsForContext = this.labels[this.context.key] || {};
+    const labelsForContext = this.labelsForContext();
     const targetIds = raw.map((tab) => tab.targetId);
     const prefixLen = getDisplayPrefixLength(targetIds);
     return raw.map((tab) => {
       const label = Object.entries(labelsForContext).find(([, id]) => id === tab.targetId)?.[0];
+      const lease = this.leaseForTarget(tab.targetId);
       const targetPrefix = tab.targetId.slice(0, prefixLen);
       const base = {
         id: `cdp:${targetPrefix}`,
         targetId: tab.targetId,
         targetPrefix,
         label,
+        lease,
         suggestedTarget: label || targetPrefix,
         title: tab.title || "",
         url: tab.url || "",
@@ -1164,12 +1304,12 @@ class BrowserDaemon {
     return this.context.kind === "profile" && this.context.profile && this.context.endpointScope === "browser";
   }
   labelForTarget(tab) {
-    const labelsForContext = this.labels[this.context.key] || {};
+    const labelsForContext = this.labelsForContext();
     return Object.entries(labelsForContext).find(([, id]) => id === tab.targetId)?.[0] || "";
   }
   profileTargetProven(tab) {
     if (!this.isBrowserScopedProfileContext()) return true;
-    const targetMeta = this.targetMeta?.[this.context.key]?.[tab.targetId];
+    const targetMeta = this.targetMetaForTarget(tab.targetId);
     if (
       targetMeta &&
       targetMeta.profileOwned === true &&
@@ -1177,7 +1317,7 @@ class BrowserDaemon {
     ) return true;
     const label = tab.label || this.labelForTarget(tab);
     if (!label) return false;
-    const meta = this.labelMeta[this.context.key]?.[label];
+    const meta = this.labelMetaForContext()[label];
     return Boolean(
       meta &&
       meta.targetId === tab.targetId &&
@@ -1213,7 +1353,7 @@ class BrowserDaemon {
   }
   async resolveTarget(ref, { allowQuery = false, allowUnprovenProfileTarget = false, operation = "target" } = {}) {
     const tabs = await this.tabs();
-    const labelsForContext = this.labels[this.context.key] || {};
+    const labelsForContext = this.labelsForContext();
     const raw = String(ref || "").replace(/^label:/, "").replace(/^cdp:/, "");
     if (!raw) throw new CliError("target is required", { code: "target_required", exitCode: 3 });
     const labelId = labelsForContext[raw];
@@ -1248,33 +1388,156 @@ class BrowserDaemon {
   }
   async setTargetMeta(targetId, meta = {}) {
     if (!targetId) return;
-    this.targetMeta[this.context.key] ??= {};
-    const previous = this.targetMeta[this.context.key][targetId] || {};
-    this.targetMeta[this.context.key][targetId] = {
-      ...previous,
-      targetId,
-      profileOwned: Boolean(meta.profileOwned),
-      profile: meta.profile || this.context.profile?.id,
-      source: meta.source || previous.source || "",
-      updatedAt: new Date().toISOString(),
-    };
-    await writeJsonFile(this.targetMetaFile, this.targetMeta);
+    const scopeKey = this.contextScopeKey();
+    this.targetMeta = await updateJsonFile(this.targetMetaFile, {}, (current) => {
+      current[scopeKey] ??= {};
+      const previous = current[scopeKey][targetId] || {};
+      current[scopeKey][targetId] = {
+        ...previous,
+        targetId,
+        profileOwned: Boolean(meta.profileOwned),
+        profile: meta.profile || this.context.profile?.id,
+        source: meta.source || previous.source || "",
+        updatedAt: new Date().toISOString(),
+      };
+      return current;
+    });
   }
   async setLabel(label, targetId, meta = {}) {
     if (!label) return;
-    this.labels[this.context.key] ??= {};
-    this.labels[this.context.key][label] = targetId;
-    this.labelMeta[this.context.key] ??= {};
-    this.labelMeta[this.context.key][label] = {
-      targetId,
-      profileOwned: Boolean(meta.profileOwned),
-      profile: meta.profile || this.context.profile?.id,
-      source: meta.source || "",
-      updatedAt: new Date().toISOString(),
-    };
+    const existing = this.labelsForContext()[label];
+    if (existing && existing !== targetId && !meta.force) {
+      throw new CliError(`label already exists: ${label}`, {
+        code: "label_exists",
+        exitCode: 2,
+        next: [`realbrowser tab label <target> ${label} --force`],
+      });
+    }
+    const scopeKey = this.contextScopeKey();
+    this.labels = await updateJsonFile(this.labelsFile, {}, (current) => {
+      const lockedExisting = current[scopeKey]?.[label] || current[this.context.key]?.[label];
+      if (lockedExisting && lockedExisting !== targetId && !meta.force) {
+        throw new CliError(`label already exists: ${label}`, {
+          code: "label_exists",
+          exitCode: 2,
+          next: [`realbrowser tab label <target> ${label} --force`],
+        });
+      }
+      current[scopeKey] ??= {};
+      current[scopeKey][label] = targetId;
+      return current;
+    });
+    this.labelMeta = await updateJsonFile(this.labelMetaFile, {}, (current) => {
+      current[scopeKey] ??= {};
+      current[scopeKey][label] = {
+        targetId,
+        profileOwned: Boolean(meta.profileOwned),
+        profile: meta.profile || this.context.profile?.id,
+        owner: this.owner(),
+        source: meta.source || "",
+        updatedAt: new Date().toISOString(),
+      };
+      return current;
+    });
     if (meta.profileOwned === true) await this.setTargetMeta(targetId, meta);
-    await writeJsonFile(this.labelsFile, this.labels);
-    await writeJsonFile(this.labelMetaFile, this.labelMeta);
+    await this.claimTarget({ targetId, label, suggestedTarget: label, url: meta.url || "" }, meta, meta.source || "label");
+  }
+  leaseIsStale(lease) {
+    if (!lease) return true;
+    const timestamp = Date.parse(lease.updatedAt || lease.lastUsedAt || lease.createdAt || "");
+    if (!Number.isFinite(timestamp)) return true;
+    return Date.now() - timestamp > LEASE_STALE_MS;
+  }
+  targetLeaseConflict(tab, lease, operation) {
+    return new CliError(`${operation} refused: target is leased by owner ${lease.owner}`, {
+      code: "target_lease_conflict",
+      exitCode: 5,
+      next: [
+        `current owner: ${this.owner()}`,
+        "rerun with --take-lease only when intentionally taking this tab",
+        "use --owner <id> or REALBROWSER_OWNER=<id> to keep related Codex sessions in the same namespace",
+        "use realbrowser tab list --json to inspect target leases",
+      ],
+    });
+  }
+  async assertTargetLease(tab, flags = {}, operation = "target") {
+    const lease = this.leaseForTarget(tab.targetId);
+    if (!lease || lease.owner === this.owner() || flags.force || this.leaseIsStale(lease)) {
+      await this.claimTarget(tab, flags, operation);
+      return;
+    }
+    if (flags.takeLease) {
+      await this.claimTarget(tab, flags, operation);
+      return;
+    }
+    throw this.targetLeaseConflict(tab, lease, operation);
+  }
+  targetLeaseWouldConflict(tab, flags = {}) {
+    const lease = this.leaseForTarget(tab.targetId);
+    return Boolean(lease && lease.owner !== this.owner() && !flags.force && !flags.takeLease && !this.leaseIsStale(lease));
+  }
+  async claimTarget(tab, flags = {}, source = "claim") {
+    if (!tab?.targetId) return null;
+    const scopeKey = this.contextScopeKey();
+    const leaseKey = this.leaseContextKey();
+    const owner = this.owner();
+    const now = new Date().toISOString();
+    const existing = this.leaseForTarget(tab.targetId);
+    if (existing && existing.owner !== owner && !flags.force && !flags.takeLease && !this.leaseIsStale(existing)) {
+      return existing;
+    }
+    this.leases = await updateJsonFile(this.leasesFile, {}, (current) => {
+      const matches = [];
+      if (current[leaseKey]?.[tab.targetId]) matches.push(current[leaseKey][tab.targetId]);
+      for (const contextLeases of Object.values(current || {})) {
+        const candidate = contextLeases?.[tab.targetId];
+        if (!candidate) continue;
+        if (!candidate.browserUrl || !this.browserUrl || browserEndpointsMatch(candidate.browserUrl, this.browserUrl)) matches.push(candidate);
+      }
+      const previous = newestLease(matches) || {};
+      if (previous.owner && previous.owner !== owner && !flags.force && !flags.takeLease && !this.leaseIsStale(previous)) {
+        throw this.targetLeaseConflict(tab, previous, source);
+      }
+      for (const contextLeases of Object.values(current || {})) {
+        if (contextLeases && typeof contextLeases === "object") delete contextLeases[tab.targetId];
+      }
+      current[leaseKey] ??= {};
+      current[leaseKey][tab.targetId] = {
+        ...previous,
+        targetId: tab.targetId,
+        owner,
+        browserUrl: this.browserUrl,
+        contextKey: this.context.key,
+        contextScopeKey: scopeKey,
+        label: tab.label || previous.label || "",
+        suggestedTarget: tab.suggestedTarget || tab.label || previous.suggestedTarget || "",
+        title: tab.title || previous.title || "",
+        url: tab.url || previous.url || "",
+        source,
+        createdAt: previous.createdAt || now,
+        updatedAt: now,
+        lastUsedAt: now,
+      };
+      return current;
+    });
+    return this.leaseForTarget(tab.targetId);
+  }
+  async releaseTargetLease(targetId) {
+    if (!targetId) return;
+    this.leases = await updateJsonFile(this.leasesFile, {}, (current) => {
+      const leaseKey = this.leaseContextKey();
+      if (current[leaseKey]) delete current[leaseKey][targetId];
+      return current;
+    });
+  }
+  async releaseTargetLeaseEverywhere(targetId) {
+    if (!targetId) return;
+    this.leases = await updateJsonFile(this.leasesFile, {}, (current) => {
+      for (const value of Object.values(current || {})) {
+        if (value && typeof value === "object") delete value[targetId];
+      }
+      return current;
+    });
   }
   async attach(targetId) {
     if (this.sessions.has(targetId)) return this.sessions.get(targetId);
@@ -1432,7 +1695,9 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
     if (!query) throw usage("tab select requires a target/query");
     const tab = await this.resolveTarget(query, { allowQuery: true, allowUnprovenProfileTarget: true, operation: "tab select" });
     this.assertProfileTargetProven(tab, flags, "tab select");
-    if (flags.label) await this.setLabel(flags.label, tab.targetId, { profileOwned: this.profileTargetProven(tab), source: "select" });
+    if (flags.front || flags.label || flags.takeLease) await this.assertTargetLease(tab, flags, "tab select");
+    if (flags.label) await this.setLabel(flags.label, tab.targetId, { profileOwned: this.profileTargetProven(tab), source: "select", force: Boolean(flags.force), takeLease: Boolean(flags.takeLease), url: tab.url });
+    else if (flags.takeLease) await this.claimTarget(tab, flags, "select");
     const updated = flags.label ? { ...tab, label: flags.label, suggestedTarget: flags.label } : tab;
     if (flags.front) await this.cdp.send("Target.activateTarget", { targetId: tab.targetId });
     await this.attach(tab.targetId);
@@ -1447,30 +1712,41 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
     if (!url) throw usage(`tab ${command} requires <url>`);
     assertNavigationUrl(url, flags.force);
     let existing = null;
+    let existingFromLabel = false;
     const tabs = await this.tabs();
     if (command === "ensure") {
       if (flags.label) {
-        const labelTarget = this.labels[this.context.key]?.[flags.label];
+        const labelTarget = this.labelsForContext()[flags.label];
         existing = tabs.find((tab) => tab.targetId === labelTarget) || null;
-        if (existing && !this.profileTargetProven(existing)) existing = null;
+        existingFromLabel = Boolean(existing);
+        if (existing && !this.profileTargetProven(existing)) {
+          existing = null;
+          existingFromLabel = false;
+        }
       }
       if (!existing && flags.reuse !== "none" && !this.isBrowserScopedProfileContext()) {
         existing = tabs.find((tab) => sameUrl(tab.url, url)) || null;
       } else if (!existing && flags.reuse !== "none" && this.isBrowserScopedProfileContext()) {
         existing = tabs.find((tab) => sameUrl(tab.url, url) && this.profileTargetProven(tab)) || null;
       }
+      if (existing && !existingFromLabel && this.targetLeaseWouldConflict(existing, flags)) {
+        existing = null;
+      }
     }
     if (existing) {
-      if (flags.label) await this.setLabel(flags.label, existing.targetId, { profileOwned: this.profileTargetProven(existing), source: "ensure-reuse" });
+      await this.assertTargetLease(existing, flags, `tab ${command}`);
+      if (flags.label) await this.setLabel(flags.label, existing.targetId, { profileOwned: this.profileTargetProven(existing), source: "ensure-reuse", force: Boolean(flags.force), takeLease: Boolean(flags.takeLease), url: existing.url });
+      else await this.claimTarget(existing, flags, "ensure-reuse");
+      const leased = { ...existing, lease: this.leaseForTarget(existing.targetId) };
       await this.attach(existing.targetId);
       return result({
-        text: `reused ${flags.label || existing.suggestedTarget} ${existing.url}`,
-        target: { ...existing, label: flags.label || existing.label, suggestedTarget: flags.label || existing.suggestedTarget },
+        text: `reused ${flags.label || leased.suggestedTarget} ${leased.url}`,
+        target: { ...leased, label: flags.label || leased.label, suggestedTarget: flags.label || leased.suggestedTarget },
         reused: true,
         context: this.publicContext(),
       });
     }
-    if (command === "new" && flags.label && this.labels[this.context.key]?.[flags.label] && !flags.force) {
+    if (command === "new" && flags.label && this.labelsForContext()[flags.label] && !flags.force) {
       throw new CliError(`label already exists: ${flags.label}`, {
         code: "label_exists",
         exitCode: 2,
@@ -1495,7 +1771,8 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
       const tab = await waitForOpenedTab(this, url, beforeIds, flags.timeout || 30_000, { requireFresh: true });
       await restoreForegroundAppAfterBackgroundLaunch(launch?.focusRestore, { delayMs: 50 }).catch(() => {});
       await this.setTargetMeta(tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open" });
-      if (flags.label) await this.setLabel(flags.label, tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open" });
+      if (flags.label) await this.setLabel(flags.label, tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open", force: Boolean(flags.force), takeLease: Boolean(flags.takeLease), url: tab.url });
+      else await this.claimTarget(tab, flags, "profile-open");
       if (flags.front) await this.cdp.send("Target.activateTarget", { targetId: tab.targetId }).catch(() => {});
       await this.attach(tab.targetId);
       await waitForReadyState(this, tab.targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
@@ -1517,7 +1794,8 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
     if (!targetId) throw new Error("Target.createTarget returned no targetId");
     const profileOwnedCreate = this.context.kind === "profile" && this.context.endpointScope === "profile";
     if (profileOwnedCreate) await this.setTargetMeta(targetId, { profileOwned: true, profile: this.context.profile.id, source: "target-create" });
-    if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create" });
+    if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create", force: Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
+    else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "target-create");
     if (flags.front) await this.cdp.send("Target.activateTarget", { targetId }).catch(() => {});
     await this.attach(targetId);
     await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
@@ -1536,6 +1814,7 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
     if (!targetRef || !url || targetRef === url) throw usage("tab navigate requires <target> <url|link-ref>");
     let resolvedFromRef = "";
     const tab = await this.resolveTargetForOperation(targetRef, flags, "tab navigate");
+    await this.assertTargetLease(tab, flags, "tab navigate");
     if (/^l\d+$/i.test(url)) {
       const ref = this.refMetadataFor(tab.targetId, url);
       if (!ref?.href) throw new CliError(`ref ${url} has no href`, { code: "ref_not_navigable", exitCode: 2 });
@@ -1554,11 +1833,13 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
     const label = args[1] || flags.label;
     if (!targetRef || !label) throw usage("tab label requires <target> <label>");
     const tab = await this.resolveTargetForOperation(targetRef, flags, "tab label");
-    await this.setLabel(label, tab.targetId, { profileOwned: this.profileTargetProven(tab), source: "label" });
+    await this.assertTargetLease(tab, flags, "tab label");
+    await this.setLabel(label, tab.targetId, { profileOwned: this.profileTargetProven(tab), source: "label", force: Boolean(flags.force), takeLease: Boolean(flags.takeLease), url: tab.url });
     return result({ text: `labeled ${tab.targetPrefix} as ${label}`, target: { ...tab, label, suggestedTarget: label } });
   }
   if (command === "focus" || command === "handoff") {
     const tab = await this.resolveTargetForOperation(args[0] || flags.target, flags, `tab ${command}`);
+    await this.assertTargetLease(tab, flags, `tab ${command}`);
     await this.cdp.send("Target.activateTarget", { targetId: tab.targetId });
     return result({ text: `focused ${tab.suggestedTarget}`, target: tab });
   }
@@ -1568,7 +1849,9 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
   }
   if (command === "close") {
     const tab = await this.resolveTargetForOperation(args[0] || flags.target, flags, "tab close");
+    await this.assertTargetLease(tab, flags, "tab close");
     await this.cdp.send("Target.closeTarget", { targetId: tab.targetId });
+    await this.releaseTargetLease(tab.targetId);
     return result({ text: `closed ${tab.suggestedTarget}`, target: tab });
   }
   throw usage(`unknown tab command: ${command}`);
@@ -1656,17 +1939,22 @@ BrowserDaemon.prototype.read = async function read(command, args, flags) {
 };
 
 BrowserDaemon.prototype.storeRefs = function storeRefs(targetId, refs) {
-  const store = this.refStores.get(targetId) || { generation: 0, refs: {}, snapshot: "" };
+  const key = this.refStoreKey(targetId);
+  const store = this.refStores.get(key) || { generation: 0, refs: {}, snapshot: "" };
   store.generation += 1;
   store.refs = refs;
   store.stale = false;
-  this.refStores.set(targetId, store);
+  this.refStores.set(key, store);
+};
+
+BrowserDaemon.prototype.refStoreKey = function refStoreKey(targetId) {
+  return `${this.owner()}:${targetId}`;
 };
 
 BrowserDaemon.prototype.selectorFor = function selectorFor(targetId, refOrSelector) {
   const raw = String(refOrSelector || "");
   if (/^[ebfrilc]\d+$/i.test(raw)) {
-    const store = this.refStores.get(targetId);
+    const store = this.refStores.get(this.refStoreKey(targetId));
     const ref = store?.refs?.[raw];
     if (!ref) throw new CliError(`ref ${raw} is stale or unknown`, { code: "ref_stale", exitCode: 5, next: ["realbrowser action state -t <target> --root active"] });
     return ref.selector;
@@ -1676,26 +1964,27 @@ BrowserDaemon.prototype.selectorFor = function selectorFor(targetId, refOrSelect
 };
 
 BrowserDaemon.prototype.refMetadataFor = function refMetadataFor(targetId, refName) {
-  const store = this.refStores.get(targetId);
+  const store = this.refStores.get(this.refStoreKey(targetId));
   return store?.refs?.[String(refName || "")] || null;
 };
 
 BrowserDaemon.prototype.snapshot = async function snapshot(targetId, flags) {
   const payload = await this.callFunction(targetId, snapshotFunction, [snapshotOptions(flags)]);
   const text = payload.snapshot || "";
-  const previous = this.refStores.get(targetId) || { generation: 0, refs: {}, snapshot: "" };
+  const previous = this.refStores.get(this.refStoreKey(targetId)) || { generation: 0, refs: {}, snapshot: "" };
   let output = text;
   if (flags.diff) {
     output = simpleDiff(previous.snapshot || "", text);
   }
   this.storeRefs(targetId, payload.refs || {});
-  const store = this.refStores.get(targetId);
+  const store = this.refStores.get(this.refStoreKey(targetId));
   if (store) store.snapshot = text;
   return { ...payload, snapshot: output, stats: { ...(payload.stats || {}), chars: output.length, diff: Boolean(flags.diff) } };
 };
 
 BrowserDaemon.prototype.wait = async function wait(command, args, flags) {
   const tab = await this.resolveTargetForOperation(flags.target, flags, `wait ${command}`);
+  if (command === "ready" && flags.screenshot && screenshotAnnotates(flags)) await this.assertTargetLease(tab, flags, "wait ready screenshot");
   await this.attach(tab.targetId);
   const timeout = flags.timeout || DEFAULT_TIMEOUT;
   if (command === "ready") {
@@ -1742,6 +2031,7 @@ BrowserDaemon.prototype.wait = async function wait(command, args, flags) {
 
 BrowserDaemon.prototype.action = async function action(command, args, flags) {
   const tab = await this.resolveTargetForOperation(flags.target, flags, `action ${command}`);
+  if (!["state", "root"].includes(command) || (flags.screenshot && screenshotAnnotates(flags))) await this.assertTargetLease(tab, flags, `action ${command}`);
   await this.attach(tab.targetId);
   const preflight = await this.callFunction(tab.targetId, actionPreflightFunction, []);
   if (command === "state" || command === "root") {
@@ -1895,6 +2185,7 @@ BrowserDaemon.prototype.action = async function action(command, args, flags) {
 
 BrowserDaemon.prototype.screenshot = async function screenshot(command, args, flags) {
   const tab = await this.resolveTargetForOperation(flags.target, flags, `screenshot ${command}`);
+  if (screenshotCommandMutates(command, flags)) await this.assertTargetLease(tab, flags, `screenshot ${command}`);
   await this.attach(tab.targetId);
   if (command === "device" || command === "responsive") {
     const prefix = args[0] || flags.out || path.join(this.artifactDir, `shot-${Date.now()}`);
@@ -1940,8 +2231,21 @@ BrowserDaemon.prototype.screenshot = async function screenshot(command, args, fl
   return result({ text: `${capture.path} ${capture.width}x${capture.height}`, target: tab, screenshot: capture });
 };
 
+function screenshotCommandMutates(command, flags = {}) {
+  return command === "device" ||
+    command === "responsive" ||
+    command === "full" ||
+    Boolean(flags.full || flags.fullPage) ||
+    screenshotAnnotates(flags);
+}
+
+function screenshotAnnotates(flags = {}) {
+  return Boolean(flags.annotateRefs || flags.annotate || flags.labels);
+}
+
 BrowserDaemon.prototype.console = async function consoleCommand(command, args, flags) {
   const tab = await this.resolveTargetForOperation(flags.target, flags, `console ${command}`);
+  if (command === "clear" || (command === "capture" && (flags.clear || flags.reload))) await this.assertTargetLease(tab, flags, `console ${command}`);
   await this.attach(tab.targetId);
   const buffer = this.consoleBuffer(tab.targetId);
   if (command === "clear") {
@@ -1968,6 +2272,7 @@ BrowserDaemon.prototype.console = async function consoleCommand(command, args, f
 
 BrowserDaemon.prototype.network = async function networkCommand(command, args, flags) {
   const tab = await this.resolveTargetForOperation(flags.target, flags, `network ${command}`);
+  if (command === "clear" || command === "capture") await this.assertTargetLease(tab, flags, `network ${command}`);
   await this.attach(tab.targetId);
   const buffer = this.networkBuffer(tab.targetId);
   if (command === "clear") {
@@ -2043,6 +2348,7 @@ BrowserDaemon.prototype.getResponseBody = async function getResponseBody(targetI
 
 BrowserDaemon.prototype.state = async function state(command, args, flags) {
   const tab = await this.resolveTargetForOperation(flags.target, flags, `state ${command}`);
+  if (stateCommandMutates(command, args)) await this.assertTargetLease(tab, flags, `state ${command}`);
   await this.attach(tab.targetId);
   if (command === "cookies") {
     const sub = args[0] || "list";
@@ -2085,12 +2391,14 @@ BrowserDaemon.prototype.state = async function state(command, args, flags) {
     const sub = args[0] || "list";
     const origin = flags.origin || originFromUrl(tab.url);
     if (sub === "reset" || sub === "clear") {
+      assertBrowserWideStateChangeAllowed("state permissions reset", flags);
       await this.cdp.send("Browser.resetPermissions", {});
       return result({ text: "permissions reset", target: tab, origin });
     }
     if (sub === "grant") {
       const permission = args[1] || flags.name;
       if (!permission) throw usage("state permissions grant requires <permission>");
+      assertBrowserWideStateChangeAllowed("state permissions grant", flags);
       await this.cdp.send("Browser.grantPermissions", { origin, permissions: [permission] });
       return result({ text: `permission granted: ${permission} ${origin}`, target: tab, origin, permissions: [permission] });
     }
@@ -2119,8 +2427,30 @@ BrowserDaemon.prototype.state = async function state(command, args, flags) {
   throw usage(`unknown state command: ${command}`);
 };
 
+function stateCommandMutates(command, args = []) {
+  const sub = args[0] || "";
+  if (command === "cookies") return ["set", "clear"].includes(sub);
+  if (command === "storage") return ["set", "clear", "remove"].includes(sub);
+  if (command === "cache") return true;
+  if (command === "headers") return ["set", "clear"].includes(sub);
+  if (command === "permissions") return ["grant", "reset", "clear"].includes(sub);
+  if (command === "clipboard") return sub === "write";
+  if (command === "emulate") return true;
+  return false;
+}
+
+function assertBrowserWideStateChangeAllowed(operation, flags = {}) {
+  if (flags.force) return;
+  throw new CliError(`${operation} requires --force because Chrome permissions are browser-wide`, {
+    code: "browser_wide_state_guard",
+    exitCode: 5,
+    next: [`rerun with ${operation} ... --force only when intentionally changing browser-wide permissions`],
+  });
+}
+
 BrowserDaemon.prototype.dialog = async function dialog(command, args, flags) {
   const tab = await this.resolveTargetForOperation(flags.target, flags, `dialog ${command}`);
+  if (["arm", "accept", "dismiss"].includes(command)) await this.assertTargetLease(tab, flags, `dialog ${command}`);
   await this.attach(tab.targetId);
   const buffer = this.dialogBuffer(tab.targetId);
   if (command === "arm") {
@@ -2137,6 +2467,7 @@ BrowserDaemon.prototype.dialog = async function dialog(command, args, flags) {
 
 BrowserDaemon.prototype.perf = async function perf(command, args, flags) {
   const tab = await this.resolveTargetForOperation(flags.target, flags, `perf ${command}`);
+  if (command === "trace" && ["start", "stop"].includes(args[0] || "start")) await this.assertTargetLease(tab, flags, `perf ${command}`);
   await this.attach(tab.targetId);
   if (command === "trace") {
     const action = args[0] || "start";
@@ -2162,6 +2493,7 @@ BrowserDaemon.prototype.perf = async function perf(command, args, flags) {
 
 BrowserDaemon.prototype.download = async function download(command, args, flags) {
   const tab = await this.resolveTargetForOperation(flags.target, flags, `download ${command}`);
+  await this.assertTargetLease(tab, flags, `download ${command}`);
   await this.attach(tab.targetId);
   const dir = path.resolve(expandHome(flags.dir || flags.downloadDir || path.join(os.homedir(), "Downloads")));
   await fsp.mkdir(dir, { recursive: true });
@@ -2212,14 +2544,20 @@ BrowserDaemon.prototype.devtools = async function devtools(command, args, flags)
   }
   const method = args[0];
   if (!method) throw usage("devtools raw requires <CDP.method>");
-  const mutating = /^(Input|Page\.navigate|Browser|Storage|Network\.set|Emulation\.set|DOM\.setFileInputFiles)/.test(method);
+  const mutating = rawCdpMethodMutates(method);
   if (mutating && !flags.force) {
     throw new CliError(`raw mutating CDP method requires --force: ${method}`, { code: "raw_mutation_guard", exitCode: 5 });
   }
+  if (mutating) await this.assertTargetLease(tab, flags, `devtools raw ${method}`);
   const params = flags.params ? JSON.parse(flags.params) : args[1] ? JSON.parse(args[1]) : {};
   const payload = await this.sendToTarget(tab.targetId, method, params, flags.timeout || DEFAULT_TIMEOUT);
   return result({ text: formatValue(payload), target: tab, result: payload });
 };
+
+function rawCdpMethodMutates(method) {
+  const value = String(method || "");
+  return /^(Input|Runtime\.evaluate|Runtime\.callFunctionOn|Page\.(navigate|reload|stopLoading|set|bringToFront|close)|Browser|Storage|Network\.(set|clear|delete|emulate)|Emulation|DOM\.setFileInputFiles|CSS\.(set|force)|Fetch|Target\.(create|close|activate|attach|detach|set|dispose))/.test(value);
+}
 
 BrowserDaemon.prototype.chain = async function chain(args, flags) {
   const raw = flags.from ? await fsp.readFile(expandHome(flags.from), "utf8") : args[0];
@@ -2404,34 +2742,44 @@ async function relaunchProfileCli(profile, flags = {}) {
 
 async function handleSessionCli(parsed) {
   const states = listStateFiles().map((file) => readJson(file)).filter(Boolean);
+  const owner = resolveOwner(parsed.flags);
   if (parsed.command === "use") {
     const context = parsed.args[0] || parsed.flags.context || parsed.flags.profile || parsed.flags.browserUrl || parsed.flags.session;
     if (!context) throw usage("session use requires <context>, e.g. anonymous:check, profile:chrome:Default, or endpoint:http://127.0.0.1:9222");
     const flags = contextFlagsFromString(context);
-    await writeJsonFile(DEFAULT_CONTEXT_FILE, { context, flags, setAt: new Date().toISOString() });
-    return result({ text: `default context: ${context}`, defaultContext: { context, flags } });
+    const defaultContext = await setDefaultContextForOwner(owner, context, flags);
+    return result({ text: `default context for ${owner}: ${context}`, defaultContext });
   }
   if (parsed.command === "clear") {
-    await fsp.rm(DEFAULT_CONTEXT_FILE, { force: true });
-    return result({ text: "default context cleared" });
+    if (parsed.flags.all) {
+      await fsp.rm(DEFAULT_CONTEXT_FILE, { force: true });
+      return result({ text: "all default contexts cleared" });
+    }
+    await clearDefaultContextForOwner(owner);
+    return result({ text: `default context cleared for ${owner}` });
   }
   if (parsed.command === "stop") {
     const query = parsed.args[0] || parsed.flags.session || "";
     for (const state of states) {
+      const stateOwner = normalizeOwner(state.context?.owner) || "default";
+      if (!parsed.flags.all && stateOwner !== owner) continue;
       if (!query || state.context?.session === query || state.context?.key?.includes(query)) {
         await stopDaemonState(state).catch(() => {});
       }
     }
-    return result({ text: `stopped ${query || "all matching sessions"}` });
+    return result({ text: `stopped ${query || "all matching sessions"} for ${parsed.flags.all ? "all owners" : owner}` });
   }
-  const defaultContext = readJson(DEFAULT_CONTEXT_FILE);
+  const defaultContext = defaultContextEntryForOwner(owner);
+  const allDefaults = defaultContextsByOwner();
   return result({
     text: [
-      defaultContext ? `default ${defaultContext.context}` : "",
-      states.map((s) => `${s.context?.key || "unknown"} pid=${s.pid} port=${s.port}`).join("\n"),
+      defaultContext ? `default ${owner} ${defaultContext.context}` : "",
+      states.map((s) => `${s.context?.key || "unknown"} owner=${s.context?.owner || "default"} pid=${s.pid} port=${s.port}`).join("\n"),
     ].filter(Boolean).join("\n") || "(no sessions)",
     sessions: states.map(publicDaemonState),
     defaultContext,
+    defaultContexts: allDefaults,
+    owner,
   });
 }
 
@@ -2542,6 +2890,7 @@ function publicDaemonState(state) {
     pid: state.pid,
     port: state.port,
     version: state.version,
+    runtimeSchema: state.runtimeSchema,
     startedAt: state.startedAt,
     alive: processAlive(state.pid),
     context: state.context,
@@ -5005,12 +5354,14 @@ function headersArray(headers = {}) {
 function formatTabs(tabs) {
   if (!tabs.length) return "(no targets)";
   const showOwnership = tabs.some((tab) => tab.profileOwnership && tab.profileOwnership !== "proven");
+  const showLease = tabs.some((tab) => tab.lease?.owner);
   return tabs.map((tab) => {
     const ownership = tab.profileOwnership === "unproven-browser-scope" ? "unproven"
       : tab.profileOwnership === "profile-open-proven" ? "profile"
       : "";
     const ownershipColumn = showOwnership ? ` ${ownership.padEnd(9)}` : "";
-    return `${String(tab.suggestedTarget).padEnd(12)} ${tab.targetPrefix}${ownershipColumn} ${tab.title.slice(0, 40).padEnd(40)} ${tab.url}`;
+    const leaseColumn = showLease ? ` ${(tab.lease?.owner || "").slice(0, 18).padEnd(18)}` : "";
+    return `${String(tab.suggestedTarget).padEnd(12)} ${tab.targetPrefix}${ownershipColumn}${leaseColumn} ${tab.title.slice(0, 40).padEnd(40)} ${tab.url}`;
   }).join("\n");
 }
 
@@ -5233,12 +5584,33 @@ function stateFileForContext(context) {
 
 function daemonConnectionKey(context = {}) {
   const browserUrl = contextBrowserUrl(context);
-  return browserUrl ? `browser:${browserUrl}` : context.key;
+  if (browserUrl) return `browser:${browserUrl}`;
+  if (context.kind === "anonymous" && context.owner && context.owner !== "global") return ownerScopedContextKey(context.key, context.owner);
+  return context.key;
 }
 
 function contextBrowserUrl(context = {}) {
   if (Object.prototype.hasOwnProperty.call(context, "browserUrl")) return endpointBrowserUrl(context.browserUrl);
   return endpointBrowserUrl(context);
+}
+
+function browserEndpointsMatch(a, b) {
+  const aa = normalizeEndpoint(a);
+  const bb = normalizeEndpoint(b);
+  if (aa.wsUrl && bb.wsUrl && aa.wsUrl === bb.wsUrl) return true;
+  if (aa.httpUrl && bb.httpUrl && aa.httpUrl === bb.httpUrl) return true;
+  if (aa.wsUrl && bb.httpUrl && httpUrlFromWs(aa.wsUrl) === bb.httpUrl) return true;
+  if (bb.wsUrl && aa.httpUrl && httpUrlFromWs(bb.wsUrl) === aa.httpUrl) return true;
+  return false;
+}
+
+function leaseTimestamp(lease = {}) {
+  const timestamp = Date.parse(lease.updatedAt || lease.lastUsedAt || lease.createdAt || "");
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function newestLease(leases = []) {
+  return leases.filter(Boolean).sort((a, b) => leaseTimestamp(b) - leaseTimestamp(a))[0] || null;
 }
 
 function defaultStateDir() {
@@ -5416,12 +5788,108 @@ function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
 }
 
+function normalizeDefaultContexts(raw) {
+  if (raw?.version === 2 && raw.owners && typeof raw.owners === "object") return raw;
+  const owners = {};
+  if (raw?.flags || raw?.context) {
+    owners.default = {
+      owner: "default",
+      context: raw.context || "",
+      flags: raw.flags || {},
+      setAt: raw.setAt || "",
+      migratedFromGlobal: true,
+    };
+  }
+  return { version: 2, owners };
+}
+
+function defaultContextsByOwner() {
+  return normalizeDefaultContexts(readJson(DEFAULT_CONTEXT_FILE)).owners || {};
+}
+
+function defaultContextEntryForOwner(owner) {
+  const normalizedOwner = normalizeOwner(owner) || "default";
+  const data = normalizeDefaultContexts(readJson(DEFAULT_CONTEXT_FILE));
+  const owners = data.owners || {};
+  return owners[normalizedOwner] || (owners.default?.migratedFromGlobal ? owners.default : null);
+}
+
+async function setDefaultContextForOwner(owner, context, flags) {
+  const normalizedOwner = normalizeOwner(owner) || "default";
+  const data = await updateJsonFile(DEFAULT_CONTEXT_FILE, { version: 2, owners: {} }, (current) => {
+    const normalized = normalizeDefaultContexts(current);
+    normalized.owners[normalizedOwner] = {
+      owner: normalizedOwner,
+      context,
+      flags: { ...flags, owner: normalizedOwner },
+      setAt: new Date().toISOString(),
+    };
+    return normalized;
+  });
+  return data.owners[normalizedOwner];
+}
+
+async function clearDefaultContextForOwner(owner) {
+  const normalizedOwner = normalizeOwner(owner) || "default";
+  await updateJsonFile(DEFAULT_CONTEXT_FILE, { version: 2, owners: {} }, (current) => {
+    const normalized = normalizeDefaultContexts(current);
+    delete normalized.owners[normalizedOwner];
+    return normalized;
+  });
+}
+
 async function writeJsonFile(file, value) {
   const resolved = path.resolve(expandHome(file));
   await fsp.mkdir(path.dirname(resolved), { recursive: true });
   const tmp = `${resolved}.${process.pid}.${Date.now()}.tmp`;
   await fsp.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await fsp.rename(tmp, resolved);
+}
+
+async function updateJsonFile(file, fallback, updater) {
+  const resolved = path.resolve(expandHome(file));
+  await fsp.mkdir(path.dirname(resolved), { recursive: true, mode: 0o700 });
+  return await withJsonFileLock(resolved, async () => {
+    const current = readJson(resolved) ?? structuredCloneCompat(fallback);
+    const next = await updater(current);
+    await writeJsonFile(resolved, next);
+    return next;
+  });
+}
+
+async function withJsonFileLock(file, fn) {
+  const lockDir = `${file}.lock`;
+  const deadline = Date.now() + 5000;
+  while (true) {
+    try {
+      await fsp.mkdir(lockDir, { mode: 0o700 });
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      const stat = await fsp.stat(lockDir).catch(() => null);
+      if (stat && Date.now() - stat.mtimeMs > 30_000) {
+        await fsp.rm(lockDir, { recursive: true, force: true }).catch(() => {});
+        continue;
+      }
+      if (Date.now() > deadline) {
+        throw new CliError(`timed out waiting for state lock: ${lockDir}`, {
+          code: "state_lock_timeout",
+          exitCode: 6,
+        });
+      }
+      await sleep(25 + Math.floor(Math.random() * 50));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    await fsp.rm(lockDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function structuredCloneCompat(value) {
+  if (value == null) return value;
+  return JSON.parse(JSON.stringify(value));
 }
 
 async function writeTextArtifact(file, value) {
@@ -5723,6 +6191,11 @@ Common:
   realbrowser screenshot device -t page --anonymous --session check --devices desktop:1440x900,tablet:768x1024,mobile:390x844 --settle-ms 300 tmp/page
   realbrowser export pdf -t app tmp/page.pdf --print-background
 
+Global flags:
+  --owner <id> scopes labels, default context, and leases to a Codex/project owner
+  --take-lease intentionally takes a target leased by another owner
+  --global uses the shared global owner namespace intentionally
+
 Groups:
   profile session daemon tab handle read wait action screenshot console network state dialog perf download export devtools chain completion self-test
 `,
@@ -5764,6 +6237,9 @@ realbrowser tab
   tab navigate <target> <url|link-ref>
   tab label <target> <label>
   tab focus|close|handoff|resume <target>
+
+Labels are owner-scoped. Mutating commands claim a target lease and reject fresh
+leases owned by another owner unless --take-lease or --force is explicit.
 `,
   "tab ensure": `
 realbrowser tab ensure <url>
@@ -5788,12 +6264,12 @@ named-profile open without --allow-browser-scope-target.
 realbrowser session
 
   session list
-  session use <anonymous:name|session:name|profile:chrome:Default|endpoint:http://127.0.0.1:9222>
-  session clear
-  session stop [query]
+  session use <anonymous:name|session:name|profile:chrome:Default|endpoint:http://127.0.0.1:9222> [--owner id]
+  session clear [--owner id|--all]
+  session stop [query] [--owner id|--all]
 
-session use sets a default context only; target-changing/read/action commands
-still require a target label, target id, or handle.
+session use sets an owner-scoped default context only; target-changing/read/action
+commands still require a target label, target id, or handle.
 `,
   handle: `
 realbrowser handle
@@ -5896,12 +6372,14 @@ realbrowser state
   state storage -t app [get|set|clear] [local|session] [key] [value]
   state headers set -t app --header "X-Debug: 1"
   state headers clear -t app
-  state permissions grant -t app clipboardReadWrite --origin https://example.com
-  state permissions reset -t app
+  state permissions grant -t app clipboardReadWrite --origin https://example.com --force
+  state permissions reset -t app --force
   state clipboard read -t app --values
   state clipboard write -t app --stdin
   state emulate -t app --cpu 4 --network slow-3g --timezone UTC --locale en-US
   state emulate -t app reset
+
+Permission grant/reset uses browser-wide Chrome APIs and requires --force.
 `,
   screenshot: `
 realbrowser screenshot
@@ -5997,11 +6475,17 @@ async function runSelfTest() {
   assert(contextFlagsFromString("profile:chrome:Default").profile === "chrome:Default", "profile context parser");
   assert(contextFlagsFromString("session:check").anonymous === true, "session context parser");
   assert(endpointBrowserUrl({ httpUrl: "http://127.0.0.1:9222", wsUrl: "ws://127.0.0.1:9222/devtools/browser/mock" }) === "ws://127.0.0.1:9222/devtools/browser/mock", "direct WS endpoint is preferred over HTTP discovery root");
+  assert(browserEndpointsMatch("http://127.0.0.1:9222", "ws://127.0.0.1:9222/devtools/browser/mock"), "HTTP and direct WS endpoints match by origin");
   assert(daemonConnectionKey({ key: "profile:chrome:Default", browserUrl: "ws://127.0.0.1:9222/devtools/browser/mock" }) === daemonConnectionKey({ key: "profile:chrome:Profile 1", browserUrl: "ws://127.0.0.1:9222/devtools/browser/mock" }), "same browser endpoint shares one daemon across profile contexts");
   const relaunch = parseCli(["profile", "relaunch", "chrome:Default", "--confirm"]);
   assert(relaunch.group === "profile" && relaunch.command === "relaunch" && relaunch.flags.confirm === true, "profile relaunch parser");
   const allowBrowserScope = parseCli(["tab", "select", "ABCDEF12", "--profile", "chrome:Default", "--allow-browser-scope-target"]);
   assert(allowBrowserScope.flags.allowBrowserScopeTarget === true, "browser-scope target override parser");
+  const ownerParsed = parseCli(["tab", "ensure", "https://example.com", "--anonymous", "--session", "st", "--owner", "owner-a"]);
+  assert(ownerParsed.flags.owner === "owner-a", "owner parser");
+  const ownerContext = await resolveContext({ ...ownerParsed.flags }, ownerParsed);
+  assert(ownerContext.owner === "owner-a" && ownerContext.key === "anonymous:st", "owner anonymous context");
+  assert(daemonConnectionKey(ownerContext).includes(`${OWNER_SCOPE_SEPARATOR}owner-a`), "anonymous daemon key is owner scoped");
   const incognito = parseCli(["tab", "ensure", "https://example.com", "--label", "page", "--anonymous", "--session", "private", "--front", "--incognito"]);
   assert(incognito.flags.anonymous === true && incognito.flags.incognito === true, "incognito parser");
   const privateContext = contextFlagsFromString("private:check");
@@ -6020,11 +6504,14 @@ async function runSelfTest() {
   assert(JSON.stringify(buf.toArray()) === "[2,3]", "circular buffer overwrites oldest");
   assert(actionOptions([], {}).activeRoot === true, "actions default to active root");
   assert(actionOptions([], { root: "page" }).activeRoot === false, "explicit page root is honored");
+  assert(screenshotCommandMutates("device", {}) && screenshotCommandMutates("capture", { full: true }) && screenshotCommandMutates("capture", { annotateRefs: true }) && !screenshotCommandMutates("capture", {}), "screenshot mutation classifier");
+  assert(rawCdpMethodMutates("Runtime.evaluate") && rawCdpMethodMutates("Page.reload") && !rawCdpMethodMutates("DOM.getDocument"), "raw CDP mutation classifier");
   const fakeDaemon = Object.create(BrowserDaemon.prototype);
   fakeDaemon.context = { kind: "profile", key: "profile:chrome:Default", profile: { id: "chrome:Default" }, endpointScope: "browser" };
   fakeDaemon.labels = { "profile:chrome:Default": { app: "target-1" } };
   fakeDaemon.labelMeta = { "profile:chrome:Default": { app: { targetId: "target-1", profileOwned: true, profile: "chrome:Default" } } };
   fakeDaemon.targetMeta = { "profile:chrome:Default": { "target-3": { targetId: "target-3", profileOwned: true, profile: "chrome:Default" } } };
+  fakeDaemon.leases = {};
   assert(fakeDaemon.profileTargetProven({ targetId: "target-1", label: "app" }) === true, "profile-open label proves browser-scoped target");
   assert(fakeDaemon.profileTargetProven({ targetId: "target-2", label: "other" }) === false, "browser-scoped profile target is unproven by default");
   assert(fakeDaemon.profileTargetProven({ targetId: "target-3" }) === true, "profile-open target provenance works without a label");
@@ -6037,6 +6524,26 @@ async function runSelfTest() {
   assert(allowedUnproven.targetId === "target-2", "explicit browser-scope override resolves unproven target");
   const ownedNoLabel = await fakeDaemon.resolveTargetForOperation("target-3", {}, "read observe");
   assert(ownedNoLabel.targetId === "target-3", "target provenance allows unlabeled created profile tab");
+  const ownerDaemon = Object.create(BrowserDaemon.prototype);
+  ownerDaemon.context = { kind: "profile", key: "profile:chrome:Default", owner: "owner-b", profile: { id: "chrome:Default" }, endpointScope: "profile" };
+  ownerDaemon.labels = {
+    "profile:chrome:Default@@owner:owner-a": { app: "target-a" },
+    "profile:chrome:Default@@owner:owner-b": { app: "target-b" },
+  };
+  ownerDaemon.labelMeta = {};
+  ownerDaemon.targetMeta = {};
+  ownerDaemon.leases = { "profile:chrome:Default": { "target-a": { targetId: "target-a", owner: "owner-a", updatedAt: new Date().toISOString() } } };
+  assert(ownerDaemon.labelsForContext().app === "target-b", "labels are scoped by owner");
+  assert(ownerDaemon.targetLeaseWouldConflict({ targetId: "target-a" }, {}) === true, "lease conflict preflight detects cross-owner target");
+  await assertRejects(() => ownerDaemon.assertTargetLease({ targetId: "target-a" }, {}, "action click"), "lease conflict rejects cross-owner mutation");
+  assert(newestLease([{ owner: "old", updatedAt: "2026-01-01T00:00:00Z" }, { owner: "new", updatedAt: "2026-01-02T00:00:00Z" }]).owner === "new", "newest lease wins stale duplicate resolution");
+  assertThrows(() => assertBrowserWideStateChangeAllowed("state permissions reset", {}), "browser-wide permission reset requires force");
+  assertBrowserWideStateChangeAllowed("state permissions reset", { force: true });
+  ownerDaemon.refStores = new Map();
+  ownerDaemon.storeRefs("target-b", { b1: { selector: "#owned" } });
+  assert(ownerDaemon.selectorFor("target-b", "b1") === "#owned", "owner ref lookup works");
+  ownerDaemon.context = { ...ownerDaemon.context, owner: "owner-c" };
+  assertThrows(() => ownerDaemon.selectorFor("target-b", "b1"), "refs are scoped by owner");
   const oldTargetDaemon = { tabs: async () => [{ targetId: "old-1", url: "https://example.com", title: "Example" }] };
   const oldMatch = await waitForOpenedTab(oldTargetDaemon, "https://example.com", new Set(["old-1"]), 1);
   assert(oldMatch.targetId === "old-1", "opened-tab waiter can reuse a single old match when allowed");

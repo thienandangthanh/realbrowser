@@ -68,6 +68,19 @@ realbrowser read observe -t ninzap
 realbrowser session clear
 ```
 
+In multi-Codex workflows, keep each project/session in its own owner namespace:
+
+```bash
+export REALBROWSER_OWNER=ninzap
+realbrowser session use profile:chrome:Default
+realbrowser tab ensure http://localhost:3000 --profile chrome:Default --label app --background
+```
+
+Labels, default context, and target leases are owner-aware. If one Codex session
+has leased a tab, another session should create/select its own target instead of
+mutating that tab. Use `--take-lease` only when the user intentionally wants the
+second session to take over the target.
+
 ## Current State Versus Fresh Capture
 
 Use the live signed-in tab/profile for inboxes, social sites, admin dashboards,
@@ -247,6 +260,11 @@ do not spawn another controller. Do not switch to other Chrome DevTools MCP
 controllers or foreground Chrome just to read logs. If a profile lacks a direct
 WebSocket endpoint, use the profile recovery hint instead of opening extra
 controllers.
+
+After Chrome or the computer restarts, a real signed-in Chrome profile may still
+show Chrome's debugging approval once. The durable optimization is daemon/endpoint
+reuse while the browser lives; anonymous managed sessions avoid signed-in-profile
+approval but do not contain the user's logged-in state.
 
 Capture network before reload/action when response bodies matter.
 

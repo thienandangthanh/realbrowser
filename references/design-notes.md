@@ -31,6 +31,25 @@ Long-term invariants:
 - `tab ensure` and `tab new` are creation commands; `tab select` never creates.
 - `tab navigate` requires a target and never falls back to selected/first tab.
 - `session use` sets only the default context; it never implies a selected tab.
+- Default context and labels are owner-scoped. Owner comes from
+  `--owner`/`REALBROWSER_OWNER`, then Codex/terminal session environment, then the
+  project path fallback. This keeps parallel Codex sessions from reusing labels
+  such as `app` or `page` by accident.
+- Element refs are also owner-scoped. A read-only query in one Codex session must
+  not replace the `b1`/`e1` ref table another session is about to use for a
+  guarded action.
+- Mutating commands must honor target leases. A tab can be inspected by explicit
+  target, but navigation, focusing, closing, actions, reload captures, state
+  changes, viewport/full screenshots, annotated screenshots/checkpoints,
+  downloads, trace control, dialog arming, and mutating raw CDP calls are blocked
+  when another owner has a fresh lease unless `--take-lease` or `--force` is
+  explicit.
+- Browser-wide state APIs need their own guard even after a target lease passes.
+  Permission grant/reset changes Chrome-wide permission state, so it requires
+  `--force` in addition to the target lease check.
+- Anonymous daemons are owner-separated. Real signed-in browser endpoints are
+  shared per physical browser endpoint to minimize Chrome approvals, while labels
+  and leases remain owner-aware.
 - Profile-scoped CDP and browser-scoped CDP are different. Browser-scoped CDP
   can inspect explicit browser-wide targets, but it is not proof that a target
   belongs to the requested Chrome profile. Under `--profile`, unproven
@@ -59,6 +78,9 @@ Long-term invariants:
   is kept and waited on while the user approves Chrome debugging; retries must
   not spawn parallel controllers for the same `browserUrl`. Request context still
   scopes labels and profile provenance.
+- Chrome's signed-in-profile approval prompt is not permanently suppressible by a
+  CLI after browser/computer restart. The reliable contract is one reused daemon
+  per live browser endpoint, not a forever approval grant.
 - Disruptive recovery is explicit, approval-gated, and last-resort. If a
   signed-in browser is already running without a direct WebSocket CDP endpoint,
   ask before `profile relaunch --confirm` instead of leaving the user to quit

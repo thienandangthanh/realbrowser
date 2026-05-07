@@ -84,6 +84,25 @@ For repeated work, set a default context without dropping target safety:
 "$REALBROWSER" session clear
 ```
 
+Default contexts, labels, and element refs are owner-scoped. When multiple Codex
+sessions are open, set a stable owner for the project/session if the environment
+does not already provide one:
+
+```bash
+export REALBROWSER_OWNER=my-project
+"$REALBROWSER" session use profile:chrome:Default
+"$REALBROWSER" tab ensure http://localhost:3000 --profile chrome:Default --label app --background
+```
+
+Mutating commands claim a target lease. If another owner has leased the target,
+do not navigate, click, close, focus, reload, clear buffers, change state, or
+download from it unless the user explicitly wants that session to take over. Full
+or responsive/device screenshots also require the lease because they temporarily
+scroll or emulate the viewport. Annotated screenshots/checkpoints require the
+lease because they temporarily draw page overlays. Use `--take-lease` for
+intentional handoff.
+Read-only commands can still inspect the target after it is explicitly selected.
+
 ## Operating Loop
 
 1. Classify scope: existing tab, signed-in profile, anonymous page, screenshot,
@@ -143,6 +162,12 @@ matches the `chrome-cdp`/`realbrowser` attach model: if Chrome shows an Allow
 debugging prompt, wait for the existing starting daemon rather than spawning
 another controller. Use `daemon monitor --json` to check target count, sessions,
 and buffer sizes before retrying.
+
+Chrome owns the real signed-in-profile approval boundary. The skill can make the
+approval one-per-browser-endpoint while the browser/daemon survives, but it
+cannot guarantee a one-time approval forever after Chrome or the computer
+restarts. For low-approval clean-state work, prefer anonymous managed sessions;
+for logged-in state, attach to the real profile and reuse the same daemon.
 
 Do not probe several profiles in parallel when they report the same
 browser-scoped WebSocket. Pick the intended profile first, then run one

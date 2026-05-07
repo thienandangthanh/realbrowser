@@ -26,7 +26,9 @@ downloads, and exports.
   - `scripts/realbrowser.cmd` for Windows `cmd.exe`.
 - Signed-in profile attach through Chrome/Chromium DevTools endpoints.
 - Anonymous managed sessions for clean browser state.
-- Stable labeled tab targets.
+- Stable labeled tab targets, scoped per owner/Codex session.
+- Target leases for mutating commands so parallel Codex sessions do not
+  accidentally navigate, close, or click each other's tabs.
 - Compact page reads, structured item extraction, screenshots, console logs,
   network request/response capture, uploads, guarded submits, downloads, and PDF
   export.
@@ -67,6 +69,22 @@ Run the built-in checks:
 ```
 
 ## Common Flows
+
+Parallel Codex sessions:
+
+```bash
+export REALBROWSER_OWNER=my-project
+./scripts/realbrowser session use profile:chrome:Default
+./scripts/realbrowser tab ensure http://localhost:3000 --profile chrome:Default --label app --background
+./scripts/realbrowser read observe -t app
+```
+
+`REALBROWSER_OWNER` or `--owner <id>` scopes labels and default context. Without
+an explicit owner, Realbrowser uses the current Codex/terminal session when one is
+available, falling back to the project path. Mutating commands claim a target
+lease; if another owner already owns that tab, rerun with `--take-lease` only when
+you intentionally want to take it over. `tab ensure` creates a fresh tab instead
+of reusing another owner's URL match.
 
 Anonymous page:
 
@@ -150,6 +168,13 @@ Realbrowser should keep signed-in profile work in the background when possible.
 Use `--front` only for explicit visual handoff. Use `--best-effort-background`
 when the CLI reports that a profile app launch is required and the focus risk is
 acceptable.
+
+Chrome approval prompts are controlled by Chrome, not the skill. Realbrowser
+reduces repeated prompts by reusing the same direct `DevToolsActivePort`
+WebSocket and daemon per browser endpoint. After a browser/computer restart, a
+signed-in real Chrome profile can still require Chrome's approval once; managed
+anonymous sessions avoid signed-in-profile approval but do not contain the user's
+logged-in state.
 
 ## Development Notes
 

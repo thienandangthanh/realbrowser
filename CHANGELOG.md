@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.2.1 - 2026-05-07
+
+This release hardens `0.2.0` for parallel Codex sessions and lower-approval
+real-browser workflows.
+
+Added:
+
+- Owner-scoped labels, default context, and element refs via `--owner` /
+  `REALBROWSER_OWNER`.
+- Target leases for mutating commands so parallel Codex sessions do not
+  accidentally control each other's tabs.
+- Owner-separated anonymous daemons while keeping real signed-in browser
+  endpoints shared per physical browser endpoint.
+- Local JSON state locking for labels, target metadata, leases, and owner default
+  contexts.
+- Daemon runtime schema checks so old same-version daemons are restarted when the
+  state/lease model changes.
+
+Changed:
+
+- `tab ensure` skips another owner's URL match and creates a fresh tab instead
+  of reusing a leased target.
+- HTTP and direct WebSocket forms of the same CDP endpoint are treated as the
+  same browser endpoint for daemon reuse.
+- Chrome browser-wide permission grant/reset now requires `--force`, even after
+  the target lease check passes.
+- Full, responsive/device, and annotated screenshots/checkpoints are
+  lease-guarded because they temporarily scroll, emulate, or draw page overlays.
+- Expanded docs for multi-Codex operation, Chrome approval prompt limits, and
+  release validation.
+
+Fixed:
+
+- Owner-scoped refs prevent one session's `b1`/`e1` reads from overwriting
+  another session's pending action refs.
+- Cross-owner lease detection now considers duplicate/stale lease records and
+  keeps the newest relevant lease.
+- Broadened mutating raw CDP detection for `devtools raw`.
+- Preserved the `realbrowser` name consistently across code and docs.
+- Set the script version to `0.2.1`.
+
 ## 0.2.0 - 2026-05-07
 
 This is a major CLI and workflow refactor from `v0.1.0`.
