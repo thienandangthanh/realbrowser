@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 
-const VERSION = "0.3.1";
+const VERSION = "0.3.2";
 const STATE_SCHEMA_VERSION = "owner-lease-1";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
@@ -67,7 +67,7 @@ const GROUPS = {
   daemon: ["status", "doctor", "monitor", "restart", "stop"],
   tab: ["list", "select", "ensure", "new", "navigate", "label", "focus", "close", "handoff", "resume"],
   handle: ["create", "list", "release"],
-  read: ["observe", "size", "tree", "snapshot", "query", "query-selector", "items", "item", "text", "html", "links", "forms", "url", "is"],
+  read: ["observe", "size", "tree", "snapshot", "query", "query-selector", "items", "item", "text", "html", "links", "forms", "url", "is", "autocomplete", "overlay"],
   wait: ["ready", "selector", "text", "url", "load", "network"],
   action: ["state", "root", "click", "fill", "type", "press", "key", "upload", "submit", "hover", "select", "scroll"],
   screenshot: ["capture", "full", "area", "device", "responsive"],
@@ -125,7 +125,7 @@ const BOOLEAN_FLAGS = new Set([
   "--full-stdout", "--dry-run", "--dispatch-events", "--visual-stable",
   "--screenshot", "--annotate-refs", "--annotate", "--labels", "--mobile-emulation", "--mobile",
   "--no-skeletons", "--latest", "--active", "--stdin", "--final", "--cdp",
-  "--system", "--deep", "--allow-file-dialog", "--no-normalize", "--normalize",
+  "--system", "--deep", "--allow-file-dialog", "--no-normalize", "--normalize", "--bypass-overlay",
   "--take-lease", "--all", "--global",
 ]);
 
@@ -1940,7 +1940,14 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
     await waitForUrl(this, tab.targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
     await waitForReadyState(this, tab.targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
     const updated = await this.resolveTargetForOperation(tab.suggestedTarget, flags, "tab navigate");
-    return result({ text: `navigated ${updated.suggestedTarget} to ${url}`, target: updated, resolvedFromRef: resolvedFromRef || undefined });
+    const liveTitle = await this.callFunction(tab.targetId, () => ({ title: document.title || "" }), []).then((r) => r?.title || updated.title || "").catch(() => updated.title || "");
+    const errorPagePattern = /(?:^|[^a-z0-9])(?:404|500|503|not[\s-]?found|page[\s-]?not[\s-]?found|không[\s-]?tìm[\s-]?thấy|trang[\s-]?không[\s-]?tồn[\s-]?tại|seite[\s-]?nicht[\s-]?gefunden|p[áa]gina[\s-]?no[\s-]?encontrada)(?:[^a-z0-9]|$)/i;
+    const errorPageHint = errorPagePattern.test(liveTitle) ? liveTitle.slice(0, 120) : "";
+    const baseText = `navigated ${updated.suggestedTarget} to ${url}`;
+    const text = errorPageHint
+      ? `${baseText}\nWARN: page title looks like an error page (${errorPageHint}). The URL responded but the rendered page is an error/not-found template — verify with: read tree -t ${updated.suggestedTarget} -i -c`
+      : baseText;
+    return result({ text, target: updated, resolvedFromRef: resolvedFromRef || undefined, errorPageHint: errorPageHint || undefined, title: liveTitle || undefined });
   }
   if (command === "label") {
     const targetRef = args[0] || flags.target;
@@ -2000,7 +2007,7 @@ BrowserDaemon.prototype.read = async function read(command, args, flags) {
     const selector = args[0] || flags.selector;
     if (!selector) throw usage("read query requires <selector>");
     const opts = queryOptions(flags);
-    if (flags.root && /^[riefblc]\d+$/i.test(flags.root)) opts.rootSelector = this.selectorFor(tab.targetId, flags.root);
+    if (flags.root && /^[riefblco]\d+$/i.test(flags.root)) opts.rootSelector = this.selectorFor(tab.targetId, flags.root);
     const payload = await this.callFunction(tab.targetId, queryFunction, [selector, opts]);
     if (flags.fields) payload.matches = payload.matches.map((entry) => pickFields(entry, flags.fields));
     this.storeRefs(tab.targetId, payload.refs || {});
@@ -2008,21 +2015,21 @@ BrowserDaemon.prototype.read = async function read(command, args, flags) {
   }
   if (command === "items") {
     const opts = itemsOptions(args, flags);
-    if (flags.root && /^[riefblc]\d+$/i.test(flags.root)) opts.root = this.selectorFor(tab.targetId, flags.root);
+    if (flags.root && /^[riefblco]\d+$/i.test(flags.root)) opts.root = this.selectorFor(tab.targetId, flags.root);
     const payload = await this.callFunction(tab.targetId, itemsFunction, [opts]);
     this.storeRefs(tab.targetId, payload.refs || {});
     return await maybeWriteReadOut(result({ text: formatItems(payload), target: tab, ...payload }), flags, payload, "items", { omit: ["items", "refs"] });
   }
   if (command === "item") {
     const opts = itemsOptions(args, flags);
-    if (flags.root && /^[riefblc]\d+$/i.test(flags.root)) opts.root = this.selectorFor(tab.targetId, flags.root);
+    if (flags.root && /^[riefblco]\d+$/i.test(flags.root)) opts.root = this.selectorFor(tab.targetId, flags.root);
     const payload = await this.callFunction(tab.targetId, itemFunction, [opts]);
     this.storeRefs(tab.targetId, payload.refs || {});
     return await maybeWriteReadOut(result({ text: payload.found ? payload.text : `item ${payload.index} not found`, target: tab, ...payload }), flags, payload, "item", { omit: ["links", "media", "refs"] });
   }
   if (command === "snapshot") {
-    if (flags.selector && /^[riefblc]\d+$/i.test(flags.selector)) flags.selector = this.selectorFor(tab.targetId, flags.selector);
-    if (flags.root && /^[riefblc]\d+$/i.test(flags.root)) flags.root = `selector:${this.selectorFor(tab.targetId, flags.root)}`;
+    if (flags.selector && /^[riefblco]\d+$/i.test(flags.selector)) flags.selector = this.selectorFor(tab.targetId, flags.selector);
+    if (flags.root && /^[riefblco]\d+$/i.test(flags.root)) flags.root = `selector:${this.selectorFor(tab.targetId, flags.root)}`;
     const payload = await this.snapshot(tab.targetId, flags);
     return await maybeWriteReadOut(result({ text: payload.snapshot, target: tab, ...payload }), flags, payload.snapshot, "snapshot", { text: true, omit: ["snapshot", "refs"] });
   }
@@ -2044,7 +2051,7 @@ BrowserDaemon.prototype.read = async function read(command, args, flags) {
     return await maybeWriteReadOut(result({ text: formatValue(payload), target: tab, [command]: payload }), flags, payload, command, { omit: [command] });
   }
   if (command === "tree") {
-    if (flags.selector && /^[riefblc]\d+$/i.test(flags.selector)) flags.selector = this.selectorFor(tab.targetId, flags.selector);
+    if (flags.selector && /^[riefblco]\d+$/i.test(flags.selector)) flags.selector = this.selectorFor(tab.targetId, flags.selector);
     const payload = await this.ariaTree(tab.targetId, flags);
     return await maybeWriteReadOut(result({ text: payload.tree, target: tab, ...payload }), flags, payload.tree, "tree", { text: true, omit: ["tree", "refs"] });
   }
@@ -2054,14 +2061,33 @@ BrowserDaemon.prototype.read = async function read(command, args, flags) {
     const payload = await this.callFunction(tab.targetId, isFunction, [state, this.selectorFor(tab.targetId, ref)]);
     return await maybeWriteReadOut(result({ text: String(payload.ok), target: tab, ...payload }), flags, payload, "is");
   }
+  if (command === "autocomplete" || command === "overlay") {
+    const payload = await this.callFunction(tab.targetId, readOverlayFunction, [{ limit: Number(flags.limit || 30) }]);
+    if (!payload?.ok) {
+      const text = `(no floating layer found; if a dropdown should be open, focus the input first with action click <ref> then action type <ref> "<text>")`;
+      return result({ text, target: tab, ok: false, reason: payload?.reason });
+    }
+    this.storeRefs(tab.targetId, payload.refs || {}, { merge: true });
+    const headerParts = [
+      `floating layer: ${payload.layer.tag}${payload.layer.role ? `[${payload.layer.role}]` : ""} z=${payload.layer.zIndex} ${payload.layer.rect.width}x${payload.layer.rect.height}@${payload.layer.rect.x},${payload.layer.rect.y}`,
+    ];
+    if (payload.focused) {
+      const f = payload.focused;
+      headerParts.push(`near focused: ${f.tag}${f.role ? `[${f.role}]` : ""}${f.name ? ` "${f.name}"` : ""}${f.value ? ` value="${f.value}"` : ""}`);
+    }
+    const lines = payload.options.map((o) => `- ${o.ref} ${o.tag}${o.role ? `[${o.role}]` : ""} "${o.text}"`);
+    const truncatedNote = payload.truncated ? `\n(${payload.totalFound - payload.options.length} more; pass --limit N to expand)` : "";
+    const text = `${headerParts.join("\n")}\n${lines.join("\n")}${truncatedNote}`;
+    return await maybeWriteReadOut(result({ text, target: tab, ...payload }), flags, payload, "autocomplete", { text: true, omit: ["refs"] });
+  }
   throw usage(`unknown read command: ${command}`);
 };
 
-BrowserDaemon.prototype.storeRefs = function storeRefs(targetId, refs) {
+BrowserDaemon.prototype.storeRefs = function storeRefs(targetId, refs, opts = {}) {
   const key = this.refStoreKey(targetId);
   const store = this.refStores.get(key) || { generation: 0, refs: {}, snapshot: "", ariaSnapshot: "" };
   store.generation += 1;
-  store.refs = refs;
+  store.refs = opts.merge ? { ...store.refs, ...refs } : refs;
   store.stale = false;
   this.refStores.set(key, store);
 };
@@ -2072,7 +2098,7 @@ BrowserDaemon.prototype.refStoreKey = function refStoreKey(targetId) {
 
 BrowserDaemon.prototype.selectorFor = function selectorFor(targetId, refOrSelector) {
   const raw = String(refOrSelector || "");
-  if (/^[ebfrilc]\d+$/i.test(raw)) {
+  if (/^[ebfrilco]\d+$/i.test(raw)) {
     const store = this.refStores.get(this.refStoreKey(targetId));
     const ref = store?.refs?.[raw];
     if (!ref) {
@@ -2275,7 +2301,7 @@ BrowserDaemon.prototype.action = async function action(command, args, flags) {
   const preflight = await this.callFunction(tab.targetId, actionPreflightFunction, []);
   if (command === "state" || command === "root") {
     const opts = actionOptions(args, flags);
-    if (opts.rootSelector && /^[riefblc]\d+$/i.test(opts.rootSelector)) opts.rootSelector = this.selectorFor(tab.targetId, opts.rootSelector);
+    if (opts.rootSelector && /^[riefblco]\d+$/i.test(opts.rootSelector)) opts.rootSelector = this.selectorFor(tab.targetId, opts.rootSelector);
     const payload = await this.callFunction(tab.targetId, actionStateFunction, [opts]);
     this.storeRefs(tab.targetId, payload.refs || {});
     if (flags.screenshot) {
@@ -2381,7 +2407,7 @@ BrowserDaemon.prototype.action = async function action(command, args, flags) {
     const amount = Number(args[1] || 500);
     const scrollMap = { up: [0, -amount], down: [0, amount], left: [-amount, 0], right: [amount, 0] };
     const [deltaX, deltaY] = scrollMap[direction] || scrollMap.down;
-    if (flags.selector || args[0] && /^[riefblc]\d+$/i.test(args[0])) {
+    if (flags.selector || args[0] && /^[riefblco]\d+$/i.test(args[0])) {
       const sel = flags.selector || this.selectorFor(tab.targetId, args[0]);
       await this.callFunction(tab.targetId, (s, dx, dy) => {
         const el = document.querySelector(s);
@@ -4080,6 +4106,134 @@ function isFunction(state, selector) {
   return { ok: Boolean(value), state, selector };
 }
 
+function readOverlayFunction(opts = {}) {
+  const all = document.querySelectorAll("*");
+  const layers = [];
+  for (const el of all) {
+    const cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") continue;
+    if (cs.position !== "fixed" && cs.position !== "absolute") continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 40 || r.height < 20) continue;
+    if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) continue;
+    const z = cs.zIndex === "auto" ? 0 : (parseInt(cs.zIndex, 10) || 0);
+    if (cs.zIndex === "auto" && z === 0 && cs.position === "absolute") {
+      let p = el.parentElement;
+      let inheritedZ = 0;
+      while (p && inheritedZ === 0) {
+        const ps = getComputedStyle(p);
+        const pz = ps.zIndex === "auto" ? 0 : (parseInt(ps.zIndex, 10) || 0);
+        if (pz > 0) { inheritedZ = pz; break; }
+        p = p.parentElement;
+      }
+      if (inheritedZ === 0) continue;
+    } else if (z < 1) {
+      continue;
+    }
+    layers.push({ el, rect: r, zIndex: z });
+  }
+  if (!layers.length) return { ok: false, reason: "no floating layer found (no fixed/absolute element with z-index >= 1)" };
+  const focused = document.activeElement && document.activeElement !== document.body && document.activeElement !== document.documentElement
+    ? document.activeElement : null;
+  let chosen;
+  if (focused) {
+    const fr = focused.getBoundingClientRect();
+    const near = layers.filter(({ rect }) => {
+      const horizontalNear = rect.left < fr.right + 300 && rect.right > fr.left - 300;
+      const verticallyBelowOrCovering = rect.top >= fr.bottom - 50 && rect.top < fr.bottom + 600;
+      const verticallyOverlap = rect.top < fr.bottom && rect.bottom > fr.top;
+      return horizontalNear && (verticallyBelowOrCovering || verticallyOverlap);
+    });
+    if (near.length) {
+      near.sort((a, b) => b.zIndex - a.zIndex || (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height));
+      chosen = near[0];
+    }
+  }
+  if (!chosen) {
+    layers.sort((a, b) => b.zIndex - a.zIndex || (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height));
+    chosen = layers[0];
+  }
+  const layer = chosen.el;
+  const interactiveTags = new Set(["button", "a", "option"]);
+  const interactiveRoles = new Set(["button", "option", "menuitem", "menuitemradio", "menuitemcheckbox", "tab", "link", "radio", "checkbox", "treeitem", "row"]);
+  const isInteractive = (el) => {
+    const tag = el.tagName.toLowerCase();
+    if (interactiveTags.has(tag)) return true;
+    if (tag === "input" && el.type !== "hidden") return true;
+    if (tag === "li" && el.closest('[role="listbox"],[role="menu"],ul[role],ol[role]')) return true;
+    const role = el.getAttribute("role");
+    if (role && interactiveRoles.has(role)) return true;
+    if (el.hasAttribute("data-value") || el.hasAttribute("data-option-value")) return true;
+    if (el.onclick || el.getAttribute("onclick")) return true;
+    return false;
+  };
+  const candidates = [];
+  const seenEls = new Set();
+  for (const el of layer.querySelectorAll("*")) {
+    if (seenEls.has(el)) continue;
+    const cs2 = getComputedStyle(el);
+    if (cs2.display === "none" || cs2.visibility === "hidden") continue;
+    const r2 = el.getBoundingClientRect();
+    if (r2.width < 4 || r2.height < 4) continue;
+    const text = (el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("alt") || el.value || "").replace(/\s+/g, " ").trim();
+    if (!text || text.length > 240) continue;
+    const isLeaf = el.children.length === 0
+      || ![...el.children].some((c) => (c.innerText || c.textContent || "").trim().length > 0);
+    if (isInteractive(el) || (isLeaf && cs2.pointerEvents !== "none")) {
+      seenEls.add(el);
+      candidates.push({ el, text: text.slice(0, 120), rect: r2, interactive: isInteractive(el) });
+    }
+  }
+  candidates.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  const dedup = [];
+  const seenKey = new Set();
+  for (const item of candidates) {
+    const ancestorAlready = dedup.some((kept) => kept.el.contains(item.el) && kept.text === item.text);
+    if (ancestorAlready) continue;
+    const key = `${item.text}|${Math.round(item.rect.left)}|${Math.round(item.rect.top)}`;
+    if (seenKey.has(key)) continue;
+    seenKey.add(key);
+    dedup.push(item);
+  }
+  const limit = Number(opts.limit || 30);
+  const refs = {};
+  const options = dedup.slice(0, limit).map((item, i) => {
+    const ref = `o${i + 1}`;
+    item.el.setAttribute("data-realbrowser-ref", ref);
+    const tag = item.el.tagName.toLowerCase();
+    refs[ref] = {
+      ref,
+      selector: `[data-realbrowser-ref="${ref}"]`,
+      tag,
+      text: item.text,
+      role: item.el.getAttribute("role") || undefined,
+      interactive: item.interactive,
+    };
+    return refs[ref];
+  });
+  const layerRect = chosen.rect;
+  const focusedDesc = focused ? {
+    tag: focused.tagName.toLowerCase(),
+    role: focused.getAttribute("role") || undefined,
+    name: (focused.getAttribute("aria-label") || focused.placeholder || focused.name || "").slice(0, 80) || undefined,
+    value: typeof focused.value === "string" ? focused.value.slice(0, 80) : undefined,
+  } : null;
+  return {
+    ok: true,
+    layer: {
+      tag: layer.tagName.toLowerCase(),
+      role: layer.getAttribute("role") || undefined,
+      zIndex: chosen.zIndex,
+      rect: { x: Math.round(layerRect.x), y: Math.round(layerRect.y), width: Math.round(layerRect.width), height: Math.round(layerRect.height) },
+    },
+    focused: focusedDesc,
+    options,
+    refs,
+    truncated: dedup.length > limit,
+    totalFound: dedup.length,
+  };
+}
+
 function actionStateFunction(opts = {}) {
   document.querySelectorAll("[data-realbrowser-ref],[data-realbrowser-root]").forEach((el) => {
     el.removeAttribute("data-realbrowser-ref");
@@ -4202,13 +4356,30 @@ function clickFunction(selector, opts = {}) {
   let chosen;
   if (visiblePairs.length < 1) {
     const interactablePairs = checkedPairs.filter((pair) => pair.entry.visible && pair.entry.enabled && pair.entry.pointerEnabled && pair.entry.inViewport);
+    const bypassPair = opts.bypassOverlay
+      ? checkedPairs.find((pair) => pair.entry.visible && pair.entry.enabled && pair.entry.inViewport && pair.entry.rect.width > 0 && pair.entry.rect.height > 0)
+      : null;
     if (interactablePairs.length >= 1) {
       chosen = interactablePairs[0];
       chosen.el.click();
       chosen.entry.clickMethod = "synthetic";
       chosen.entry.warning = `topmost check failed (${chosen.entry.coveredBy || "covered"}); used synthetic el.click()`;
+    } else if (bypassPair) {
+      chosen = bypassPair;
+      const r = chosen.el.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      const init = { bubbles: true, cancelable: true, composed: true, view: window, clientX: cx, clientY: cy, screenX: cx, screenY: cy, button: 0, buttons: 1 };
+      try { chosen.el.dispatchEvent(new PointerEvent("pointerdown", { ...init, pointerType: "mouse", isPrimary: true })); } catch (_) {}
+      chosen.el.dispatchEvent(new MouseEvent("mousedown", init));
+      try { chosen.el.dispatchEvent(new PointerEvent("pointerup", { ...init, pointerType: "mouse", isPrimary: true })); } catch (_) {}
+      chosen.el.dispatchEvent(new MouseEvent("mouseup", init));
+      chosen.el.dispatchEvent(new MouseEvent("click", init));
+      chosen.entry.clickMethod = "synthetic";
+      chosen.entry.warning = `bypass-overlay (${chosen.entry.coveredBy || (chosen.entry.pointerEnabled ? "covered" : "no-pointer")}); dispatched events directly to element`;
     } else {
-      throw new Error(`No visible enabled click candidate${checked.length ? `; candidates: ${formatCandidates(checked)}` : ""}`);
+      const overlayHint = checked.some((entry) => entry.coveredBy || !entry.pointerEnabled) ? "; if covered-by overlay is the only blocker, retry with --bypass-overlay" : "";
+      throw new Error(`No visible enabled click candidate${checked.length ? `; candidates: ${formatCandidates(checked)}` : ""}${overlayHint}`);
     }
   } else {
     if (visiblePairs.length > 1 && opts.text) throw new Error(`Ambiguous click candidate; found ${visiblePairs.length}`);
@@ -5450,6 +5621,7 @@ function actionOptions(args, flags) {
     limit: Number(flags.limit || 30),
     text: flags.text,
     allowFileDialog: Boolean(flags.allowFileDialog),
+    bypassOverlay: Boolean(flags.bypassOverlay),
   };
 }
 
@@ -5476,7 +5648,7 @@ function valueFromArgs(args, flags) {
 
 function looksLikeActionTargetToken(value) {
   const raw = String(value || "");
-  return /^[ebfrilc]\d+$/i.test(raw) || raw.startsWith("selector:") || /^[#.[>]/.test(raw);
+  return /^[ebfrilco]\d+$/i.test(raw) || raw.startsWith("selector:") || /^[#.[>]/.test(raw);
 }
 
 function uploadArgs(args, flags, targetId, daemon) {
@@ -6815,11 +6987,20 @@ All read commands require -t/--target or --handle.
   read query -t app "button,input" --limit 100 --out tmp/controls.json
   read text -t app --max-chars 50000 --out tmp/page-text.txt
   read text|html|links|forms|url|is -t app ...
+  read autocomplete -t app                  (after typing into a focused input;
+                                             enumerates the floating layer's
+                                             items as o1, o2, ... refs)
 
 read query expects CSS selectors, not literal text. For text checks, use
 wait text, read text --out plus rg, or read query '<css>' --text-filter '<text>'.
 Use --out for large/debug reads. Text-like reads write plain text; structured
 reads write JSON for jq/rg/editor inspection.
+
+read autocomplete (alias: read overlay) finds the topmost floating layer
+(position fixed/absolute, z-index >= 1) near the focused input and emits
+o1, o2, ... refs for its visible items. Use after action type when the
+dropdown items don't appear in read tree (custom autocomplete without
+role=listbox/option). Then action click <ref> works without selector hunting.
 `,
   wait: `
 realbrowser wait
@@ -7168,6 +7349,18 @@ async function runSelfTest() {
   assert(actionOptions([], { root: "e5" }).rootSelector === "e5", "actionOptions ref root passes rootSelector");
   const wopts = waitReadyOptions(["/tmp/ready.png"], { screenshot: true }, 10000);
   assert(wopts.selector === "", "waitReadyOptions does not use positional arg as selector");
+  // 0.3.2 features
+  assert(actionOptions([], { bypassOverlay: true }).bypassOverlay === true, "actionOptions surfaces bypassOverlay");
+  const bypassParsed = parseCli(["action", "click", "-t", "app", "b3", "--bypass-overlay"]);
+  assert(bypassParsed.flags.bypassOverlay === true, "--bypass-overlay parsed as boolean flag");
+  const autoParsed = parseCli(["read", "autocomplete", "-t", "app"]);
+  assert(autoParsed.group === "read" && autoParsed.command === "autocomplete", "read autocomplete parser");
+  const overlayParsed = parseCli(["read", "overlay", "-t", "app", "--limit", "10"]);
+  assert(overlayParsed.command === "overlay" && overlayParsed.flags.limit === "10", "read overlay parser");
+  const oRefParsed = parseCli(["action", "click", "-t", "app", "o4"]);
+  assert(oRefParsed.args[0] === "o4", "o-ref accepted as click target");
+  // o-ref recognized by selectorFor regex (validated indirectly: ref should match the same shape as b/e/l)
+  assert(/^[ebfrilco]\d+$/i.test("o7") && /^[ebfrilco]\d+$/i.test("b1"), "ref pattern accepts o-prefix");
   stdout("realbrowser self-test passed\n");
 }
 

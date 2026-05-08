@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.3.2 - 2026-05-08
+
+Generic, cross-platform fixes for three loop patterns observed in skill-run
+forensics: custom-autocomplete selector hunts, soft-404 pages reporting
+success, and clicks blocked by sticky overlays. All three changes are pure
+CDP / Node — no OS-specific code, no site-specific strings.
+
+Added:
+
+- `read autocomplete` (alias `read overlay`) — new reader that snapshots the
+  topmost floating layer (position fixed/absolute, z-index >= 1) near the
+  focused input and emits its visible items as `o1, o2, …` refs. Stamps
+  `data-realbrowser-ref` directly via `el.setAttribute` so refs are
+  click-ready without round-trip CDP. Header line reports the layer's tag,
+  role, z-index, size, and the focused input's name+value so the model can
+  confirm context. Fixes the autocomplete selector-hunt loop where models
+  burned 8-12 calls trying `[role="tooltip"] li`, `[class*="recent"]`, etc.
+- `action click --bypass-overlay` — new flag that, when the only blocker is
+  `coveredBy:<sel>` or `pointerEnabled=false`, dispatches the full
+  pointerdown/mousedown/pointerup/mouseup/click sequence directly to the
+  element via `el.dispatchEvent`. Bypasses browser-level hit-testing entirely
+  (so a sticky nav z-index overlay no longer steals the click). Cross-platform
+  by construction since it runs in the page.
+- `o`-prefix refs accepted everywhere refs are recognized (root, selector,
+  click target). Same shape as `b/l/e` refs — validated by self-test.
+
+Changed:
+
+- `tab navigate` now appends a `WARN:` line to its stdout when the resulting
+  page title matches the cross-language soft-404 pattern (`404`, `not found`,
+  `không tìm thấy`, `seite nicht gefunden`, `página no encontrada`, `500`,
+  `503`). Exit code stays 0; the model sees the warning and pivots. Catches
+  SPAs that serve a custom 4xx template at HTTP 200 (Vietnam Airlines and
+  many others). The result also gains `errorPageHint` and `title` fields for
+  programmatic consumers.
+- `storeRefs(targetId, refs, { merge: true })` now merges instead of
+  replacing. `read autocomplete` uses merge so previous tree refs (`b1`,
+  `e1`, …) survive — letting the model use the same input ref before and
+  after typing. `read tree` and other readers still replace by default.
+- "No visible enabled click candidate" error now hints at `--bypass-overlay`
+  when at least one candidate had `coveredBy` or `no-pointer` set.
+- SKILL.md: added one-liner under "Dropdowns, pickers, and autocomplete"
+  pointing at `read autocomplete`. Failure-budget table gained two rows for
+  the new `--bypass-overlay` recovery and the soft-404 warning. `Refs first`
+  section now lists `o1, o2, …` alongside `b1/l1/e1`.
+- Help for `read` now mentions `read autocomplete` with usage hint.
+
+Validation:
+
+- `node --check scripts/realbrowser.mjs`
+- `./scripts/realbrowser --version` → 0.3.2
+- `./scripts/realbrowser self-test` (parser, ref-pattern, ariaTree, lineDiff,
+  bug-fix regressions, plus 5 new 0.3.2 assertions)
+
+Estimated impact: ~34% wall-time reduction on multi-step round-trip search
+flows where the page mixes a custom autocomplete, a sticky header, and an
+SPA error page (measured against the 13m32s VietnamAirlines run with 113
+calls — the targeted loops accounted for ~275s).
+
 ## 0.3.1 - 2026-05-08
 
 ARIA ref stamping reliability and OS-focus-restore for browser-scoped CDP

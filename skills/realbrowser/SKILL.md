@@ -292,7 +292,9 @@ approach. Do not continue — reassess fundamentally.
 
 ### Refs first, CSS only when known
 
-After `read tree -i -c`, every interactive element has a ref (`b1`, `l1`, `e1`).
+After `read tree -i -c`, every interactive element has a ref (`b1` button,
+`l1` link, `e1` editable/other; `read autocomplete` adds `o1, o2, …` for
+floating-layer items).
 Use refs for actions: `action click b3`, `action fill e2 "value"`,
 `action type e1 "text"`.
 
@@ -381,6 +383,11 @@ misread small digits. Pick the right shot:
 
 When a click opens a dropdown/picker/autocomplete with a search input, type
 immediately — the input is usually auto-focused: `action type "search text"`.
+If the dropdown items don't show up in `read tree` (custom autocomplete
+without `role=listbox/option`), run `read autocomplete -t <label>` — it
+enumerates the floating layer's visible items as `o1, o2, …` refs that work
+with `action click <ref>`. No selector hunting.
+
 If typing does nothing, `action press Escape`, re-read tree, try a different
 UI path. Do not cycle CSS selectors hoping to find a clickable item inside a
 tooltip/popover — tooltip children are frequently "not topmost".
@@ -421,9 +428,12 @@ re-read the full tree, or query a related field "to make sure".
 | Failure type | Max attempts | Then |
 |---|---|---|
 | Ref stale/covered/not topmost | 1 | Re-read tree for fresh refs |
+| Click error contains `covered-by:<sel>` | 1 | `action scroll down 400` then retry; if still covered, retry with `action click <ref> --bypass-overlay` (dispatches events directly to the element, ignores hit-test) |
+| Dropdown item not in tree | 1 | `read autocomplete -t <label>` then `action click <o-ref>` |
 | Dropdown item not clickable | 1 | Type into search input instead |
 | CSS selector guess (not from prior output) | 0 | Use refs — never guess selectors |
 | CSS selector from prior output, not found | 1 | Fall back to `read tree -i -c` + refs |
+| `tab navigate` shows `WARN: page title looks like an error page` | 1 | The URL is wrong — go back / use the UI path. Don't retry the same URL. |
 | URL navigation 404 | 1 | Go back, use the UI path |
 | Any single interaction | 3 total | Stop. Switch strategy entirely. |
 
