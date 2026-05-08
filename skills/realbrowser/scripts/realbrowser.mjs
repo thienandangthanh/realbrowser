@@ -1795,28 +1795,31 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
       });
     }
     const focusRestore = !flags.front ? await captureForegroundAppForBackgroundLaunch({ front: false }).catch(() => null) : null;
-    const created = await this.cdp.send("Target.createTarget", {
-      url,
-      background: !flags.front,
-    }, undefined, flags.timeout || 30_000);
-    const targetId = created.targetId;
-    if (!targetId) throw new Error("Target.createTarget returned no targetId");
-    await restoreForegroundAppAfterBackgroundLaunch(focusRestore, { delayMs: 50 }).catch(() => {});
-    const profileOwnedCreate = this.context.kind === "profile" && this.context.endpointScope === "profile";
-    if (profileOwnedCreate) await this.setTargetMeta(targetId, { profileOwned: true, profile: this.context.profile.id, source: "target-create" });
-    if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create", force: Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
-    else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "target-create");
-    if (flags.front) await this.cdp.send("Target.activateTarget", { targetId }).catch(() => {});
-    await this.attach(targetId);
-    await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
-    await waitForReadyState(this, targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
-    const tab = await this.resolveTarget(flags.label || targetId, { operation: `tab ${command}` });
-    return result({
-      text: `created ${tab.suggestedTarget} ${url}`,
-      target: tab,
-      created: true,
-      context: this.publicContext(),
-    });
+    try {
+      const created = await this.cdp.send("Target.createTarget", {
+        url,
+        background: !flags.front,
+      }, undefined, flags.timeout || 30_000);
+      const targetId = created.targetId;
+      if (!targetId) throw new Error("Target.createTarget returned no targetId");
+      const profileOwnedCreate = this.context.kind === "profile" && this.context.endpointScope === "profile";
+      if (profileOwnedCreate) await this.setTargetMeta(targetId, { profileOwned: true, profile: this.context.profile.id, source: "target-create" });
+      if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create", force: Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
+      else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "target-create");
+      if (flags.front) await this.cdp.send("Target.activateTarget", { targetId }).catch(() => {});
+      await this.attach(targetId);
+      await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
+      await waitForReadyState(this, targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
+      const tab = await this.resolveTarget(flags.label || targetId, { operation: `tab ${command}` });
+      return result({
+        text: `created ${tab.suggestedTarget} ${url}`,
+        target: tab,
+        created: true,
+        context: this.publicContext(),
+      });
+    } finally {
+      await restoreForegroundAppAfterBackgroundLaunch(focusRestore, { delayMs: 50 }).catch(() => {});
+    }
   }
   if (command === "navigate") {
     const targetRef = args[0] || flags.target;
@@ -2117,7 +2120,6 @@ BrowserDaemon.prototype.action = async function action(command, args, flags) {
     const payload = await this.callFunction(tab.targetId, actionStateFunction, [opts]);
     this.storeRefs(tab.targetId, payload.refs || {});
     if (flags.screenshot) {
-      const selector = activeRootScreenshotSelector(payload);
       const ssFlags = args[0] ? { ...flags, out: args[0] } : flags;
       payload.screenshot = await captureCheckpointScreenshot(this, tab.targetId, flags, screenshotPath(this.artifactDir, "action-state", tab, ssFlags), {
         selector: "",
