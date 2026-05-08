@@ -1794,12 +1794,14 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
         context: this.publicContext(),
       });
     }
+    const focusRestore = !flags.front ? await captureForegroundAppForBackgroundLaunch({ front: false }).catch(() => null) : null;
     const created = await this.cdp.send("Target.createTarget", {
       url,
       background: !flags.front,
     }, undefined, flags.timeout || 30_000);
     const targetId = created.targetId;
     if (!targetId) throw new Error("Target.createTarget returned no targetId");
+    await restoreForegroundAppAfterBackgroundLaunch(focusRestore, { delayMs: 50 }).catch(() => {});
     const profileOwnedCreate = this.context.kind === "profile" && this.context.endpointScope === "profile";
     if (profileOwnedCreate) await this.setTargetMeta(targetId, { profileOwned: true, profile: this.context.profile.id, source: "target-create" });
     if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create", force: Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
