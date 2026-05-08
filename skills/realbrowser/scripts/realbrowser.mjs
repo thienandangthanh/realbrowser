@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 
-const VERSION = "0.3.0";
+const VERSION = "0.3.1";
 const STATE_SCHEMA_VERSION = "owner-lease-1";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
@@ -1827,6 +1827,9 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
       // Try CDP Target.createTarget first — no focus steal, true background.
       // Fall back to launchProfileTab only if CDP creation fails.
       if (!flags.front) {
+        // Capture OS focus too: even though CDP avoids in-Chrome focus theft,
+        // some platforms still raise the Chrome process when a new tab opens.
+        const cdpFocusRestore = await captureForegroundAppForBackgroundLaunch({ front: false }).catch(() => null);
         try {
           const created = await this.cdp.send("Target.createTarget", {
             url,
@@ -1837,12 +1840,14 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
           if (targetId) {
             const restoreTarget = await this.findTabToRestore(visibleByWindow, targetId).catch(() => null);
             if (restoreTarget) await this.cdp.send("Target.activateTarget", { targetId: restoreTarget }).catch(() => {});
+            await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
             await this.setTargetMeta(targetId, { profileOwned: true, profile: this.context.profile.id, source: "browser-scope-cdp-create", requestedUrl: url });
             if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: true, profile: this.context.profile.id, source: "browser-scope-cdp-create", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
             else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "browser-scope-cdp-create");
             await this.attach(targetId);
             await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
             await waitForReadyState(this, targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
+            await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
             const tab = await this.resolveTarget(flags.label || targetId, { operation: `tab ${command}` });
             return result({
               text: `created ${tab.suggestedTarget} ${url}`,
@@ -1854,6 +1859,8 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
           }
         } catch (_cdpErr) {
           // CDP create failed — fall through to launchProfileTab
+        } finally {
+          await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
         }
       }
       const beforeIds = new Set(tabs.map((tab) => tab.targetId));
@@ -2149,39 +2156,70 @@ BrowserDaemon.prototype.ariaTree = async function ariaTree(targetId, flags) {
 };
 
 BrowserDaemon.prototype.assignAriaRefs = async function assignAriaRefs(targetId, sessionId, interactiveNodes, refs) {
+  // Clear prior stamps everywhere (light DOM + shadow DOM).
   await this.cdp.send("Runtime.evaluate", {
     expression: `
       (function clear(root) {
-        if (!root) return;
-        root.querySelectorAll("[data-realbrowser-ref]").forEach(el => el.removeAttribute("data-realbrowser-ref"));
-        root.querySelectorAll("*").forEach(el => { if (el.shadowRoot) clear(el.shadowRoot); });
+        if (!root || !root.querySelectorAll) return;
+        for (const el of root.querySelectorAll("[data-realbrowser-ref]")) el.removeAttribute("data-realbrowser-ref");
+        for (const el of root.querySelectorAll("*")) { if (el.shadowRoot) clear(el.shadowRoot); }
       })(document);
     `,
   }, sessionId).catch(() => {});
-  const backendIds = interactiveNodes.map((n) => n.backendDOMNodeId).filter(Boolean);
-  if (backendIds.length === 0) return;
-  let nodeIds;
-  try {
-    await this.cdp.send("DOM.getDocument", { depth: -1, pierce: true }, sessionId);
-    const pushed = await this.cdp.send("DOM.pushNodesByBackendIds", { backendNodeIds: backendIds }, sessionId);
-    nodeIds = pushed.nodeIds;
-  } catch { return; }
-  for (let i = 0; i < interactiveNodes.length; i++) {
-    const node = interactiveNodes[i];
+  await this.cdp.send("DOM.enable", {}, sessionId).catch(() => {});
+
+  const targets = interactiveNodes.filter((n) => n.ref && n.backendDOMNodeId);
+  if (targets.length === 0) return;
+  const backendIds = targets.map((n) => Math.floor(n.backendDOMNodeId));
+
+  // Light-DOM path: batch backend->nodeId resolution. CDP method name is
+  // pushNodesByBackendIdsToFrontend (proven openclaw pattern).
+  const pushed = await this.cdp.send("DOM.pushNodesByBackendIdsToFrontend", { backendNodeIds: backendIds }, sessionId).catch(() => null);
+  const nodeIds = Array.isArray(pushed?.nodeIds) ? pushed.nodeIds : [];
+
+  // Stamp each node. nodeId > 0 → cheap setAttributeValue (no JS execution).
+  // nodeId 0 or batch failed → resolveNode + callFunctionOn pierces shadow DOM
+  // by operating on the element's JS reference directly.
+  await Promise.all(targets.map(async (node, i) => {
     const ref = node.ref;
-    if (!ref) continue;
-    const nodeId = nodeIds?.[backendIds.indexOf(node.backendDOMNodeId)];
-    if (!nodeId || nodeId === 0) {
-      node._stampFailed = true;
-      continue;
+    let stamped = false;
+    const nodeId = nodeIds[i];
+    if (nodeId && nodeId > 0) {
+      try {
+        await this.cdp.send("DOM.setAttributeValue", { nodeId, name: "data-realbrowser-ref", value: ref }, sessionId);
+        stamped = true;
+      } catch { /* fall through */ }
     }
-    try {
-      await this.cdp.send("DOM.setAttributeValue", { nodeId, name: "data-realbrowser-ref", value: ref }, sessionId);
-      refs[ref] = { ref, selector: `[data-realbrowser-ref="${ref}"]`, role: node.role, name: node.name || undefined, backendDOMNodeId: node.backendDOMNodeId };
-    } catch {
+    if (!stamped) {
+      try {
+        const resolved = await this.cdp.send("DOM.resolveNode", { backendNodeId: node.backendDOMNodeId }, sessionId);
+        const objectId = resolved?.object?.objectId;
+        if (objectId) {
+          try {
+            await this.cdp.send("Runtime.callFunctionOn", {
+              objectId,
+              functionDeclaration: 'function(value) { this.setAttribute && this.setAttribute("data-realbrowser-ref", value); }',
+              arguments: [{ value: ref }],
+            }, sessionId);
+            stamped = true;
+          } finally {
+            await this.cdp.send("Runtime.releaseObject", { objectId }, sessionId).catch(() => {});
+          }
+        }
+      } catch { /* mark below */ }
+    }
+    if (stamped) {
+      refs[ref] = {
+        ref,
+        selector: `[data-realbrowser-ref="${ref}"]`,
+        role: node.role,
+        name: node.name || undefined,
+        backendDOMNodeId: node.backendDOMNodeId,
+      };
+    } else {
       node._stampFailed = true;
     }
-  }
+  }));
 };
 
 BrowserDaemon.prototype.wait = async function wait(command, args, flags) {
@@ -3659,6 +3697,33 @@ function refKind(el) {
   return "e";
 }
 
+function pierceQuerySelector(root, selector) {
+  if (!root || !selector) return null;
+  const queue = [root];
+  while (queue.length) {
+    const node = queue.shift();
+    if (!node || !node.querySelector) continue;
+    const found = node.querySelector(selector);
+    if (found) return found;
+    const hosts = node.querySelectorAll ? node.querySelectorAll("*") : [];
+    for (const el of hosts) { if (el.shadowRoot) queue.push(el.shadowRoot); }
+  }
+  return null;
+}
+
+function pierceQuerySelectorAll(root, selector) {
+  const out = [];
+  if (!root || !selector) return out;
+  const queue = [root];
+  while (queue.length) {
+    const node = queue.shift();
+    if (!node || !node.querySelectorAll) continue;
+    for (const el of node.querySelectorAll(selector)) out.push(el);
+    for (const el of node.querySelectorAll("*")) { if (el.shadowRoot) queue.push(el.shadowRoot); }
+  }
+  return out;
+}
+
 function markRef(el, counters, refs) {
   const kind = refKind(el);
   counters[kind] = (counters[kind] || 0) + 1;
@@ -4112,7 +4177,8 @@ function clickFunction(selector, opts = {}) {
   let candidates;
   const root = opts.activeRoot || opts.root === "active" ? activeRootElementSourceEval() : document;
   if (selector) {
-    candidates = [root.querySelector(selector)];
+    const direct = root.querySelector(selector);
+    candidates = [direct || pierceQuerySelector(root, selector) || pierceQuerySelector(document, selector)];
   } else if (opts.final) {
     const all = [...root.querySelectorAll("button,[role=button],input[type=submit],input[type=button],a[href]")];
     if (opts.text) {
@@ -4205,7 +4271,7 @@ function fileDialogTriggerReason(el) {
 
 function fillFunction(selector, value, selectMode = false, opts = {}) {
   const root = opts.activeRoot || opts.root === "active" ? activeRootElementSourceEval() : document;
-  const el = root.querySelector(selector);
+  const el = root.querySelector(selector) || pierceQuerySelector(root, selector) || pierceQuerySelector(document, selector);
   if (!el) throw new Error("selector not found: " + selector);
   el.scrollIntoView({ block: "center", behavior: "instant" });
   el.focus();
@@ -4595,6 +4661,8 @@ const PAGE_HELPERS = [
   pageSizeFunction,
   refKind,
   markRef,
+  pierceQuerySelector,
+  pierceQuerySelectorAll,
   activeRootElementSourceEval,
   resolveCollectionRoot,
   collectionChildren,

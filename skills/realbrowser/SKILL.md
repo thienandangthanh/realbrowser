@@ -183,6 +183,44 @@ equivalent to producing wrong output. A typical read-only task (check prices,
 extract listings, inspect a page) should complete in under 2 minutes and fewer
 than 10 commands.
 
+### Read before acting: the tree is data, not a checklist
+
+`read tree -i -c` returns the page's interactive surface as text. Your job is
+to interpret it the way a user would — match what was asked for to what is
+actually on the page — *before* clicking anything. Mechanical "next ref in the
+list" behavior is the root cause of stale-ref loops, wrong clicks, and dropped
+context.
+
+1. **Find what the user named.** If they said "click Sign in", search the tree
+   text for `Sign in` and use the matching `b1`/`l1` ref. The exact label is
+   usually present. Never click the first interactive element by reflex.
+2. **Read the state attributes.** `[selected]`, `[modal]`, `[expanded=true]`,
+   `[disabled]`, `[focused]`, `[required]`, `[checked]`, `[level=N]`, and
+   `value="..."` change what action is correct. A `[disabled]` button means a
+   precondition is missing; `[expanded=false]` means children may not be
+   reachable until the accordion opens; `[modal]` means only the dialog's
+   controls are interactive.
+3. **Resolve ambiguity from context, not by clicking.** Two buttons share a
+   name? Look at their ancestors — one inside a `dialog`, one inside `main`.
+   Still unsure? Ask the user. Do not click options to see which is right.
+4. **Recognize blocking state.** Modal/`alertdialog` covers the page; its
+   controls are the only valid targets. `aria-busy`, spinner roles, or a tree
+   with zero interactives mean the page is mid-load — `wait ready
+   --visual-stable` before the next action. Auth wall pages have a single
+   sign-in form and no app surface.
+5. **Plan the whole flow from one tree.** A booking page shows origin,
+   destination, dates, passengers, search button — all in one read. Plan all
+   the fills, then act. Don't discover inputs one click at a time.
+6. **When an action fails, re-read first; don't retry.** "Not topmost",
+   "covered", "ref stale" almost always mean the page changed since the tree
+   was captured (a dropdown opened, an overlay appeared, the route swapped).
+   `read tree -i -c -D` shows what's different. Retrying the same ref against
+   the same stale picture loops forever.
+
+The ARIA tree output is structured, named text. It contains the answer to
+"what should I click" in almost every case — the failure mode is not having
+too little data, it is not reading what's there.
+
 **ABSOLUTE RULE:** Never guess CSS selectors. If you have not seen the exact
 selector string in a prior command's output, the codebase, or the `forms`
 command, you MUST use refs instead. There are no exceptions.

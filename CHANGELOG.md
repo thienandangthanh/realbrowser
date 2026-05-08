@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.3.1 - 2026-05-08
+
+ARIA ref stamping reliability and OS-focus-restore for browser-scoped CDP
+profile tabs. Adopts the openclaw `markBackendDomRefsOnPage` pattern.
+
+Fixed:
+
+- `assignAriaRefs` now uses the correct CDP method
+  `DOM.pushNodesByBackendIdsToFrontend` (the prior `DOM.pushNodesByBackendIds`
+  silently failed via "Method not found", which caused every interactive ref
+  to be stripped from `read tree` output and triggered "ref stale or unknown"
+  on the next `action click`).
+- Removed the heavy `DOM.getDocument({ depth: -1, pierce: true })` call from
+  the stamp pipeline — it was unnecessary on top of the proper push method
+  and could time out on complex pages, dropping all refs.
+- Shadow-DOM elements are now stamped via `DOM.resolveNode` +
+  `Runtime.callFunctionOn` per node when batch push returns nodeId 0. Refs
+  for elements inside shadow roots are now reliable.
+- `tab ensure` browser-scoped CDP-create-first path (anonymous-context
+  opening a tab in a default profile) wraps the CDP create in
+  `captureForegroundAppForBackgroundLaunch` /
+  `restoreForegroundAppAfterBackgroundLaunch` so the user's foreground app
+  is restored after the tab opens — no more focus-steal to the default
+  Chrome process when the user is browsing in anonymous mode.
+
+Added:
+
+- `pierceQuerySelector` / `pierceQuerySelectorAll` helpers in `PAGE_HELPERS`
+  so action functions can find elements inside shadow DOM roots when the
+  document-level `querySelector` would miss them. `clickFunction` and
+  `fillFunction` fall back to pierce when their direct `querySelector`
+  returns null, so shadow-DOM-stamped refs work end to end.
+- SKILL.md "Read before acting" rules in Efficiency Rules: explicit
+  guidance that the ARIA tree is structured data and the agent must
+  match the user's intent to the tree text (state attributes, modal
+  flags, ancestor context) before clicking.
+
+Changed:
+
+- Bumped script version to `0.3.1`.
+
 ## 0.3.0 - 2026-05-08
 
 Added ARIA tree, token efficiency improvements, bug fixes, and Claude Code
