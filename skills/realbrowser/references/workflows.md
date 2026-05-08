@@ -168,16 +168,47 @@ spending tokens on deeper DOM exploration.
 
 ## ARIA Tree (Primary Interaction Reader)
 
-`read tree` fetches Chrome's accessibility tree via CDP. It is 5-20x more compact
-than DOM-based snapshots and is the **primary reader for all interaction
-planning**. Use it before `read query`, `read snapshot`, or screenshots.
+`read tree` fetches Chrome's accessibility tree via CDP. It IS the "one big
+read" agents reach for full HTML or full screenshot to get — the entire
+interactive surface (buttons, links, inputs, tabs, dropdowns) with refs
+attached, 5–20× more compact than DOM snapshots.
+
+The canonical pattern:
+
+```bash
+realbrowser read tree -t app -i -c        # once per page state, ~300-2000 tokens
+realbrowser action click -t app b3
+realbrowser read tree -t app -i -c -D     # delta after action, ~0-200 tokens
+realbrowser action fill -t app e1 "value"
+realbrowser read tree -t app -i -c -D     # delta after action
+```
+
+Anti-patterns (strictly more expensive than `read tree`):
+
+- **`read html` / full HTML to find elements:** modern SPAs ship 100k–1M tokens
+  of HTML. `read html --out FILE` is for offline grep, not interaction.
+- **`screenshot full` + vision to read content:** vision tokens are 5–20× more
+  expensive per byte than text and misread small text. You still need refs to
+  click — `read tree` returns them for free.
+- **`read query` to find what `read tree` already showed:** the tree already
+  enumerates every interactive element. `read query` is for a known CSS
+  selector you've already seen verbatim.
+- **Multiple readers on the same page state:** one `read tree` is the snapshot.
+  Following with `read snapshot`, `read query`, or `read items` on unchanged
+  state is duplication.
+- **Re-reading the full tree after a small action:** use `-D` (diff). A click
+  that opens a dropdown adds 5 lines; full re-reads pay for the whole tree.
 
 Graduated reader hierarchy:
 1. `read tree -i -c` — buttons, links, inputs, tabs with refs (primary)
-2. `read tree --diff` — verify after action, shows only changes (2-token delta)
-3. `read query` — targeted CSS lookups with `--text-filter`
-4. `read items`/`read item` — feeds, lists, repeated content
-5. `read snapshot` — DOM structure, last resort
+2. `read tree -i -c -D` — verify after action, shows only changes
+3. `read tree -i -c --selector main` — scope to a landmark
+4. `read items`/`read item` — feeds, lists, repeated rows (when tree's flat list
+   isn't enough)
+5. `read query <css>` — only for a CSS selector you've already seen verbatim
+6. `read snapshot --selector <css>` — DOM structure when ARIA tree is inadequate
+7. `read text --out FILE` + `rg` — bulk text extraction (zero model tokens)
+8. `read html --out FILE` — offline HTML grep (zero model tokens)
 
 ```bash
 realbrowser read tree -t app -i -c

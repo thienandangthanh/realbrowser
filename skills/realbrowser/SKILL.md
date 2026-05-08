@@ -126,22 +126,19 @@ Read-only commands can still inspect the target after it is explicitly selected.
    state before reading console, network, forms, or content.
 5. Verify small state first: `read observe -t <label>` or
    `read size -t <label>`.
-6. Read with `read tree -i -c` (ARIA tree, interactive + compact) as the
-   **primary interaction reader**. It is 5-20x more compact than DOM snapshots
-   and returns refs (`b1`, `l1`, `e1`) for clicks/fills/submits. Graduated
-   reader hierarchy:
-   - `read tree -i -c` — interaction planning (buttons, links, inputs, tabs)
-   - `read tree --diff` — verify after action (only shows changes, saves tokens)
-   - `read tree -i -c --selector main` — scoped to a landmark
-   - `read query` — targeted CSS lookups with `--text-filter`
-   - `read items`/`read item` — feeds, lists, repeated content
-   - `read snapshot` — DOM structure, last resort for full HTML
-   Use `--out` for large/debug payloads instead of spending model tokens.
-   `read query` expects CSS selectors only — `:has-text()`, `:text()`, and other
-   Playwright pseudo-selectors are not valid CSS and will fail. Use
-   `--text-filter '<text>'` for text-based matching.
-   Use `wait ready --visual-stable` instead of `sleep N && screenshot capture`
-   for page readiness checks.
+6. **One tree, many diffs.** Run `read tree -t <label> -i -c` ONCE per page
+   state to capture the full interactive surface with refs (`b1`, `l1`, `e1`).
+   After each action, run `read tree -t <label> -i -c -D` for a small delta
+   (typically 2-10 lines). Do not follow `read tree` with `read snapshot`,
+   `read query`, or `screenshot full` to find elements — the tree already has
+   them. Do not re-read the full tree after a small action — use `--diff`.
+   See "Efficiency Rules → Read cost" for token math.
+   `read query` is only for a CSS selector you have already seen verbatim,
+   accepts CSS only (no `:has-text()` / `:text()` Playwright syntax — use
+   `--text-filter '<text>'` instead). Use `read items`/`read item` for feeds
+   or repeated rows. Use `read text --out FILE` + `rg` for bulk text
+   extraction (free of model tokens). Use `wait ready --visual-stable`
+   instead of `sleep N && screenshot capture` for readiness checks.
 7. For forms/uploads/submits, run `action state -t <label> --root active`, adding
    `--screenshot --annotate-refs` only when visual state can prevent a wrong
    click (modal boundaries, covered buttons, file previews, canvas/media). Do
@@ -178,6 +175,252 @@ or tab changes before finishing.
 Never parallelize target-changing commands or mutating actions with reads on
 the same target. For example, do not run `network capture --reload` at the same
 time as `export pdf` or `screenshot` on the same tab.
+
+## Efficiency Rules
+
+These are hard rules, not suggestions. Violating them is a failure mode
+equivalent to producing wrong output. A typical read-only task (check prices,
+extract listings, inspect a page) should complete in under 2 minutes and fewer
+than 10 commands.
+
+**ABSOLUTE RULE:** Never guess CSS selectors. If you have not seen the exact
+selector string in a prior command's output, the codebase, or the `forms`
+command, you MUST use refs instead. There are no exceptions.
+
+### The canonical read pattern: one tree, many diffs
+
+ONE read pattern handles 95% of interaction tasks:
+
+```bash
+# Once per page state — captures the full interactive surface with refs
+"$REALBROWSER" read tree -t app -i -c
+
+# After every action — returns only what changed (typically 2–10 lines)
+"$REALBROWSER" read tree -t app -i -c -D
+```
+
+`read tree -i -c` IS the "one big read" that some agents reach for full HTML or
+full screenshot to get. It returns the entire interactive surface (buttons,
+links, inputs, tabs, dropdowns) in compact ARIA form with refs (`b1`, `l1`, `e1`)
+ready for `action click/fill/type/submit`. There is nothing to find with HTML or
+vision that this read does not already give you with refs attached.
+
+### Read cost (input tokens, typical SPA page)
+
+| Reader | Tokens | Refs? | Use when |
+|---|---|---|---|
+| `read tree -i -c` | 300–2,000 | yes | **Default for interaction** |
+| `read tree -i -c -D` | 0–200 | yes (delta) | **Verify after action** |
+| `read tree -i -c --selector main` | 100–500 | yes | Scope to a landmark |
+| `read text --out FILE` then `rg` | ~0 (file) | no | Bulk text extraction |
+| `read items / read item` | 200–2,000 | yes | Feeds, lists, repeated rows |
+| `read query <css>` | 50–500 | yes | One known CSS selector |
+| `read snapshot --selector <css>` | 5,000–50,000 | yes | Tree inadequate (rare) |
+| `read html --out FILE` | ~0 (file) | no | Offline HTML grep only |
+| `screenshot capture` | ~600 image tokens | no | Visual state decision |
+| `screenshot full` then vision | 2,000–4,000 image tokens | no | **Never for parsing** |
+
+### Wrong choices that look like shortcuts
+
+These all feel like "one big read" but cost dramatically more than `read tree`:
+
+- **Full HTML to find elements.** Modern SPAs (Gmail, Twitter, booking sites)
+  ship 100k–1M tokens of HTML. Even after parsing, you still need refs to
+  click — `read tree` already returns them. `read html` is for offline grep
+  on a downloaded file, never for interaction planning.
+
+- **Full screenshot + vision to read content.** Vision tokens are 5–20× more
+  expensive per byte than text and misread small text (form labels, dates,
+  dropdown options). You cannot `action click` a screenshot — Chrome needs a
+  DOM ref. `read tree` returns refs and labels at a fraction of the cost.
+
+- **`read query` to find elements `read tree` already showed.** `read tree -i -c`
+  returns every interactive element with role, name, state, and ref. Use
+  `read query` only for a CSS selector you have already seen verbatim.
+
+- **Multiple readers on the same page state.** One `read tree` is the snapshot.
+  Following it with `read snapshot`, `read query`, or `read items` on the same
+  unchanged page is duplication. Act, then `read tree -D` for the delta.
+
+- **Re-reading the full tree after a small action.** Use `--diff`. A click that
+  opens a dropdown adds 5 lines; a full re-read pays for the whole tree again.
+
+### Command-count checkpoint
+
+At command 5, ask: "Am I making real progress or stuck in a guess-and-retry
+loop?" If more than 1 command did not advance toward the goal, you are in a
+loop. Re-read the page with `read tree -i -c` and use refs.
+
+At command 10, if the task is not nearly complete, you have taken a wrong
+approach. Do not continue — reassess fundamentally.
+
+### Set default context first
+
+When working with a profile, set it once before any other command:
+
+```bash
+"$REALBROWSER" session use profile:chrome:Default
+"$REALBROWSER" tab ensure https://example.com --label app --background
+# all subsequent commands: just -t app, no --profile flag
+```
+
+### Refs first, CSS only when known
+
+After `read tree -i -c`, you have refs (`b1`, `l1`, `e1`) for every interactive
+element. Use them for all interactions:
+
+```bash
+# CORRECT — use refs from the most recent tree read
+"$REALBROWSER" action click -t app b3
+"$REALBROWSER" action fill -t app e2 "value"
+"$REALBROWSER" action type -t app e1 "search text"
+
+# WRONG — guessing CSS selectors to find elements
+"$REALBROWSER" read query -t app '[class*="dropdown"] li'
+"$REALBROWSER" read snapshot -t app --selector '[class*="result"]'
+"$REALBROWSER" read query -t app 'div[role="option"]' --text-filter 'item'
+```
+
+**CSS selectors are allowed** in these specific cases:
+- `read tree -i -c --selector main` — scoping a tree read to a known landmark
+- `read query` with a known selector from `read observe` or page source
+- `action scroll --selector '[data-scroll-root]'` — scrolling a known container
+- `wait selector` — waiting for a known element to appear
+
+**You MUST NOT use CSS selectors for:**
+- Guessing class names (`[class*="..."]`) — even if you saw a similar class
+- Iterating through selectors until one matches
+- Any interaction that has a ref alternative
+- Reading/querying elements to derive new CSS selectors from screenshots
+
+A selector is "known" ONLY if:
+- It appeared **verbatim** in a prior command's output
+- It is from the application's source code that you have read
+- It is a standard landmark (`main`, `nav`, `[role="dialog"]`)
+
+A selector is a "guess" if:
+- You are using `[class*="..."]` substring matching on a class you inferred
+- You modified a seen selector (saw `.results-list`, trying `.results-item`)
+- You are using common patterns from other websites
+
+**The test:** before writing ANY CSS selector, answer: "Where exactly did I see
+this selector?" If you cannot point to a specific prior command output line,
+it is a guess. Do not use it. Run `read tree -i -c` and use refs instead.
+
+### Banned pattern: iterative selector hunting
+
+This is the single most common efficiency failure and is explicitly banned:
+
+```bash
+# BANNED — this sequence is never acceptable
+"$REALBROWSER" read query -t app '[class*="dropdown"] li'      # nothing
+"$REALBROWSER" read snapshot --selector '[class*="select"]'    # nothing
+"$REALBROWSER" read query -t app '[role="listbox"]'            # nothing
+"$REALBROWSER" read query -t app '[class*="option"]'           # nothing
+# 4 wasted commands. Run read tree -i -c and use refs.
+```
+
+Each guess feels like "trying something new." It is not — it is the same failed
+strategy repeated. After the FIRST failed or empty CSS result, switch to refs.
+Do not use screenshots to derive CSS selectors either.
+
+### Plan before clicking
+
+Before the first interaction, spend one `read tree -i -c` to map the page:
+what controls exist, what needs filling, what the multi-step flow looks like.
+Do not discover the page structure one click at a time.
+
+### Data extraction: one tree read, not scroll+screenshot
+
+When the goal is extracting structured data (prices, flight schedules, search
+results, product listings, tables):
+
+- One `read tree -i -c` captures **all** interactive elements including those
+  below the fold — labels, values, refs, everything.
+- Use `--out /tmp/data.txt` for pages with 50+ elements to avoid flooding
+  context with tokens.
+- **Never** scroll + screenshot in a loop to read data that `read tree` already
+  returned. If you have the data from a tree read, use it — do not screenshot
+  the same information.
+
+```bash
+# BAD: 13 commands, ~10 minutes
+screenshot → scroll down → screenshot → scroll down → screenshot → ...
+
+# GOOD: 1 command, ~2 seconds
+"$REALBROWSER" read tree -t app -i -c --out /tmp/results.txt
+```
+
+Screenshots are for **visual verification** (did the modal open? is the layout
+correct?), not for reading text or prices off the screen.
+
+### Dropdowns, pickers, and autocomplete: type-first
+
+When a click opens a dropdown/picker/autocomplete with a search input:
+
+1. **Immediately:** `action type -t <label> "search text"` — type into the
+   already-focused input without targeting a ref. The dropdown search input is
+   usually auto-focused after the trigger click.
+2. **If no input is focused:** `read tree -i -c` for fresh refs, then
+   `action type -t <label> <fresh-ref> "text"`.
+3. **If typing does not filter:** `action press Escape`, re-read tree, try a
+   different UI path (direct navigation, clicking a different control).
+
+Do **not**: cycle through `read query` or `read snapshot` with increasingly
+exotic CSS selectors hoping to find a clickable element inside a tooltip/popover.
+Tooltip children are frequently "not topmost" because an overlay covers them.
+Typing into the search input bypasses this entirely.
+
+### Verify with `--diff`, not screenshots
+
+After each action:
+
+```bash
+"$REALBROWSER" read tree -t app -i -c --diff
+```
+
+This returns only what changed — typically 2-5 lines. Reserve screenshot
+verification for visual-only state (image previews, canvas, layout shifts)
+and for final evidence the user explicitly asked for.
+
+### Failure budget
+
+| Failure type | Max attempts | Then |
+|---|---|---|
+| Ref stale/covered/not topmost | 1 | Re-read tree for fresh refs |
+| Dropdown item not clickable | 1 | Type into search input instead |
+| CSS selector guess (not from prior output) | 0 | Use refs — never guess selectors |
+| CSS selector from prior output, not found | 1 | Fall back to `read tree -i -c` + refs |
+| URL navigation 404 | 1 | Go back, use the UI path |
+| Any single interaction | 3 total | Stop. Switch strategy entirely. |
+
+Three failed commands on the same interaction = wrong approach. Do not continue
+guessing. Escalate in this order:
+
+1. `read tree -i -c` — get a fresh view of the full page state
+2. Try keyboard navigation: `action press Tab`, then `action press Enter`
+3. Try a completely different UI path to reach the same goal
+4. `network list --filter "/api/"` — check if the data is available via XHR
+5. Direct URL navigation if the site supports deep links
+
+### Multi-page flows: capture then advance
+
+For multi-step flows (booking, checkout, wizards):
+
+1. Capture each page's data with one `read tree -i -c` before advancing.
+2. Advance by clicking the correct ref from the tree data.
+3. Verify page transition with `read tree --diff` or `read observe`, not a
+   full screenshot.
+4. If advancing requires selecting an option you don't care about (e.g.,
+   choosing a fare class just to see the next page), pick the first available
+   option by ref and move on.
+
+### Never pipe tree output through head/tail
+
+`read tree` returns the full interactive element set. Piping through
+`| head -60` or `| tail` discards elements you need. If the output is too
+large for context, use `--out /tmp/tree.txt` and read the file, or scope with
+`--selector <css>`. Never truncate tree output with shell pipes.
 
 ## No Repeated Allow Prompts
 
