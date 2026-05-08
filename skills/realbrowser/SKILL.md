@@ -158,11 +158,20 @@ Read-only commands can still inspect the target after it is explicitly selected.
    the newly visible elements. Old refs from before the click are stale and will
    fail with "selector not found" or "not visible/topmost". Never retry a failed
    click/fill with the same stale ref — always re-read first.
-10. **"No visible enabled topmost click candidate" errors:** The element exists
-    but failed safety checks (hidden, covered by an overlay, outside viewport,
-    or not pointer-enabled). Fix: scroll with `action scroll`, close overlays
-    with `action press Escape`, or re-read tree to find the correct ref. Do not
-    blindly retry the same ref.
+10. **"No visible enabled topmost click candidate" / "covered-by:..." errors:**
+    The element exists but failed safety checks (hidden, covered by an overlay,
+    outside viewport, or not pointer-enabled). Read the error — it names the
+    cover (e.g. `covered-by:div.booking-backdrop`, `covered-by:.modal-overlay`,
+    `covered-by:nav.navigationpanel`). Recovery, in order:
+    - **Backdrop / modal:** `action press Escape`, re-read tree, retry. If a
+      named close button exists in the tree (`button "Close"`, `button "×"`),
+      click that ref instead.
+    - **Sticky nav / floating header covering target:** `action scroll` the
+      target into a clear part of the viewport, re-read tree, retry.
+    - **Loading overlay / spinner:** `wait ready --visual-stable`, re-read.
+    - Never blindly retry the same ref against the same cover — the result is
+      identical. Two consecutive identical "covered-by" errors = stop and
+      change strategy (Escape, scroll, or ask the user).
 11. **Stale refs after navigation or DOM changes:** Refs are invalidated when the
     page navigates or the DOM changes significantly. After `tab navigate`,
     `action click` that triggers navigation, or any state change that modifies
@@ -241,6 +250,60 @@ next `read tree` on that target. If you read a `--out` file and then run any
 other tree read, the refs in the file are stale. Recovery for "ref stale or
 unknown": run `read tree -t <target> -i -c` again (without `--out`) and use
 refs from that output directly.
+
+### If it's on disk, search the file — don't ask the browser again
+
+Once any reader has written page content to disk via `--out`, the next search
+MUST be on the file (`grep`, `rg`, `jq`, `awk`), never another browser
+round-trip. This rule is universal — flights, products, articles,
+dashboards, social feeds, internal apps — any reader that produces a file:
+
+| Captured to disk | Search with | Don't run |
+|---|---|---|
+| `read tree --out FILE` | `grep -nE "<label\|role>" FILE` | `read query --text-filter '...'` |
+| `read text --out FILE` | `rg "..." FILE` or `grep -n` | another `read text` |
+| `read html --out FILE` | `grep`/`pup`/`htmlq` on FILE | another `read html` |
+| `read items --out FILE` | `grep -n` (or `jq` if `--json`) | another `read items` |
+
+**Why:** `read query --text-filter` is a CDP round-trip that re-evaluates the
+page (~1-3 sec) and may return nothing if the label is in a different element
+type than you guessed. The text was already captured to a file; labels are
+exact strings; `grep` finishes in milliseconds.
+
+**Banned anti-pattern:** capture a tree/text to disk, then run 3+
+`read query --text-filter` calls hunting for a label that is already in the
+file. The first failed `read query` on captured content means the next step
+is `grep FILE`, not another `read query` with a different selector.
+
+### Don't sleep — wait for the page
+
+`sleep N` is dead time. The page may settle in 200ms or take 8 seconds —
+either way, a fixed sleep is wrong. Use one of:
+
+- `wait ready --visual-stable` — page network + DOM stable (default verify)
+- `wait selector <css>` — wait for a specific known element to appear
+- `wait text "<exact text>"` — wait for known text to appear in DOM
+- `wait url --contains <fragment>` — wait for navigation
+
+Chained `sleep 1` between commands is the worst pattern: it adds seconds of
+waste per task and still misses pages that need longer than 1s. The only
+acceptable `sleep` is bracketing a non-deterministic visual animation (rare).
+
+### Vision is for visual state, never for content
+
+Screenshots are for visual-only decisions: did the modal open, is the
+spinner gone, does the chart render, is layout broken. Reading **text**
+(prices, dates, labels, addresses, names, anything copy-pasteable) from
+screenshots is banned — vision tokens are 5-20× more expensive per byte
+and misread small text. Cycling `screenshot → Read → screenshot → Read` to
+read content where `read text --out` would work is the worst-cost path
+available, and the model often misreads digits anyway.
+
+**Rule:**
+- Task asks to extract or check named information → `read tree`/`read text`/
+  `read items` to a file, then `grep`.
+- Task asks to confirm a visual state (modal opened, image rendered,
+  layout correct) → one `screenshot capture`. Stop after one.
 
 ### Pick the reader for the task
 
