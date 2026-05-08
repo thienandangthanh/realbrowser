@@ -126,11 +126,16 @@ Read-only commands can still inspect the target after it is explicitly selected.
    state before reading console, network, forms, or content.
 5. Verify small state first: `read observe -t <label>` or
    `read size -t <label>`.
-6. Use the smallest reader that gives you what you need:
-   `read tree -i -c` (ARIA tree, interactive + compact) for interaction planning,
-   `read tree --diff` after an action to see only what changed,
-   `read query` for targeted CSS lookups, `read items`/`read item` for feeds,
-   `read snapshot` for DOM structure. Avoid full HTML unless the user asks.
+6. Read with `read tree -i -c` (ARIA tree, interactive + compact) as the
+   **primary interaction reader**. It is 5-20x more compact than DOM snapshots
+   and returns refs (`b1`, `l1`, `e1`) for clicks/fills/submits. Graduated
+   reader hierarchy:
+   - `read tree -i -c` — interaction planning (buttons, links, inputs, tabs)
+   - `read tree --diff` — verify after action (only shows changes, saves tokens)
+   - `read tree -i -c --selector main` — scoped to a landmark
+   - `read query` — targeted CSS lookups with `--text-filter`
+   - `read items`/`read item` — feeds, lists, repeated content
+   - `read snapshot` — DOM structure, last resort for full HTML
    Use `--out` for large/debug payloads instead of spending model tokens.
    `read query` expects CSS selectors only — `:has-text()`, `:text()`, and other
    Playwright pseudo-selectors are not valid CSS and will fail. Use
@@ -138,15 +143,19 @@ Read-only commands can still inspect the target after it is explicitly selected.
    Use `wait ready --visual-stable` instead of `sleep N && screenshot capture`
    for page readiness checks.
 7. For forms/uploads/submits, run `action state -t <label> --root active`, adding
-   `--screenshot --annotate-refs` when visual state can prevent a wrong click.
-   Checkpoint screenshots are bounded to the visible viewport/root; use
-   `screenshot area` or `screenshot full` only when you explicitly need a tall
-   artifact. If you request an annotated screenshot for action safety, inspect
-   that image before the next mutating action. Act on refs inside that root, and
-   submit once with `action submit --text <exact label>` or
-   `action submit <button-ref>`.
-8. Verify passively with `read tree --diff`, `wait ready --visual-stable`,
-   a scoped read, console/network check, screenshot, or URL/state change.
+   `--screenshot --annotate-refs` only when visual state can prevent a wrong
+   click (modal boundaries, covered buttons, file previews, canvas/media). Do
+   not screenshot on every action — `read tree --diff` is the default verify
+   step and costs far fewer tokens. Checkpoint screenshots are bounded to the
+   visible viewport/root; use `screenshot area` or `screenshot full` only when
+   you explicitly need a tall artifact. If you request an annotated screenshot
+   for action safety, inspect that image before the next mutating action. Act on
+   refs inside that root, and submit once with
+   `action submit --text <exact label>` or `action submit <button-ref>`.
+8. After each action, verify with `read tree -i -c --diff` (preferred, 2-token
+   delta), `wait ready --visual-stable`, a scoped read, or URL/state change.
+   Reserve screenshot verification for visual-only state (image previews, layout
+   shifts, canvas rendering). Do not screenshot after every click.
 
 For inspection-only work, preserve user state when practical: note the starting
 filter/sort/URL, avoid unnecessary focus changes, and restore temporary filter
@@ -234,6 +243,19 @@ Capture network requests and a response body:
 "$REALBROWSER" network list -t app --filter "/api/" --json
 "$REALBROWSER" network body -t app req_12 --response --out tmp/req_12-response.json --full
 ```
+
+Scroll and navigate large pages:
+
+```bash
+"$REALBROWSER" action scroll -t app down 500
+"$REALBROWSER" action scroll -t app up 300
+"$REALBROWSER" action scroll -t app --selector '[data-scroll-root]' down 800
+"$REALBROWSER" action scroll -t app e1 down 400
+```
+
+`action scroll` scrolls the window or a specific element by pixel amount.
+Directions: `up`, `down`, `left`, `right`. Default: `down 500`. Use
+`--selector` or a ref to scroll a specific container instead of the window.
 
 Upload and submit:
 

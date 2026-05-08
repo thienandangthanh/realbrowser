@@ -69,7 +69,7 @@ const GROUPS = {
   handle: ["create", "list", "release"],
   read: ["observe", "size", "tree", "snapshot", "query", "query-selector", "items", "item", "text", "html", "links", "forms", "url", "is"],
   wait: ["ready", "selector", "text", "url", "load", "network"],
-  action: ["state", "root", "click", "fill", "type", "press", "key", "upload", "submit", "hover", "select"],
+  action: ["state", "root", "click", "fill", "type", "press", "key", "upload", "submit", "hover", "select", "scroll"],
   screenshot: ["capture", "full", "area", "device", "responsive"],
   console: ["list", "get", "clear", "capture"],
   network: ["list", "get", "body", "export", "clear", "capture"],
@@ -1779,7 +1779,7 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
       const tab = await waitForOpenedTab(this, url, beforeIds, flags.timeout || 30_000, { requireFresh: true });
       await restoreForegroundAppAfterBackgroundLaunch(launch?.focusRestore, { delayMs: 50 }).catch(() => {});
       await this.setTargetMeta(tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open" });
-      if (flags.label) await this.setLabel(flags.label, tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open", force: Boolean(flags.force), takeLease: Boolean(flags.takeLease), url: tab.url });
+      if (flags.label) await this.setLabel(flags.label, tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease), url: tab.url });
       else await this.claimTarget(tab, flags, "profile-open");
       if (flags.front) await this.cdp.send("Target.activateTarget", { targetId: tab.targetId }).catch(() => {});
       await this.attach(tab.targetId);
@@ -1804,7 +1804,7 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
       if (!targetId) throw new Error("Target.createTarget returned no targetId");
       const profileOwnedCreate = this.context.kind === "profile" && this.context.endpointScope === "profile";
       if (profileOwnedCreate) await this.setTargetMeta(targetId, { profileOwned: true, profile: this.context.profile.id, source: "target-create" });
-      if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create", force: Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
+      if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
       else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "target-create");
       if (flags.front) await this.cdp.send("Target.activateTarget", { targetId }).catch(() => {});
       await this.attach(targetId);
@@ -2216,6 +2216,23 @@ BrowserDaemon.prototype.action = async function action(command, args, flags) {
     if (!key) throw usage(`action ${command} requires <key>`);
     await dispatchKey(this, tab.targetId, key);
     return result({ text: `pressed ${key}`, target: tab, preflight, key });
+  }
+  if (command === "scroll") {
+    const direction = (args[0] || "down").toLowerCase();
+    const amount = Number(args[1] || 500);
+    const scrollMap = { up: [0, -amount], down: [0, amount], left: [-amount, 0], right: [amount, 0] };
+    const [deltaX, deltaY] = scrollMap[direction] || scrollMap.down;
+    if (flags.selector || args[0] && /^[riefblc]\d+$/i.test(args[0])) {
+      const sel = flags.selector || this.selectorFor(tab.targetId, args[0]);
+      await this.callFunction(tab.targetId, (s, dx, dy) => {
+        const el = document.querySelector(s);
+        if (el) el.scrollBy(dx, dy);
+        else window.scrollBy(dx, dy);
+      }, [sel, deltaX, deltaY]);
+    } else {
+      await this.callFunction(tab.targetId, (dx, dy) => window.scrollBy(dx, dy), [deltaX, deltaY]);
+    }
+    return result({ text: `scrolled ${direction} ${amount}px`, target: tab, preflight, direction, amount, deltaX, deltaY });
   }
   if (command === "upload") {
     const { selector, triggerSelector, files } = uploadArgs(args, flags, tab.targetId, this);
@@ -6582,6 +6599,14 @@ All actions require -t/--target or --handle.
   Plain click blocks actual file inputs/labels and protocol-detected file chooser
   openings. Use upload --trigger-ref for visible picker buttons, or pass
   --allow-file-dialog when a native picker is intentional.
+
+  action scroll -t app down 500
+  action scroll -t app up 300
+  action scroll -t app --selector '[data-scroll-root]' down 800
+  action scroll -t app e1 down 400
+
+  Scroll scrolls the window or a specific element. Directions: up/down/left/right.
+  Default: down 500. Use --selector or a ref to scroll a container.
 
   action state --screenshot captures the visible active root/viewport. Use
   screenshot area/full only when a tall artifact is explicitly needed.

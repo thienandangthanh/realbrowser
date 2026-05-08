@@ -166,10 +166,18 @@ If the page offers a stable sort URL/filter that changes "most relevant" into a
 chronological/current order, apply that early and verify the heading once before
 spending tokens on deeper DOM exploration.
 
-## ARIA Tree (Compact Interaction Planning)
+## ARIA Tree (Primary Interaction Reader)
 
 `read tree` fetches Chrome's accessibility tree via CDP. It is 5-20x more compact
-than DOM-based snapshots and is the primary tool for interaction planning.
+than DOM-based snapshots and is the **primary reader for all interaction
+planning**. Use it before `read query`, `read snapshot`, or screenshots.
+
+Graduated reader hierarchy:
+1. `read tree -i -c` — buttons, links, inputs, tabs with refs (primary)
+2. `read tree --diff` — verify after action, shows only changes (2-token delta)
+3. `read query` — targeted CSS lookups with `--text-filter`
+4. `read items`/`read item` — feeds, lists, repeated content
+5. `read snapshot` — DOM structure, last resort
 
 ```bash
 realbrowser read tree -t app -i -c
@@ -188,8 +196,12 @@ realbrowser read tree -t app -i -c -D
 ```
 
 The diff output shows only added/removed lines, saving tokens on verify steps.
+Use `read tree --diff` as the default verify-after-action step instead of
+screenshots. Reserve screenshots for visual-only state (image previews, layout
+shifts, canvas rendering).
+
 Refs from `read tree` (`b1`, `l1`, `e1`) work with all action commands (`action
-click`, `action fill`, `action type`, `action submit`).
+click`, `action fill`, `action type`, `action submit`, `action scroll`).
 
 For large pages, combine flags: `read tree -i -c -d 3 --selector main` gives
 the interactive elements in the main landmark, limited to depth 3. This is
@@ -204,6 +216,20 @@ realbrowser read is checked e5 -t app
 ```
 
 Each returns bare `true` or `false` (2 tokens).
+
+## Scrolling
+
+```bash
+realbrowser action scroll -t app down 500
+realbrowser action scroll -t app up 300
+realbrowser action scroll -t app --selector '[data-scroll-root]' down 800
+realbrowser action scroll -t app e1 down 400
+```
+
+Scroll the window or a specific element. Directions: `up`, `down`, `left`,
+`right`. Default: `down 500`. Use `--selector` or a ref to scroll a container
+instead of the page window. Verify scroll position with `read tree --diff` after
+scrolling.
 
 ## Form, Upload, Submit
 

@@ -7,6 +7,10 @@ plugin support.
 
 Added:
 
+- `action scroll` command: scroll the window or a specific element/ref by pixel
+  amount. Directions: up/down/left/right. Supports `--selector` and ref-based
+  container scrolling.
+
 - `read tree` command: compact ARIA accessibility tree via CDP
   `Accessibility.getFullAXTree`. 5-20x more compact than DOM-based snapshots.
   Composable flags: `--interactive`/`-i`, `--compact`/`-c`, `--depth N`/`-d N`,
@@ -69,6 +73,14 @@ Fixed:
   capture full viewport instead of clipping to the active root element.
 - `action state --screenshot <path>` accepts positional arg as output path.
 - `tab ensure`/`tab new` focus restore wrapped in `try/finally`.
+- `tab ensure` now force-reassigns labels when the old label points to a stale
+  target, preventing "label already exists" errors on retries.
+
+Changed:
+
+- SKILL.md operating loop updated: `read tree -i -c` as primary interaction
+  reader with graduated reader hierarchy, `read tree --diff` as default
+  verify-after-action step, explicit guidance to reduce screenshot frequency.
 
 Compatibility:
 
