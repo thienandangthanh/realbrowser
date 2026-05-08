@@ -17,6 +17,11 @@ structural selectors, viewport/topmost checks, network entries, downloads, and
 artifacts. Site-specific CSS or text is only a last-mile selector chosen after a
 scoped read proves it is correct for the current page.
 
+**Read the full SKILL.md once before the first browser action.** Read it end
+to end (no `head`/`tail`/`sed -n '1,N p'` slices) the first time this skill
+loads in a session. The Efficiency Rules and Operating Loop near the end
+contain non-negotiable rules whose absence drives cost and failure loops.
+
 ## Fast Start
 
 The `realbrowser` CLI is bundled at `scripts/realbrowser` (Node entry:
@@ -109,6 +114,18 @@ Read-only commands can still inspect after explicit selection.
    overlay). Two identical "covered-by" errors = stop and change strategy.
 9. **After navigation:** `tab navigate` or any click that swaps the route
    invalidates all refs. Re-read tree before the next action.
+10. **End-of-turn tab cleanup.** Close tabs *you created* that aren't part
+    of the deliverable. Keep tabs only when they fall into one of two
+    statuses:
+    - **deliverable** — the tab IS the user-facing output: a created/edited
+      doc, a checkout cart, a submitted form result, a dashboard the user
+      asked to inspect, or a page the user explicitly asked to keep open.
+    - **handoff** — the task is in progress and the user (or a later turn)
+      must continue from this tab: waiting for login, approval, payment,
+      CAPTCHA, an unfinished workflow.
+    Otherwise close it: `tab close -t <label>`. Never close a tab the
+    user already had open before the task — those belong to them, even if
+    you used them as inputs (claimed via `tab select`).
 
 For inspection-only work, preserve user state when practical: avoid focus
 changes, restore temporary filter/sort/tab changes before finishing.
@@ -380,6 +397,24 @@ tooltip/popover — tooltip children are frequently "not topmost".
 not chain `sleep N` before or after it (dead time), and do not chain
 `tab focus --front` to "make the page work" (undoes the background goal —
 the page works fine in the background).
+
+### One authoritative signal = answer; stop verifying
+
+When the page exposes one authoritative signal for the fact you need —
+selected option, `[checked]` state, success modal/toast, line item visible
+in the cart, current URL parameter, the value attribute on an input — treat
+that as the answer unless another signal directly contradicts it. Don't
+re-verify through header badges, alternate surfaces, or repeated full-page
+snapshots once the authoritative signal is present.
+
+Examples of authoritative signals:
+- After `action fill e1 "SGN"`: the tree's `value="SGN"` on `e1` is proof.
+- After clicking a date: the form's date input shows the date you picked.
+- After clicking "Add to cart": the cart count badge or the success toast.
+- After navigation: the URL or page title changed as expected.
+
+If you have one of these, stop. Do not also screenshot, scroll to a header,
+re-read the full tree, or query a related field "to make sure".
 
 ### Failure budget
 
