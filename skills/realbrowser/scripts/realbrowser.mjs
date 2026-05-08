@@ -2071,7 +2071,6 @@ BrowserDaemon.prototype.wait = async function wait(command, args, flags) {
       payload.screenshot = await captureCheckpointScreenshot(this, tab.targetId, flags, screenshotPath(this.artifactDir, "ready", tab, flags), {
         selector: flags.selector || flags.readySelector || "",
         root: flags.root,
-        clipToViewport: true,
         checkpoint: true,
       });
     }
@@ -2121,9 +2120,8 @@ BrowserDaemon.prototype.action = async function action(command, args, flags) {
       const selector = activeRootScreenshotSelector(payload);
       const ssFlags = args[0] ? { ...flags, out: args[0] } : flags;
       payload.screenshot = await captureCheckpointScreenshot(this, tab.targetId, flags, screenshotPath(this.artifactDir, "action-state", tab, ssFlags), {
-        selector,
+        selector: "",
         root: flags.root || "active",
-        clipToViewport: true,
         checkpoint: true,
       });
     }
