@@ -1269,6 +1269,20 @@ class BrowserDaemon {
       next: ["run realbrowser daemon monitor --json and retry with the target context"],
     });
   }
+  async findActiveTab(tabs) {
+    for (const tab of tabs) {
+      const sessionId = this.sessions.get(tab.targetId);
+      if (!sessionId) continue;
+      try {
+        const res = await this.cdp.send("Runtime.evaluate", {
+          expression: "document.visibilityState",
+          returnByValue: true,
+        }, sessionId, 2000);
+        if (res.result?.value === "visible") return tab.targetId;
+      } catch {}
+    }
+    return tabs[0]?.targetId || null;
+  }
   async tabsRaw() {
     const { targetInfos } = await this.cdp.send("Target.getTargets", {}, undefined, DEFAULT_TIMEOUT);
     return targetInfos
@@ -1761,6 +1775,7 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
         next: [`realbrowser tab label <target> ${flags.label} --force`],
       });
     }
+    const previousActiveTab = !flags.front ? await this.findActiveTab(tabs).catch(() => null) : null;
     if (this.context.kind === "profile" && this.context.profile && this.context.endpointScope !== "profile") {
       if (!flags.front && !flags.bestEffortBackground) {
         throw new CliError(`cannot safely create a background tab in profile ${this.context.profile.id}`, {
@@ -1782,6 +1797,7 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
       if (flags.label) await this.setLabel(flags.label, tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease), url: tab.url });
       else await this.claimTarget(tab, flags, "profile-open");
       if (flags.front) await this.cdp.send("Target.activateTarget", { targetId: tab.targetId }).catch(() => {});
+      else if (previousActiveTab) await this.cdp.send("Target.activateTarget", { targetId: previousActiveTab }).catch(() => {});
       await this.attach(tab.targetId);
       await waitForReadyState(this, tab.targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
       const updated = await this.resolveTarget(flags.label || tab.targetId, { operation: `tab ${command}` });
@@ -1807,6 +1823,7 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
       if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
       else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "target-create");
       if (flags.front) await this.cdp.send("Target.activateTarget", { targetId }).catch(() => {});
+      else if (previousActiveTab) await this.cdp.send("Target.activateTarget", { targetId: previousActiveTab }).catch(() => {});
       await this.attach(targetId);
       await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
       await waitForReadyState(this, targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});

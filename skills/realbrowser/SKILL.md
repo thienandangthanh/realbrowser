@@ -156,6 +156,20 @@ Read-only commands can still inspect the target after it is explicitly selected.
    delta), `wait ready --visual-stable`, a scoped read, or URL/state change.
    Reserve screenshot verification for visual-only state (image previews, layout
    shifts, canvas rendering). Do not screenshot after every click.
+9. **Ephemeral UI (dropdowns, tooltips, autocomplete, modals):** When a click
+   opens ephemeral UI, immediately `read tree -i -c` again to get fresh refs for
+   the newly visible elements. Old refs from before the click are stale and will
+   fail with "selector not found" or "not visible/topmost". Never retry a failed
+   click/fill with the same stale ref — always re-read first.
+10. **"No visible enabled topmost click candidate" errors:** The element exists
+    but failed safety checks (hidden, covered by an overlay, outside viewport,
+    or not pointer-enabled). Fix: scroll with `action scroll`, close overlays
+    with `action press Escape`, or re-read tree to find the correct ref. Do not
+    blindly retry the same ref.
+11. **Stale refs after navigation or DOM changes:** Refs are invalidated when the
+    page navigates or the DOM changes significantly. After `tab navigate`,
+    `action click` that triggers navigation, or any state change that modifies
+    the DOM, re-read tree to get fresh refs before the next action.
 
 For inspection-only work, preserve user state when practical: note the starting
 filter/sort/URL, avoid unnecessary focus changes, and restore temporary filter

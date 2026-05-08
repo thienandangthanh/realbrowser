@@ -10,6 +10,9 @@ Added:
 - `action scroll` command: scroll the window or a specific element/ref by pixel
   amount. Directions: up/down/left/right. Supports `--selector` and ref-based
   container scrolling.
+- Tab-level focus restore: `tab ensure`/`tab new` without `--front` now
+  re-activates the previously visible Chrome tab after creating the new one,
+  so the user's current tab stays in view.
 
 - `read tree` command: compact ARIA accessibility tree via CDP
   `Accessibility.getFullAXTree`. 5-20x more compact than DOM-based snapshots.
@@ -80,7 +83,8 @@ Changed:
 
 - SKILL.md operating loop updated: `read tree -i -c` as primary interaction
   reader with graduated reader hierarchy, `read tree --diff` as default
-  verify-after-action step, explicit guidance to reduce screenshot frequency.
+  verify-after-action step, explicit guidance to reduce screenshot frequency,
+  ephemeral UI handling, stale ref recovery, and error recovery patterns.
 
 Compatibility:
 
