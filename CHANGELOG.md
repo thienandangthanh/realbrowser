@@ -60,6 +60,15 @@ Fixed:
   preserving aspect ratio.
 - Deduplicated env var parsing for `DEFAULT_SCREENSHOT_MAX_SIDE` and
   `DEFAULT_SCREENSHOT_MAX_BYTES`.
+- Removed `fromSurface: true` from all CDP screenshot calls (Chrome 146+
+  rejects it in managed/headful browsers).
+- Full-page screenshots now use viewport expansion via
+  `Emulation.setDeviceMetricsOverride` instead of clip rects, with two-phase
+  viewport restore matching OpenClaw's approach.
+- Checkpoint screenshots (`action state --screenshot`, `wait ready --screenshot`)
+  capture full viewport instead of clipping to the active root element.
+- `action state --screenshot <path>` accepts positional arg as output path.
+- `tab ensure`/`tab new` focus restore wrapped in `try/finally`.
 
 Compatibility:
 

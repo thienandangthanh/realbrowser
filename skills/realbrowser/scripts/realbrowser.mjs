@@ -4724,19 +4724,46 @@ async function captureScreenshotToFile(daemon, targetId, filePath, opts = {}) {
     clipInfo = box;
     captureBeyondViewport = !opts.clipToViewport;
   }
+  let viewportExpanded = false;
+  let savedViewport;
   if (opts.fullPage && !clip) {
     const metrics = await daemon.sendToTarget(targetId, "Page.getLayoutMetrics", {});
     const size = metrics.cssContentSize || metrics.contentSize;
-    if (size?.width && size?.height) clip = { x: 0, y: 0, width: Math.ceil(size.width), height: Math.ceil(size.height), scale: 1 };
-    captureBeyondViewport = Boolean(clip);
+    if (size?.width && size?.height) {
+      const vp = await daemon.callFunction(targetId, () => ({ w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio, sw: screen.width, sh: screen.height }), []).catch(() => null);
+      savedViewport = vp;
+      const expandW = Math.ceil(Math.max(vp?.w || size.width, size.width));
+      const expandH = Math.ceil(Math.max(vp?.h || size.height, size.height));
+      await daemon.sendToTarget(targetId, "Emulation.setDeviceMetricsOverride", {
+        width: expandW, height: expandH,
+        deviceScaleFactor: vp?.dpr || 1, mobile: false,
+        screenWidth: vp?.sw || expandW, screenHeight: vp?.sh || expandH,
+      }).catch(() => {});
+      viewportExpanded = true;
+      captureBeyondViewport = true;
+    }
   }
-  const captureParams = { format, fromSurface: true };
+  const captureParams = { format };
   if (quality !== undefined) captureParams.quality = quality;
   if (clip) {
     captureParams.clip = clip;
     if (captureBeyondViewport) captureParams.captureBeyondViewport = true;
   }
+  if (viewportExpanded) captureParams.captureBeyondViewport = true;
   const shot = await daemon.sendToTarget(targetId, "Page.captureScreenshot", captureParams, 60_000);
+  if (viewportExpanded) {
+    await daemon.sendToTarget(targetId, "Emulation.clearDeviceMetricsOverride").catch(() => {});
+    if (savedViewport) {
+      const restored = await daemon.callFunction(targetId, () => ({ w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio }), []).catch(() => null);
+      if (restored && (restored.w !== savedViewport.w || restored.h !== savedViewport.h || restored.dpr !== savedViewport.dpr)) {
+        await daemon.sendToTarget(targetId, "Emulation.setDeviceMetricsOverride", {
+          width: savedViewport.w, height: savedViewport.h,
+          deviceScaleFactor: savedViewport.dpr || 1, mobile: false,
+          screenWidth: savedViewport.sw || savedViewport.w, screenHeight: savedViewport.sh || savedViewport.h,
+        }).catch(() => {});
+      }
+    }
+  }
   let buffer = Buffer.from(shot.data || "", "base64");
   const originalBytes = buffer.byteLength;
   const originalDimensions = imageDimensionsFromBuffer(buffer);
@@ -4904,7 +4931,7 @@ async function captureStitchedScrollContainerToFile(daemon, targetId, out, forma
 }
 
 async function captureViewportPngSegment(daemon, targetId) {
-  const shot = await daemon.sendToTarget(targetId, "Page.captureScreenshot", { format: "png", fromSurface: true }, 60_000);
+  const shot = await daemon.sendToTarget(targetId, "Page.captureScreenshot", { format: "png" }, 60_000);
   const buffer = Buffer.from(shot.data || "", "base64");
   if (!buffer.byteLength) throw new Error("CDP screenshot did not return image data");
   const dimensions = imageDimensionsFromBuffer(buffer) || {};
