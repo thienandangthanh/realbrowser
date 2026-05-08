@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 
-const VERSION = "0.3.6";
+const VERSION = "0.3.7";
 const STATE_SCHEMA_VERSION = "owner-lease-1";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
@@ -1425,6 +1425,43 @@ class BrowserDaemon {
     const labelsForContext = this.labelsForContext();
     return Object.entries(labelsForContext).find(([, id]) => id === tab.targetId)?.[0] || "";
   }
+  // Browser-scoped CDP serves multiple Chrome profiles through one endpoint.
+  // Without browserContextId, Target.createTarget opens the new tab in whichever
+  // profile is currently focused — which may not be the one the user requested
+  // via --profile. Find a live tab we PROVED belongs to this profile (only
+  // source=profile-open or cdp-create-with-context entries are trustworthy;
+  // earlier source=browser-scope-cdp-create may have been mis-attributed to the
+  // wrong profile) and reuse its browserContextId. Returns null when no proven
+  // tab exists yet — caller falls back to launchProfileTab to bootstrap one.
+  async resolveBrowserContextIdForProfile(profileId) {
+    if (!profileId) return null;
+    const TRUSTED_SOURCES = new Set(["profile-open", "cdp-create-with-context"]);
+    const raw = await this.tabsRaw().catch(() => []);
+    const liveById = new Map(raw.map((tab) => [tab.targetId, tab]));
+    // Same-owner targetMeta first (current owner's view of this profile).
+    const sameOwnerStore = this.targetMeta?.[this.contextScopeKey()] || {};
+    for (const [targetId, meta] of Object.entries(sameOwnerStore)) {
+      if (!meta || meta.profile !== profileId || meta.profileOwned !== true) continue;
+      if (!TRUSTED_SOURCES.has(meta.source || "")) continue;
+      const live = liveById.get(targetId);
+      if (live?.browserContextId) return live.browserContextId;
+    }
+    // Cross-owner fallback: another iTerm pane / session may have proven a tab
+    // for the same base context (e.g. profile:chrome:Default).
+    const baseKey = this.context.key;
+    for (const [storedKey, store] of Object.entries(this.targetMeta || {})) {
+      if (!store || typeof store !== "object") continue;
+      if (baseContextKeyFromScopedKey(storedKey) !== baseKey) continue;
+      if (storedKey === this.contextScopeKey()) continue;
+      for (const [targetId, meta] of Object.entries(store)) {
+        if (!meta || meta.profile !== profileId || meta.profileOwned !== true) continue;
+        if (!TRUSTED_SOURCES.has(meta.source || "")) continue;
+        const live = liveById.get(targetId);
+        if (live?.browserContextId) return live.browserContextId;
+      }
+    }
+    return null;
+  }
   profileTargetProven(tab) {
     if (!this.isBrowserScopedProfileContext()) return true;
     const targetMeta = this.targetMetaForTarget(tab.targetId);
@@ -1914,42 +1951,54 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
         });
       }
       // Try CDP Target.createTarget first — no focus steal, true background.
-      // Fall back to launchProfileTab only if CDP creation fails.
+      // Fall back to launchProfileTab only if CDP creation fails or the
+      // browserContextId for this profile is not yet known.
       if (!flags.front) {
-        // Capture OS focus too: even though CDP avoids in-Chrome focus theft,
-        // some platforms still raise the Chrome process when a new tab opens.
-        const cdpFocusRestore = await captureForegroundAppForBackgroundLaunch({ front: false }).catch(() => null);
-        try {
-          const created = await this.cdp.send("Target.createTarget", {
-            url,
-            background: true,
-            focus: false,
-          }, undefined, flags.timeout || 30_000);
-          const targetId = created.targetId;
-          if (targetId) {
-            const restoreTarget = await this.findTabToRestore(visibleByWindow, targetId).catch(() => null);
-            if (restoreTarget) await this.cdp.send("Target.activateTarget", { targetId: restoreTarget }).catch(() => {});
+        // Browser-scoped CDP needs an explicit browserContextId; otherwise the
+        // tab opens in whichever profile is currently active in Chrome,
+        // regardless of --profile. Resolve it from a previously-proven tab in
+        // the same profile. If we can't resolve one yet, skip CDP create and
+        // let launchProfileTab below open the first tab via --profile-directory
+        // — that bootstraps a proven target whose browserContextId becomes
+        // available for future calls.
+        const browserContextId = await this.resolveBrowserContextIdForProfile(this.context.profile.id).catch(() => null);
+        if (browserContextId) {
+          // Capture OS focus too: even though CDP avoids in-Chrome focus theft,
+          // some platforms still raise the Chrome process when a new tab opens.
+          const cdpFocusRestore = await captureForegroundAppForBackgroundLaunch({ front: false }).catch(() => null);
+          try {
+            const created = await this.cdp.send("Target.createTarget", {
+              url,
+              background: true,
+              focus: false,
+              browserContextId,
+            }, undefined, flags.timeout || 30_000);
+            const targetId = created.targetId;
+            if (targetId) {
+              const restoreTarget = await this.findTabToRestore(visibleByWindow, targetId).catch(() => null);
+              if (restoreTarget) await this.cdp.send("Target.activateTarget", { targetId: restoreTarget }).catch(() => {});
+              await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
+              await this.setTargetMeta(targetId, { profileOwned: true, profile: this.context.profile.id, source: "cdp-create-with-context", requestedUrl: url });
+              if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: true, profile: this.context.profile.id, source: "cdp-create-with-context", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
+              else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "cdp-create-with-context");
+              await this.attach(targetId);
+              await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
+              await waitForReadyState(this, targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
+              await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
+              const tab = await this.resolveTarget(flags.label || targetId, { operation: `tab ${command}` });
+              return result({
+                text: `created ${tab.suggestedTarget} ${url}`,
+                target: tab,
+                created: true,
+                launch: "cdp-background",
+                context: this.publicContext(),
+              });
+            }
+          } catch (_cdpErr) {
+            // CDP create failed — fall through to launchProfileTab
+          } finally {
             await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
-            await this.setTargetMeta(targetId, { profileOwned: true, profile: this.context.profile.id, source: "browser-scope-cdp-create", requestedUrl: url });
-            if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: true, profile: this.context.profile.id, source: "browser-scope-cdp-create", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
-            else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "browser-scope-cdp-create");
-            await this.attach(targetId);
-            await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
-            await waitForReadyState(this, targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
-            await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
-            const tab = await this.resolveTarget(flags.label || targetId, { operation: `tab ${command}` });
-            return result({
-              text: `created ${tab.suggestedTarget} ${url}`,
-              target: tab,
-              created: true,
-              launch: "cdp-background",
-              context: this.publicContext(),
-            });
           }
-        } catch (_cdpErr) {
-          // CDP create failed — fall through to launchProfileTab
-        } finally {
-          await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
         }
       }
       const beforeIds = new Set(tabs.map((tab) => tab.targetId));
@@ -7679,6 +7728,51 @@ async function runSelfTest() {
   assert(cfMatchesSame.length === 0, "contextFlagsForKnownTarget no same-owner matches when owner is fresh");
   const cfOtherUnique = [...new Set(cfMatchesOther.map(baseContextKeyFromScopedKey))];
   assert(cfOtherUnique.length === 1 && cfOtherUnique[0] === "profile:chrome:Default", "contextFlagsForKnownTarget cross-owner unique base context");
+  // 0.3.7: resolveBrowserContextIdForProfile picks the right browserContextId
+  // when Chrome runs browser-scoped CDP across multiple profiles. Without this,
+  // Target.createTarget opens new tabs in whichever profile is active, not the
+  // one requested via --profile.
+  const bcDaemon = Object.create(BrowserDaemon.prototype);
+  bcDaemon.context = { kind: "profile", key: "profile:chrome:Default", profile: { id: "chrome:Default" }, endpointScope: "browser" };
+  const bcOwnedKey = `profile:chrome:Default${OWNER_SCOPE_SEPARATOR}owner-me`;
+  const bcCrossKey = `profile:chrome:Default${OWNER_SCOPE_SEPARATOR}owner-other`;
+  bcDaemon.contextScopeKey = () => bcOwnedKey;
+  bcDaemon.targetMeta = {
+    [bcOwnedKey]: {
+      "tid-proven": { profile: "chrome:Default", profileOwned: true, source: "profile-open" },
+      "tid-untrusted": { profile: "chrome:Default", profileOwned: true, source: "browser-scope-cdp-create" },
+      "tid-other-profile": { profile: "chrome:Profile 1", profileOwned: true, source: "profile-open" },
+    },
+    [bcCrossKey]: {
+      "tid-cross-proven": { profile: "chrome:Default", profileOwned: true, source: "profile-open" },
+    },
+  };
+  bcDaemon.tabsRaw = async () => [
+    { targetId: "tid-untrusted", browserContextId: "ctx-WRONG" },
+    { targetId: "tid-other-profile", browserContextId: "ctx-OTHER" },
+    { targetId: "tid-proven", browserContextId: "ctx-DEFAULT" },
+    { targetId: "tid-cross-proven", browserContextId: "ctx-DEFAULT" },
+  ];
+  const bcResolved = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
+  assert(bcResolved === "ctx-DEFAULT", "resolveBrowserContextIdForProfile picks proven same-owner context, not untrusted source");
+  // Cross-owner fallback: same-owner has no proven entry, cross-owner does.
+  bcDaemon.targetMeta[bcOwnedKey] = {
+    "tid-untrusted": { profile: "chrome:Default", profileOwned: true, source: "browser-scope-cdp-create" },
+  };
+  const bcCross = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
+  assert(bcCross === "ctx-DEFAULT", "resolveBrowserContextIdForProfile falls back to cross-owner proven entry");
+  // Untrusted-only: returns null so caller falls through to launchProfileTab.
+  bcDaemon.targetMeta = {
+    [bcOwnedKey]: { "tid-untrusted": { profile: "chrome:Default", profileOwned: true, source: "browser-scope-cdp-create" } },
+  };
+  const bcNone = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
+  assert(bcNone === null, "resolveBrowserContextIdForProfile returns null when only untrusted entries exist");
+  // cdp-create-with-context source is also trusted (we passed browserContextId).
+  bcDaemon.targetMeta = {
+    [bcOwnedKey]: { "tid-proven": { profile: "chrome:Default", profileOwned: true, source: "cdp-create-with-context" } },
+  };
+  const bcVerified = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
+  assert(bcVerified === "ctx-DEFAULT", "resolveBrowserContextIdForProfile trusts cdp-create-with-context source");
   stdout("realbrowser self-test passed\n");
 }
 

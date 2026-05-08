@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.3.7 - 2026-05-08
+
+Profile-correct `Target.createTarget` for browser-scoped CDP. Forensics on the
+post-0.3.6 run showed `tab ensure --profile chrome:Default --background` was
+opening the new tab in `Tom - tuyenhx.tanker.app1` (the currently-active
+profile) instead of `chrome:Default` (Person 1, hxtxmu@gmail.com). The CDP
+endpoint at `<userDataDir>/DevToolsActivePort` is browser-scoped — it serves
+every profile loaded in that Chrome process — and `Target.createTarget`
+without an explicit `browserContextId` opens the tab in whichever profile is
+currently focused, regardless of which profile we connected on behalf of.
+
+Changed:
+
+- `tab ensure` / `tab new` browser-scope-cdp-create path now resolves the
+  correct `browserContextId` for the requested profile and passes it to
+  `Target.createTarget`. Resolution scans tabs returned by `Target.getTargets`
+  (which includes `browserContextId`) and matches against `targetMeta` entries
+  whose `profileOwned: true` AND `profile: <requested>` AND `source` is one of
+  the trusted sources (`profile-open` or `cdp-create-with-context`). Same-owner
+  metadata is preferred; cross-owner same-base-context is the fallback so an
+  earlier iTerm pane / session can bootstrap context resolution for later panes.
+- The trusted source identifier for CDP-created tabs is now
+  `cdp-create-with-context` (was the misleading `browser-scope-cdp-create`,
+  which falsely stamped `profile=chrome:Default` on tabs that had actually
+  opened in some other profile). Future `resolveBrowserContextIdForProfile`
+  calls only trust entries with one of the new source identifiers.
+- When no proven browserContextId is yet known for the requested profile (cold
+  start, or only untrusted source entries exist), the CDP-create path is
+  skipped and execution falls through to the existing `launchProfileTab`
+  branch, which uses Chrome's `--profile-directory=<dir>` at the OS level —
+  guaranteed to open in the right profile. Once one tab exists with the
+  `profile-open` meta, all subsequent calls in this profile use the resolved
+  `browserContextId` and skip the OS launch.
+
+Added:
+
+- `BrowserDaemon#resolveBrowserContextIdForProfile(profileId)` returns the
+  `browserContextId` of a live, proven-profile tab matching `profileId`, or
+  `null` when no trusted entry exists. Self-test covers (a) preferring proven
+  same-owner over untrusted same-owner, (b) cross-owner same-base fallback,
+  (c) returning null when only untrusted entries exist, and (d) trusting the
+  new `cdp-create-with-context` source.
+
+Validation:
+
+- `node --check scripts/realbrowser.mjs`
+- `./scripts/realbrowser --version` → 0.3.7
+- `./scripts/realbrowser self-test` passes (now includes browserContextId
+  resolution tests)
+
 ## 0.3.6 - 2026-05-08
 
 Three targeted fixes from forensics on the v0.3.4 run (8m18s, user-killed,
