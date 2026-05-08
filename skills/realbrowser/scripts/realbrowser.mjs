@@ -2128,31 +2128,41 @@ BrowserDaemon.prototype.ariaTree = async function ariaTree(targetId, flags) {
     limit: Number(flags.limit || flags.maxNodes || 800),
   });
   const previous = this.refStores.get(this.refStoreKey(targetId)) || { generation: 0, refs: {}, snapshot: "", ariaSnapshot: "" };
-  let output = formatted.text;
-  if (flags.diff) {
-    output = lineDiff(previous.ariaSnapshot || "", formatted.text);
-  }
   const refs = {};
   if (formatted.interactiveNodes.length > 0) {
     await this.assignAriaRefs(targetId, sessionId, formatted.interactiveNodes, refs);
   }
+  const cleanedText = stripUnstampedRefs(formatted.text, refs);
+  let output = cleanedText;
+  if (flags.diff) {
+    output = lineDiff(previous.ariaSnapshot || "", cleanedText);
+  }
   this.storeRefs(targetId, refs);
   const store = this.refStores.get(this.refStoreKey(targetId));
-  if (store) store.ariaSnapshot = formatted.text;
+  if (store) store.ariaSnapshot = cleanedText;
+  const unstamped = formatted.interactiveNodes.filter((n) => n._stampFailed).length;
   return {
     tree: output,
     refs,
-    stats: { lines: formatted.lines, chars: output.length, refs: Object.keys(refs).length, nodes: axNodes.length, diff: Boolean(flags.diff), truncated: formatted.truncated },
+    stats: { lines: formatted.lines, chars: output.length, refs: Object.keys(refs).length, unstamped, nodes: axNodes.length, diff: Boolean(flags.diff), truncated: formatted.truncated },
   };
 };
 
 BrowserDaemon.prototype.assignAriaRefs = async function assignAriaRefs(targetId, sessionId, interactiveNodes, refs) {
-  await this.cdp.send("Runtime.evaluate", { expression: 'document.querySelectorAll("[data-realbrowser-ref]").forEach(el => el.removeAttribute("data-realbrowser-ref"))' }, sessionId).catch(() => {});
+  await this.cdp.send("Runtime.evaluate", {
+    expression: `
+      (function clear(root) {
+        if (!root) return;
+        root.querySelectorAll("[data-realbrowser-ref]").forEach(el => el.removeAttribute("data-realbrowser-ref"));
+        root.querySelectorAll("*").forEach(el => { if (el.shadowRoot) clear(el.shadowRoot); });
+      })(document);
+    `,
+  }, sessionId).catch(() => {});
   const backendIds = interactiveNodes.map((n) => n.backendDOMNodeId).filter(Boolean);
   if (backendIds.length === 0) return;
   let nodeIds;
   try {
-    const result = await this.cdp.send("DOM.getDocument", { depth: 0 }, sessionId);
+    await this.cdp.send("DOM.getDocument", { depth: -1, pierce: true }, sessionId);
     const pushed = await this.cdp.send("DOM.pushNodesByBackendIds", { backendNodeIds: backendIds }, sessionId);
     nodeIds = pushed.nodeIds;
   } catch { return; }
@@ -2161,11 +2171,16 @@ BrowserDaemon.prototype.assignAriaRefs = async function assignAriaRefs(targetId,
     const ref = node.ref;
     if (!ref) continue;
     const nodeId = nodeIds?.[backendIds.indexOf(node.backendDOMNodeId)];
-    if (!nodeId || nodeId === 0) continue;
+    if (!nodeId || nodeId === 0) {
+      node._stampFailed = true;
+      continue;
+    }
     try {
       await this.cdp.send("DOM.setAttributeValue", { nodeId, name: "data-realbrowser-ref", value: ref }, sessionId);
-      refs[ref] = { ref, selector: `[data-realbrowser-ref="${ref}"]`, role: node.role, name: node.name || undefined };
-    } catch { /* skip unstampable nodes */ }
+      refs[ref] = { ref, selector: `[data-realbrowser-ref="${ref}"]`, role: node.role, name: node.name || undefined, backendDOMNodeId: node.backendDOMNodeId };
+    } catch {
+      node._stampFailed = true;
+    }
   }
 };
 
@@ -6493,6 +6508,17 @@ function finalizeAriaRefs(lines, interactiveNodes) {
     return line.replace(`REF${match[2]} `, `${ref} `);
   }).join("\n");
   return text;
+}
+
+function stripUnstampedRefs(text, refs) {
+  const stamped = new Set(Object.keys(refs));
+  return text.split("\n").map((line) => {
+    const m = line.match(/^(\s*- )([blec])(\d+) /);
+    if (!m) return line;
+    const refName = `${m[2]}${m[3]}`;
+    if (stamped.has(refName)) return line;
+    return line.replace(/^(\s*- )([blec])\d+ /, "$1");
+  }).join("\n");
 }
 
 function lineDiff(before, after, contextLines = 2) {
