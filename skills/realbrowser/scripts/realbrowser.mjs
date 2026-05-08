@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 
-const VERSION = "0.3.5";
+const VERSION = "0.3.6";
 const STATE_SCHEMA_VERSION = "owner-lease-1";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
@@ -154,6 +154,7 @@ const BOOLEAN_FLAGS = new Set([
   "--screenshot", "--annotate-refs", "--annotate", "--labels", "--mobile-emulation", "--mobile",
   "--no-skeletons", "--latest", "--active", "--stdin", "--final", "--cdp",
   "--system", "--deep", "--allow-file-dialog", "--no-normalize", "--normalize", "--bypass-overlay",
+  "--require-change",
   "--take-lease", "--all", "--global",
 ]);
 
@@ -2159,7 +2160,7 @@ BrowserDaemon.prototype.read = async function read(command, args, flags) {
       return result({ text: `${reasonLine}\n${hint}`, target: tab, ok: false, reason: payload?.reason });
     }
     this.storeRefs(tab.targetId, payload.refs || {}, { merge: true });
-    const layerHeader = `floating layer: ${payload.layer.tag}${payload.layer.role ? `[${payload.layer.role}]` : ""} z=${payload.layer.zIndex}${payload.layer.isListLike ? ` listItems=${payload.layer.listItems}` : ""} ${payload.layer.rect.width}x${payload.layer.rect.height}@${payload.layer.rect.x},${payload.layer.rect.y}`;
+    const layerHeader = `floating layer: ${payload.layer.tag}${payload.layer.role ? `[${payload.layer.role}]` : ""} z=${payload.layer.zIndex}${payload.layer.isListLike ? ` listItems=${payload.layer.listItems}` : ""}${payload.layer.isRoleLayer ? " role-layer" : ""}${typeof payload.layer.distance === "number" ? ` dist=${payload.layer.distance}` : ""} ${payload.layer.rect.width}x${payload.layer.rect.height}@${payload.layer.rect.x},${payload.layer.rect.y}`;
     const headerParts = [layerHeader];
     if (payload.anchor) {
       const f = payload.anchor;
@@ -4200,28 +4201,44 @@ function isFunction(state, selector) {
 function readOverlayFunction(opts = {}) {
   const all = document.querySelectorAll("*");
   const layers = [];
+  // ARIA roles that signal "this element IS an overlay/popup" regardless of CSS
+  // position. Many sites style autocomplete tooltips as position:relative
+  // inside an absolute parent — they look like dropdowns visually but were
+  // filtered out of pure-CSS-position scans. We accept these by role.
+  const ROLE_LAYER_CONTAINERS = new Set([
+    "tooltip", "listbox", "combobox", "menu", "menubar", "dialog", "alertdialog",
+    "tree", "grid", "treegrid",
+  ]);
   for (const el of all) {
     const cs = getComputedStyle(el);
     if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") continue;
-    if (cs.position !== "fixed" && cs.position !== "absolute") continue;
     const r = el.getBoundingClientRect();
     if (r.width < 40 || r.height < 20) continue;
     if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) continue;
+    const role = el.getAttribute("role") || "";
+    const isPositioned = cs.position === "fixed" || cs.position === "absolute";
+    const isRoleLayer = ROLE_LAYER_CONTAINERS.has(role);
+    if (!isPositioned && !isRoleLayer) continue;
     const z = cs.zIndex === "auto" ? 0 : (parseInt(cs.zIndex, 10) || 0);
-    if (cs.zIndex === "auto" && z === 0 && cs.position === "absolute") {
-      let p = el.parentElement;
-      let inheritedZ = 0;
-      while (p && inheritedZ === 0) {
-        const ps = getComputedStyle(p);
-        const pz = ps.zIndex === "auto" ? 0 : (parseInt(ps.zIndex, 10) || 0);
-        if (pz > 0) { inheritedZ = pz; break; }
-        p = p.parentElement;
+    // Role-based layers bypass z-index requirement: a tooltip with role and
+    // visible content is an overlay we want to surface even if the author
+    // didn't bother setting z-index.
+    if (!isRoleLayer) {
+      if (cs.zIndex === "auto" && z === 0 && cs.position === "absolute") {
+        let p = el.parentElement;
+        let inheritedZ = 0;
+        while (p && inheritedZ === 0) {
+          const ps = getComputedStyle(p);
+          const pz = ps.zIndex === "auto" ? 0 : (parseInt(ps.zIndex, 10) || 0);
+          if (pz > 0) { inheritedZ = pz; break; }
+          p = p.parentElement;
+        }
+        if (inheritedZ === 0) continue;
+      } else if (z < 1) {
+        continue;
       }
-      if (inheritedZ === 0) continue;
-    } else if (z < 1) {
-      continue;
     }
-    layers.push({ el, rect: r, zIndex: z });
+    layers.push({ el, rect: r, zIndex: z, role, isRoleLayer });
   }
   if (!layers.length) return { ok: false, reason: "no floating layer found (no fixed/absolute element with z-index >= 1)" };
   const LIST_ITEM_SELECTOR = 'li,[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="row"],[role="listitem"],[role="treeitem"],[role="combobox"] [role="option"]';
@@ -4240,10 +4257,14 @@ function readOverlayFunction(opts = {}) {
     layer.area = layer.rect.width * layer.rect.height;
     layer.bigEnough = layer.rect.width >= 150 && layer.rect.height >= 80;
   }
-  const eligible = layers.filter((l) => l.bigEnough || l.isListLike);
+  // Eligibility: a layer counts if any of:
+  //   - large enough to be a real overlay (>= 150x80)
+  //   - contains 3+ list-like items (real autocomplete/menu/list)
+  //   - has an explicit role that says "I'm an overlay" (tooltip, listbox, ...)
+  const eligible = layers.filter((l) => l.bigEnough || l.isListLike || l.isRoleLayer);
   if (!eligible.length) {
-    const summary = layers.slice(0, 3).map((l) => `${l.el.tagName.toLowerCase()} z=${l.zIndex} ${Math.round(l.rect.width)}x${Math.round(l.rect.height)} listItems=${l.listItems}`).join("; ");
-    return { ok: false, reason: `no eligible layer (all floating layers are tiny popovers without list items): ${summary}` };
+    const summary = layers.slice(0, 3).map((l) => `${l.el.tagName.toLowerCase()}${l.role ? `[${l.role}]` : ""} z=${l.zIndex} ${Math.round(l.rect.width)}x${Math.round(l.rect.height)} listItems=${l.listItems}`).join("; ");
+    return { ok: false, reason: `no eligible layer (all candidates are tiny popovers without list items): ${summary}` };
   }
   let anchor = null;
   let anchorSource = "";
@@ -4263,23 +4284,45 @@ function readOverlayFunction(opts = {}) {
   let chosen;
   if (anchor) {
     const ar = anchor.getBoundingClientRect();
+    const ax = ar.left + ar.width / 2;
+    const ay = ar.bottom;
+    // Tightened proximity: drop the +150 horizontal slack to +50, keep
+    // generous vertical bound (autocompletes can be tall). Compute a
+    // Manhattan distance from the anchor's bottom-center to the layer's
+    // top-center as the primary tie-break: real autocomplete dropdowns hug
+    // the input from below, while corner popups (Login pill, chat widgets)
+    // are far in distance even if they technically overlap horizontally.
     const nearAnchor = eligible.filter(({ rect }) => {
-      const horizontalOverlap = rect.left < ar.right + 150 && rect.right > ar.left - 150;
+      const horizontalOverlap = rect.left < ar.right + 50 && rect.right > ar.left - 50;
       const verticallyBelow = rect.top >= ar.bottom - 50 && rect.top < ar.bottom + 700;
       const verticallyOverlap = rect.top < ar.bottom && rect.bottom > ar.top;
       const verticallyAbove = rect.bottom > ar.top - 700 && rect.bottom <= ar.top + 50;
       return horizontalOverlap && (verticallyBelow || verticallyOverlap || verticallyAbove);
     });
+    for (const layer of nearAnchor) {
+      const lx = layer.rect.left + layer.rect.width / 2;
+      const ly = layer.rect.top;
+      layer.distance = Math.abs(lx - ax) + Math.abs(ly - ay);
+    }
     if (nearAnchor.length) {
-      nearAnchor.sort((a, b) => (b.isListLike - a.isListLike) || (b.zIndex - a.zIndex) || (b.area - a.area));
+      nearAnchor.sort((a, b) =>
+        (b.isRoleLayer - a.isRoleLayer)
+        || (b.isListLike - a.isListLike)
+        || (a.distance - b.distance)
+        || (b.zIndex - a.zIndex)
+        || (b.area - a.area));
       chosen = nearAnchor[0];
     } else {
-      const summary = eligible.slice(0, 3).map((l) => `${l.el.tagName.toLowerCase()} z=${l.zIndex} ${Math.round(l.rect.width)}x${Math.round(l.rect.height)}@${Math.round(l.rect.x)},${Math.round(l.rect.y)} listItems=${l.listItems}`).join("; ");
+      const summary = eligible.slice(0, 3).map((l) => `${l.el.tagName.toLowerCase()}${l.role ? `[${l.role}]` : ""} z=${l.zIndex} ${Math.round(l.rect.width)}x${Math.round(l.rect.height)}@${Math.round(l.rect.x)},${Math.round(l.rect.y)} listItems=${l.listItems}`).join("; ");
       return { ok: false, reason: `no eligible layer near anchor (${anchor.tagName.toLowerCase()}${anchor.id ? "#" + anchor.id : ""} at ${Math.round(ar.x)},${Math.round(ar.y)}); the dropdown may have closed or render elsewhere. Eligible layers: ${summary || "(none)"}. Try clicking the field again, or pass --near <ref> to anchor the search.` };
     }
   } else {
     const ranked = [...eligible];
-    ranked.sort((a, b) => (b.isListLike - a.isListLike) || (b.zIndex - a.zIndex) || (b.area - a.area));
+    ranked.sort((a, b) =>
+      (b.isRoleLayer - a.isRoleLayer)
+      || (b.isListLike - a.isListLike)
+      || (b.zIndex - a.zIndex)
+      || (b.area - a.area));
     chosen = ranked[0];
   }
   const layer = chosen.el;
@@ -4356,6 +4399,8 @@ function readOverlayFunction(opts = {}) {
       zIndex: chosen.zIndex,
       listItems: chosen.listItems,
       isListLike: chosen.isListLike,
+      isRoleLayer: chosen.isRoleLayer,
+      distance: typeof chosen.distance === "number" ? Math.round(chosen.distance) : undefined,
       rect: { x: Math.round(layerRect.x), y: Math.round(layerRect.y), width: Math.round(layerRect.width), height: Math.round(layerRect.height) },
     },
     focused: anchorDesc,
@@ -4580,6 +4625,13 @@ function fillFunction(selector, value, selectMode = false, opts = {}) {
   if (!el) throw new Error("selector not found: " + selector);
   el.scrollIntoView({ block: "center", behavior: "instant" });
   el.focus();
+  // Snapshot the prior visible value so callers can detect silent no-ops:
+  // some custom datepickers / masked inputs accept the value via .value but
+  // their UI state (the value users see) doesn't actually change. Custom
+  // pickers often strip our text and re-render the placeholder.
+  const priorVisibleValue = el.isContentEditable || el.getAttribute("role") === "textbox"
+    ? (el.innerText || el.textContent || "").trim()
+    : (typeof el.value === "string" ? el.value : "");
   if (el instanceof HTMLSelectElement || selectMode) {
     const option = [...el.options].find((entry) => entry.value === value || entry.label === value || entry.textContent.trim() === value);
     if (!option) throw new Error("option not found: " + value);
@@ -4607,7 +4659,27 @@ function fillFunction(selector, value, selectMode = false, opts = {}) {
   }
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
-  return { filled: true, selector, tag: el.tagName.toLowerCase(), value: el.type === "password" ? "[redacted]" : value };
+  // Verify the field actually accepted the value. Custom datepickers often
+  // strip text input — they render today's date back. requireChange surfaces
+  // this as an error so the agent pivots instead of silently submitting.
+  const afterVisibleValue = el.isContentEditable || el.getAttribute("role") === "textbox"
+    ? (el.innerText || el.textContent || "").trim()
+    : (typeof el.value === "string" ? el.value : "");
+  const expected = String(value || "").trim();
+  const accepted = afterVisibleValue === expected
+    || (afterVisibleValue && expected && afterVisibleValue.includes(expected));
+  if (opts.requireChange && !accepted && priorVisibleValue === afterVisibleValue) {
+    throw new Error(`fill no-op: input value did not change after typing "${expected}" (current value: "${afterVisibleValue.slice(0, 80)}"); the field may be a custom widget that rejects synthetic input — try the picker UI (calendar, dropdown, datepicker) instead`);
+  }
+  return {
+    filled: true,
+    selector,
+    tag: el.tagName.toLowerCase(),
+    value: el.type === "password" ? "[redacted]" : value,
+    accepted,
+    priorValue: el.type === "password" ? "[redacted]" : priorVisibleValue.slice(0, 120),
+    afterValue: el.type === "password" ? "[redacted]" : afterVisibleValue.slice(0, 120),
+  };
 }
 
 function uploadEventsFunction(selector) {
@@ -5756,6 +5828,7 @@ function actionOptions(args, flags) {
     text: flags.text,
     allowFileDialog: Boolean(flags.allowFileDialog),
     bypassOverlay: Boolean(flags.bypassOverlay),
+    requireChange: Boolean(flags.requireChange),
   };
 }
 
@@ -7566,6 +7639,11 @@ async function runSelfTest() {
   assert(nearParsed.command === "autocomplete" && nearParsed.flags.near === "b21", "read autocomplete --near parser");
   const nearShortRef = parseCli(["read", "overlay", "-t", "app", "--near", "e9", "--limit", "20"]);
   assert(nearShortRef.flags.near === "e9" && nearShortRef.flags.limit === "20", "read overlay --near + --limit parser");
+  // 0.3.6: --require-change flag for action fill (silent no-op detection)
+  const reqChange = parseCli(["action", "fill", "-t", "app", "e3", "09/05/2026", "--require-change"]);
+  assert(reqChange.flags.requireChange === true, "--require-change parsed as boolean flag");
+  const aoptsChange = actionOptions([], { requireChange: true });
+  assert(aoptsChange.requireChange === true, "actionOptions surfaces requireChange");
   // 0.3.5: cross-owner label fallback (rescues iTerm-pane / multi-session
   // workflow where TERM_SESSION_ID-derived owner changes between calls).
   const xLabels = {

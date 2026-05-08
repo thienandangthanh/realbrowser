@@ -397,8 +397,21 @@ return an unrelated layer (e.g. a "Login/Register" pill in the corner).
 Use `--near` whenever you opened the picker via `action click` rather than
 `action type`.
 
+The reader also picks up `role="tooltip|listbox|combobox|menu|dialog"` even
+when the element isn't `position:fixed/absolute` (some sites use
+`position:relative` + transforms). The output header shows `role-layer` and
+`dist=<N>` (Manhattan distance to anchor) so you can verify the right
+layer was chosen.
+
 If `read autocomplete` returns `(no eligible layer near anchor)`, the
 dropdown likely closed — re-click the field, then retry with `--near`.
+
+**Detecting silent fill no-ops on custom widgets.** Custom datepickers and
+masked inputs often accept `el.value = "..."` programmatically but render
+the placeholder back, so the form submits with stale data. Pass
+`action fill <ref> "<value>" --require-change` to make the CLI exit
+non-zero when the visible value didn't change after fill. Then pivot to
+the picker UI (calendar widget, dropdown) instead of typing.
 
 If typing does nothing, `action press Escape`, re-read tree, try a different
 UI path. Do not cycle CSS selectors hoping to find a clickable item inside a
@@ -435,6 +448,18 @@ Examples of authoritative signals:
 If you have one of these, stop. Do not also screenshot, scroll to a header,
 re-read the full tree, or query a related field "to make sure".
 
+### Talk to the user every 5+ tool calls
+
+If you've made 5 or more tool calls without emitting any text to the user,
+emit a one-sentence progress note. Don't go silent for 8+ minutes of
+back-to-back tool use — the user has no idea whether you're making progress
+or stuck. A single line ("captured outbound flights, fetching return leg
+now" / "stuck on date picker, trying calendar widget") is enough.
+
+This applies even when the next tool call is "obvious." Silent runs ending
+in `[Request interrupted by user]` are failure modes the user pays for in
+real time.
+
 ### Report partial success and stop
 
 When the user asks for multi-part data — round-trip flights, a comparison,
@@ -465,6 +490,7 @@ silence followed by a timeout.
 |---|---|---|
 | Ref stale/covered/not topmost | 1 | Re-read tree for fresh refs |
 | Click error contains `covered-by:<sel>` | 1 | `action scroll down 400` then retry; if still covered, retry with `action click <ref> --bypass-overlay` (dispatches events directly to the element, ignores hit-test) |
+| `action fill` reports `accepted: false` or you suspect silent no-op (custom datepicker, masked input) | 1 | Re-fill with `--require-change` to fail loudly; if it errors, switch to the picker UI (calendar widget / dropdown / role=combobox) and click your way through |
 | Dropdown item not in tree | 1 | `read autocomplete -t <label>` then `action click <o-ref>` |
 | Dropdown item not clickable | 1 | Type into search input instead |
 | CSS selector guess (not from prior output) | 0 | Use refs — never guess selectors |

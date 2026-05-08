@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.3.6 - 2026-05-08
+
+Three targeted fixes from forensics on the v0.3.4 run (8m18s, user-killed,
+zero text emitted): role-based autocomplete detection, silent-fill no-op
+detection, and an SKILL.md "talk to the user" rule. The 0.3.4 run had
+hierarchy preservation working great but stalled because (a) the airport
+autocomplete tooltip wasn't `position:fixed/absolute` so `read autocomplete`
+returned the Login pill 5/5 times, (b) `action fill e3 "09/05/2026"` was a
+silent no-op against a custom datepicker so the search ran with today's
+date, and (c) the agent ran 8 minutes of tool calls without ever telling
+the user what was happening.
+
+Changed:
+
+- `read autocomplete` layer scan now includes elements with
+  `role="tooltip|listbox|combobox|menu|menubar|dialog|alertdialog|tree|grid|treegrid"`
+  even when their CSS position is not `fixed`/`absolute`. These role-tagged
+  elements are always eligible (skip the z-index check). Fixes the
+  Vietnam Airlines case where the airport tooltip lived inside a
+  `position:relative` parent and was filtered out, leaving only the Login
+  pill at z=9999 as the chosen layer.
+- `read autocomplete` anchor proximity tightened: horizontal slack reduced
+  from `±150px` to `±50px`. A new Manhattan-distance tie-break
+  (anchor-bottom-center → layer-top-center) means autocompletes that hug
+  their input from below win over corner popups even when both technically
+  overlap horizontally. Sort priority: `isRoleLayer > isListLike >
+  distance > zIndex > area`.
+- Output header now shows `role-layer` and `dist=<N>` so the model can
+  verify the chosen layer makes sense given the anchor.
+
+Added:
+
+- `action fill <ref> "<value>" --require-change` — exits non-zero when the
+  visible value of the field doesn't change after fill. Snapshots
+  `priorVisibleValue`, performs the fill (synthetic value setter +
+  input/change events, plus contentEditable / select-mode paths
+  unchanged), then re-reads. If `priorVisibleValue === afterVisibleValue
+  && !accepted`, throws with a clear pivot hint: "the field may be a
+  custom widget that rejects synthetic input — try the picker UI
+  (calendar, dropdown, datepicker) instead". Also returns
+  `accepted`, `priorValue`, `afterValue` in the result for programmatic
+  inspection. Detects the silent custom-datepicker no-op that wasted
+  ~3 minutes in the v0.3.4 run.
+- SKILL.md: "Talk to the user every 5+ tool calls" rule. The v0.3.4 run
+  emitted **zero** text blocks across 77 tool calls / 8m18s before the
+  user killed it. A one-line progress note ("captured outbound flights,
+  fetching return leg" / "stuck on date picker, trying calendar widget")
+  makes long runs interruptible/rescuable instead of opaque.
+- SKILL.md: failure-budget row for `action fill` reporting
+  `accepted: false` or suspected silent no-op.
+- SKILL.md: `read autocomplete` documentation now mentions role-based
+  layer detection and `--require-change` flag.
+
+Validation:
+
+- `node --check scripts/realbrowser.mjs`
+- `./scripts/realbrowser --version` → 0.3.6
+- `./scripts/realbrowser self-test` (parser, ref-pattern, ariaTree,
+  lineDiff, bug-fix regressions, plus 7 0.3.2-0.3.6 assertions including
+  `--require-change` parser + `actionOptions` surfacing, cross-owner
+  fallback, autocomplete `--near`).
+
+User-facing impact: the next test run on the same VietnamAirlines flow
+should (a) see the airport autocomplete chosen by `read autocomplete -t vn
+--near b21` instead of the Login pill, (b) catch the
+`action fill e3 "09/05/2026"` silent no-op via `--require-change` and
+pivot to the date picker, (c) emit at least 2-3 progress text blocks
+across the run instead of going dark.
+
 ## 0.3.5 - 2026-05-08
 
 Fixes the "target not found: vn" failure mode when CLI invocations span
