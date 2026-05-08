@@ -2119,7 +2119,8 @@ BrowserDaemon.prototype.action = async function action(command, args, flags) {
     this.storeRefs(tab.targetId, payload.refs || {});
     if (flags.screenshot) {
       const selector = activeRootScreenshotSelector(payload);
-      payload.screenshot = await captureCheckpointScreenshot(this, tab.targetId, flags, screenshotPath(this.artifactDir, "action-state", tab, flags), {
+      const ssFlags = args[0] ? { ...flags, out: args[0] } : flags;
+      payload.screenshot = await captureCheckpointScreenshot(this, tab.targetId, flags, screenshotPath(this.artifactDir, "action-state", tab, ssFlags), {
         selector,
         root: flags.root || "active",
         clipToViewport: true,
