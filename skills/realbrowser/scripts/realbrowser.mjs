@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 
-const VERSION = "0.3.7";
+const VERSION = "0.3.8";
 const STATE_SCHEMA_VERSION = "owner-lease-1";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
@@ -1428,31 +1428,46 @@ class BrowserDaemon {
   // Browser-scoped CDP serves multiple Chrome profiles through one endpoint.
   // Without browserContextId, Target.createTarget opens the new tab in whichever
   // profile is currently focused — which may not be the one the user requested
-  // via --profile. Find a live tab we PROVED belongs to this profile (only
-  // source=profile-open or cdp-create-with-context entries are trustworthy;
-  // earlier source=browser-scope-cdp-create may have been mis-attributed to the
-  // wrong profile) and reuse its browserContextId. Returns null when no proven
-  // tab exists yet — caller falls back to launchProfileTab to bootstrap one.
+  // via --profile. Find a live tab whose targetMeta we PROVED belongs to the
+  // requested profile (only source=profile-open or cdp-create-with-context are
+  // trustworthy: those came from Chrome's --profile-directory at OS level or
+  // from Target.createTarget called with a known-correct browserContextId) and
+  // reuse its browserContextId. Cross-owner same-base-context fallback rescues
+  // iTerm-pane / multi-session use where TERM_SESSION_ID-derived owner has
+  // changed between calls.
+  //
+  // We deliberately do NOT trust user-set labels or older
+  // "browser-scope-cdp-create" entries here: under multi-profile Chrome, labels
+  // and pre-0.3.7 cdp-create entries can point to tabs in any profile (the
+  // user can label any tab they happen to select; pre-0.3.7 cdp-create lied
+  // about ownership). Using them as a context anchor would silently land new
+  // tabs in the wrong profile — exactly the bug 0.3.7 was meant to fix.
+  //
+  // Returns null when no live trusted tab matches — caller falls through to
+  // launchProfileTab (Chrome's --profile-directory at OS level), which
+  // bootstraps a proven tab whose browserContextId becomes available for all
+  // subsequent calls. OpenClaw's "managed" profiles sidestep this entirely by
+  // dedicating one Chrome process per profile; for attached-Chrome we can't.
   async resolveBrowserContextIdForProfile(profileId) {
     if (!profileId) return null;
     const TRUSTED_SOURCES = new Set(["profile-open", "cdp-create-with-context"]);
     const raw = await this.tabsRaw().catch(() => []);
     const liveById = new Map(raw.map((tab) => [tab.targetId, tab]));
-    // Same-owner targetMeta first (current owner's view of this profile).
-    const sameOwnerStore = this.targetMeta?.[this.contextScopeKey()] || {};
-    for (const [targetId, meta] of Object.entries(sameOwnerStore)) {
-      if (!meta || meta.profile !== profileId || meta.profileOwned !== true) continue;
-      if (!TRUSTED_SOURCES.has(meta.source || "")) continue;
-      const live = liveById.get(targetId);
-      if (live?.browserContextId) return live.browserContextId;
-    }
-    // Cross-owner fallback: another iTerm pane / session may have proven a tab
-    // for the same base context (e.g. profile:chrome:Default).
     const baseKey = this.context.key;
-    for (const [storedKey, store] of Object.entries(this.targetMeta || {})) {
+    const sameOwnerKey = this.contextScopeKey();
+    // Iterate keys in priority order: same-owner first, then cross-owner under
+    // the same base context, then the legacy unscoped key (pre-owner-scoping).
+    const matched = Object.keys(this.targetMeta || {}).filter(
+      (k) => baseContextKeyFromScopedKey(k) === baseKey,
+    );
+    const orderedKeys = [
+      ...matched.filter((k) => k === sameOwnerKey),
+      ...matched.filter((k) => k !== sameOwnerKey && k !== baseKey),
+      ...matched.filter((k) => k === baseKey),
+    ];
+    for (const storedKey of orderedKeys) {
+      const store = this.targetMeta?.[storedKey];
       if (!store || typeof store !== "object") continue;
-      if (baseContextKeyFromScopedKey(storedKey) !== baseKey) continue;
-      if (storedKey === this.contextScopeKey()) continue;
       for (const [targetId, meta] of Object.entries(store)) {
         if (!meta || meta.profile !== profileId || meta.profileOwned !== true) continue;
         if (!TRUSTED_SOURCES.has(meta.source || "")) continue;
@@ -7728,15 +7743,20 @@ async function runSelfTest() {
   assert(cfMatchesSame.length === 0, "contextFlagsForKnownTarget no same-owner matches when owner is fresh");
   const cfOtherUnique = [...new Set(cfMatchesOther.map(baseContextKeyFromScopedKey))];
   assert(cfOtherUnique.length === 1 && cfOtherUnique[0] === "profile:chrome:Default", "contextFlagsForKnownTarget cross-owner unique base context");
-  // 0.3.7: resolveBrowserContextIdForProfile picks the right browserContextId
-  // when Chrome runs browser-scoped CDP across multiple profiles. Without this,
-  // Target.createTarget opens new tabs in whichever profile is active, not the
-  // one requested via --profile.
+  // 0.3.8: resolveBrowserContextIdForProfile picks the right browserContextId
+  // when Chrome runs browser-scoped CDP across multiple profiles. Single
+  // strict pass: only profileOwned=true with a trusted source
+  // (profile-open from --profile-directory launch, or cdp-create-with-context
+  // from a verified Target.createTarget). Labels and untrusted sources are
+  // intentionally skipped — under multi-profile Chrome they may anchor to
+  // tabs in any profile and would re-introduce the wrong-profile bug.
+  // Bootstrap (no proven tab yet) → caller falls through to launchProfileTab.
   const bcDaemon = Object.create(BrowserDaemon.prototype);
   bcDaemon.context = { kind: "profile", key: "profile:chrome:Default", profile: { id: "chrome:Default" }, endpointScope: "browser" };
   const bcOwnedKey = `profile:chrome:Default${OWNER_SCOPE_SEPARATOR}owner-me`;
   const bcCrossKey = `profile:chrome:Default${OWNER_SCOPE_SEPARATOR}owner-other`;
   bcDaemon.contextScopeKey = () => bcOwnedKey;
+  bcDaemon.labels = {};
   bcDaemon.targetMeta = {
     [bcOwnedKey]: {
       "tid-proven": { profile: "chrome:Default", profileOwned: true, source: "profile-open" },
@@ -7761,18 +7781,34 @@ async function runSelfTest() {
   };
   const bcCross = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
   assert(bcCross === "ctx-DEFAULT", "resolveBrowserContextIdForProfile falls back to cross-owner proven entry");
-  // Untrusted-only: returns null so caller falls through to launchProfileTab.
+  // Untrusted-source only: returns null so caller falls through to
+  // launchProfileTab. We intentionally do NOT use the "tid-untrusted" tab as
+  // a context anchor: that target was created by pre-0.3.7 cdp-create which
+  // lied about profile attribution. Trusting it would re-introduce the
+  // wrong-profile bug under multi-profile Chrome.
   bcDaemon.targetMeta = {
     [bcOwnedKey]: { "tid-untrusted": { profile: "chrome:Default", profileOwned: true, source: "browser-scope-cdp-create" } },
   };
+  const bcUntrustedOnly = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
+  assert(bcUntrustedOnly === null, "resolveBrowserContextIdForProfile rejects untrusted-source-only state to force --profile-directory bootstrap");
+  // No live tab matching: also null.
+  bcDaemon.targetMeta = {
+    [bcOwnedKey]: { "tid-dead": { profile: "chrome:Default", profileOwned: true, source: "profile-open" } },
+  };
   const bcNone = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
-  assert(bcNone === null, "resolveBrowserContextIdForProfile returns null when only untrusted entries exist");
-  // cdp-create-with-context source is also trusted (we passed browserContextId).
+  assert(bcNone === null, "resolveBrowserContextIdForProfile returns null when no live tab matches");
+  // cdp-create-with-context source is trusted (we passed browserContextId).
   bcDaemon.targetMeta = {
     [bcOwnedKey]: { "tid-proven": { profile: "chrome:Default", profileOwned: true, source: "cdp-create-with-context" } },
   };
   const bcVerified = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
   assert(bcVerified === "ctx-DEFAULT", "resolveBrowserContextIdForProfile trusts cdp-create-with-context source");
+  // Legacy unscoped key (pre-owner-scoping) is read as a last-resort fallback.
+  bcDaemon.targetMeta = {
+    "profile:chrome:Default": { "tid-proven": { profile: "chrome:Default", profileOwned: true, source: "profile-open" } },
+  };
+  const bcLegacy = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
+  assert(bcLegacy === "ctx-DEFAULT", "resolveBrowserContextIdForProfile reads legacy unscoped meta store");
   stdout("realbrowser self-test passed\n");
 }
 

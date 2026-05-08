@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.3.8 - 2026-05-08
+
+Verification + tightening of the 0.3.7 multi-profile fix after probing real
+multi-profile Chrome state. Confirmed via direct CDP probe that the user's
+running Chrome has 3 distinct `browserContextId`s — chrome:Default (Person 1)
+lives in one, while user-labeled tabs (`fb_billing`, `meta_inbox`) point at
+DIFFERENT contexts (different signed-in profiles the user happened to label
+under chrome:Default). This means anything that trusts user labels or
+pre-0.3.7 `browser-scope-cdp-create` meta as a context anchor would re-create
+the wrong-profile bug. OpenClaw avoids the problem entirely by giving each
+managed profile a dedicated Chrome process; for attached Chrome we have to
+bootstrap from a tab we ourselves opened via `--profile-directory`.
+
+End-to-end verification with a freshly-restarted daemon: cold-start
+`tab ensure --profile chrome:Default --background` correctly takes
+`launch=profile-open`; the next call takes `launch=cdp-background` because
+`resolveBrowserContextIdForProfile` finds the proven tab from the first call.
+Both new tabs land in the same chrome:Default `browserContextId` as the
+existing user tabs in that profile. No tabs ended up in the wrong profile.
+
+Changed:
+
+- `resolveBrowserContextIdForProfile` keeps the strict trusted-source policy
+  (`profile-open`, `cdp-create-with-context`) but now also reads the legacy
+  unscoped `profile:chrome:Default` key (pre-owner-scoping) as a fallback
+  alongside same-owner and cross-owner same-base-context iteration. Order:
+  same-owner → cross-owner → legacy unscoped.
+- Added a self-test for legacy unscoped key fallback.
+- Documented in code why labels and pre-0.3.7 cdp-create entries are
+  intentionally NOT used as a context anchor (they can point to tabs in
+  any profile under multi-profile Chrome).
+
+Validation:
+
+- `node --check scripts/realbrowser.mjs`
+- `./scripts/realbrowser --version` → 0.3.8
+- `./scripts/realbrowser self-test` passes.
+- Live test: cold-start (profile-open) and warm-path (cdp-background) both
+  produce tabs in chrome:Default's `browserContextId` (`4D61C7CD...`),
+  matching `fb_billing` (a known-chrome:Default user tab). Tabs from other
+  profiles (`9A46977A...`, `60FE0978...`) untouched.
+
 ## 0.3.7 - 2026-05-08
 
 Profile-correct `Target.createTarget` for browser-scoped CDP. Forensics on the
