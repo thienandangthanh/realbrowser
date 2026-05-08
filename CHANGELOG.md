@@ -55,6 +55,11 @@ Fixed:
   partially fails.
 - Windows focus capture uses `GetForegroundWindow` via P/Invoke instead of
   `Get-Process` sort, which could return the wrong window.
+- Screenshot canvas transcode scaling was broken (`Math.min(1, Math.max(1, x))`
+  always returned 1). Images over `--max-side` are now properly downscaled while
+  preserving aspect ratio.
+- Deduplicated env var parsing for `DEFAULT_SCREENSHOT_MAX_SIDE` and
+  `DEFAULT_SCREENSHOT_MAX_BYTES`.
 
 Compatibility:
 

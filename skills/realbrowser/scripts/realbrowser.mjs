@@ -30,8 +30,8 @@ const MIN_TARGET_PREFIX_LEN = 8;
 const BUFFER_LIMIT = Number(process.env.REALBROWSER_BUFFER_LIMIT || 50_000);
 const FILE_CHOOSER_CLICK_GUARD_MS = Math.max(50, Math.min(2_000, Number(process.env.REALBROWSER_FILE_CHOOSER_CLICK_GUARD_MS || 350)));
 const FILE_CHOOSER_BACKGROUND_CLICK_GUARD_MS = Math.max(FILE_CHOOSER_CLICK_GUARD_MS, Math.min(2_000, Number(process.env.REALBROWSER_FILE_CHOOSER_BACKGROUND_CLICK_GUARD_MS || 2_000)));
-const DEFAULT_SCREENSHOT_MAX_SIDE = parseOptionalIntegerEnv("REALBROWSER_SCREENSHOT_MAX_SIDE", parseOptionalIntegerEnv("REALBROWSER_SCREENSHOT_MAX_SIDE", 2000));
-const DEFAULT_SCREENSHOT_MAX_BYTES = parseOptionalBytesEnv("REALBROWSER_SCREENSHOT_MAX_BYTES", parseOptionalBytesEnv("REALBROWSER_SCREENSHOT_MAX_BYTES", 5 * 1024 * 1024));
+const DEFAULT_SCREENSHOT_MAX_SIDE = parseOptionalIntegerEnv("REALBROWSER_SCREENSHOT_MAX_SIDE", 2000);
+const DEFAULT_SCREENSHOT_MAX_BYTES = parseOptionalBytesEnv("REALBROWSER_SCREENSHOT_MAX_BYTES", 5 * 1024 * 1024);
 const DEFAULT_SCREENSHOT_JPEG_QUALITY = parseOptionalIntegerEnv("REALBROWSER_SCREENSHOT_JPEG_QUALITY", 85);
 const SCREENSHOT_QUALITY_STEPS = [85, 75, 65, 55, 45, 35];
 const SCREENSHOT_SIDE_STEPS = [1800, 1600, 1400, 1200, 1000, 800];
@@ -5005,7 +5005,7 @@ function screenshotCanvasTranscodeFunction(base64, mimeType, maxSide, quality) {
   return (async () => {
     const bytes = decode(base64);
     const bitmap = await createImageBitmap(new Blob([bytes], { type: mimeType || "image/png" }));
-    const scale = Math.min(1, Math.max(1, Number(maxSide || 0)) / Math.max(bitmap.width, bitmap.height, 1));
+    const scale = Math.min(1, Number(maxSide || 0) / Math.max(bitmap.width, bitmap.height, 1));
     const width = Math.max(1, Math.round(bitmap.width * scale));
     const height = Math.max(1, Math.round(bitmap.height * scale));
     const canvas = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(width, height) : document.createElement("canvas");
