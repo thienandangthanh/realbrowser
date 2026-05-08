@@ -1269,34 +1269,48 @@ class BrowserDaemon {
       next: ["run realbrowser daemon monitor --json and retry with the target context"],
     });
   }
-  async findActiveTab(tabs) {
-    if (!tabs.length) return null;
-    for (const tab of tabs) {
-      const sessionId = this.sessions.get(tab.targetId);
-      if (!sessionId) continue;
+  async findActiveTabsByWindow(tabs) {
+    if (!tabs.length) return new Map();
+    const visibleByWindow = new Map();
+    const probe = async (tab) => {
+      let sessionId = this.sessions.get(tab.targetId);
+      let weAttached = false;
       try {
-        const res = await this.cdp.send("Runtime.evaluate", {
+        if (!sessionId) {
+          const att = await this.cdp.send("Target.attachToTarget", { targetId: tab.targetId, flatten: true }, undefined, 3000);
+          sessionId = att.sessionId;
+          weAttached = true;
+        }
+        const visRes = await this.cdp.send("Runtime.evaluate", {
           expression: "document.visibilityState",
           returnByValue: true,
         }, sessionId, 2000);
-        if (res.result?.value === "visible") return tab.targetId;
+        if (visRes.result?.value === "visible") {
+          const winRes = await this.cdp.send("Browser.getWindowForTarget", { targetId: tab.targetId }, undefined, 2000).catch(() => null);
+          const windowId = winRes?.windowId;
+          const key = windowId !== undefined ? windowId : "__no_window__";
+          if (!visibleByWindow.has(key)) visibleByWindow.set(key, tab.targetId);
+        }
       } catch {}
-    }
-    const unattached = tabs.filter(t => !this.sessions.has(t.targetId)).slice(0, 10);
-    for (const tab of unattached) {
-      let sessionId;
-      try {
-        const att = await this.cdp.send("Target.attachToTarget", { targetId: tab.targetId, flatten: true }, undefined, 3000);
-        sessionId = att.sessionId;
-        const res = await this.cdp.send("Runtime.evaluate", {
-          expression: "document.visibilityState",
-          returnByValue: true,
-        }, sessionId, 2000);
+      if (weAttached && sessionId) {
         await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => {});
-        if (res.result?.value === "visible") return tab.targetId;
-      } catch {
-        if (sessionId) await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => {});
       }
+    };
+    await Promise.all(tabs.slice(0, 30).map(probe));
+    return visibleByWindow;
+  }
+  async findTabToRestore(visibleByWindow, newTabId) {
+    if (!visibleByWindow || !visibleByWindow.size) return null;
+    try {
+      const winRes = await this.cdp.send("Browser.getWindowForTarget", { targetId: newTabId }, undefined, 2000);
+      const windowId = winRes?.windowId;
+      if (windowId !== undefined) {
+        const candidate = visibleByWindow.get(windowId);
+        if (candidate && candidate !== newTabId) return candidate;
+      }
+    } catch {}
+    for (const targetId of visibleByWindow.values()) {
+      if (targetId !== newTabId) return targetId;
     }
     return null;
   }
@@ -1792,7 +1806,7 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
         next: [`realbrowser tab label <target> ${flags.label} --force`],
       });
     }
-    const previousActiveTab = !flags.front ? await this.findActiveTab(tabs).catch(() => null) : null;
+    const visibleByWindow = !flags.front ? await this.findActiveTabsByWindow(tabs).catch(() => new Map()) : new Map();
     if (this.context.kind === "profile" && this.context.profile && this.context.endpointScope !== "profile") {
       if (!flags.front && !flags.bestEffortBackground && !flags.background) {
         throw new CliError(`cannot safely create a background tab in profile ${this.context.profile.id}`, {
@@ -1813,10 +1827,12 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
           const created = await this.cdp.send("Target.createTarget", {
             url,
             background: true,
+            focus: false,
           }, undefined, flags.timeout || 30_000);
           const targetId = created.targetId;
           if (targetId) {
-            if (previousActiveTab) await this.cdp.send("Target.activateTarget", { targetId: previousActiveTab }).catch(() => {});
+            const restoreTarget = await this.findTabToRestore(visibleByWindow, targetId).catch(() => null);
+            if (restoreTarget) await this.cdp.send("Target.activateTarget", { targetId: restoreTarget }).catch(() => {});
             await this.setTargetMeta(targetId, { profileOwned: false, profile: this.context.profile.id, source: "browser-scope-cdp-create" });
             if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: false, profile: this.context.profile.id, source: "browser-scope-cdp-create", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
             else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "browser-scope-cdp-create");
@@ -1840,8 +1856,12 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
       const beforeIds = new Set(tabs.map((tab) => tab.targetId));
       const launch = await this.launchProfileTab(url, { front: Boolean(flags.front) });
       const tab = await waitForOpenedTab(this, url, beforeIds, flags.timeout || 30_000, { requireFresh: true });
-      if (flags.front) await this.cdp.send("Target.activateTarget", { targetId: tab.targetId }).catch(() => {});
-      else if (previousActiveTab) await this.cdp.send("Target.activateTarget", { targetId: previousActiveTab }).catch(() => {});
+      if (flags.front) {
+        await this.cdp.send("Target.activateTarget", { targetId: tab.targetId }).catch(() => {});
+      } else {
+        const restoreTarget = await this.findTabToRestore(visibleByWindow, tab.targetId).catch(() => null);
+        if (restoreTarget) await this.cdp.send("Target.activateTarget", { targetId: restoreTarget }).catch(() => {});
+      }
       await restoreForegroundAppAfterBackgroundLaunch(launch?.focusRestore, { delayMs: 50 }).catch(() => {});
       await this.setTargetMeta(tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open" });
       if (flags.label) await this.setLabel(flags.label, tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease), url: tab.url });
@@ -1863,11 +1883,16 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
       const created = await this.cdp.send("Target.createTarget", {
         url,
         background: !flags.front,
+        focus: flags.front ? undefined : false,
       }, undefined, flags.timeout || 30_000);
       const targetId = created.targetId;
       if (!targetId) throw new Error("Target.createTarget returned no targetId");
-      if (flags.front) await this.cdp.send("Target.activateTarget", { targetId }).catch(() => {});
-      else if (previousActiveTab) await this.cdp.send("Target.activateTarget", { targetId: previousActiveTab }).catch(() => {});
+      if (flags.front) {
+        await this.cdp.send("Target.activateTarget", { targetId }).catch(() => {});
+      } else {
+        const restoreTarget = await this.findTabToRestore(visibleByWindow, targetId).catch(() => null);
+        if (restoreTarget) await this.cdp.send("Target.activateTarget", { targetId: restoreTarget }).catch(() => {});
+      }
       const profileOwnedCreate = this.context.kind === "profile" && this.context.endpointScope === "profile";
       if (profileOwnedCreate) await this.setTargetMeta(targetId, { profileOwned: true, profile: this.context.profile.id, source: "target-create" });
       if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
