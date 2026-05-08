@@ -1915,9 +1915,9 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
     }
   }
   if (command === "navigate") {
-    const targetRef = args[0] || flags.target;
-    let url = args[1] || args[0];
-    if (!targetRef || !url || targetRef === url) throw usage("tab navigate requires <target> <url|link-ref>");
+    const targetRef = flags.target || args[0];
+    let url = flags.target ? args[0] : args[1];
+    if (!targetRef || !url) throw usage("tab navigate requires <target> <url|link-ref>");
     let resolvedFromRef = "";
     const tab = await this.resolveTargetForOperation(targetRef, flags, "tab navigate");
     await this.assertTargetLease(tab, flags, "tab navigate");
@@ -2068,7 +2068,19 @@ BrowserDaemon.prototype.selectorFor = function selectorFor(targetId, refOrSelect
   if (/^[ebfrilc]\d+$/i.test(raw)) {
     const store = this.refStores.get(this.refStoreKey(targetId));
     const ref = store?.refs?.[raw];
-    if (!ref) throw new CliError(`ref ${raw} is stale or unknown`, { code: "ref_stale", exitCode: 5, next: ["realbrowser action state -t <target> --root active"] });
+    if (!ref) {
+      const available = store?.refs ? Object.keys(store.refs).slice(0, 8).join(",") : "(none)";
+      throw new CliError(`ref ${raw} is stale or unknown`, {
+        code: "ref_stale",
+        exitCode: 5,
+        next: [
+          `refs from a tree-file (--out) become invalid after the next read tree on this target`,
+          `available refs: ${available}${store?.refs && Object.keys(store.refs).length > 8 ? "..." : ""}`,
+          `recovery: realbrowser read tree -t <target> -i -c   (without --out, then use refs from that output)`,
+          `or:        realbrowser action state -t <target> --root active --compact`,
+        ],
+      });
+    }
     return ref.selector;
   }
   if (raw.startsWith("selector:")) return raw.slice("selector:".length);

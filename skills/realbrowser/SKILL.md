@@ -187,6 +187,23 @@ than 10 commands.
 selector string in a prior command's output, the codebase, or the `forms`
 command, you MUST use refs instead. There are no exceptions.
 
+**Stay on the user's site.** If the user named a specific site (or implied one
+through "my Gmail", "the booking page I had open", "VNAirlines"), do not
+substitute a different site or service when you hit friction. The user picked
+that site for a reason — they have an account there, the data lives there, the
+booking belongs there. If the page proves unworkable after the failure budget,
+report the specific blocker back to the user with the page state you observed.
+Let them decide whether to retry, switch sites, or give up. Do not make that
+choice on their behalf.
+
+**Refs live in memory, scoped to the most recent tree read.** Each `read tree`
+on a target replaces the ref store for that target — old refs become stale.
+Refs that appear in a tree-file written with `--out` are only usable until the
+next `read tree` on that target. If you read a `--out` file and then run any
+other tree read, the refs in the file are stale. Recovery for "ref stale or
+unknown": run `read tree -t <target> -i -c` again (without `--out`) and use
+refs from that output directly.
+
 ### Pick the reader for the task
 
 Match the task to the right first reader. This applies to any site — SPAs,
@@ -432,13 +449,20 @@ and for final evidence the user explicitly asked for.
 | Any single interaction | 3 total | Stop. Switch strategy entirely. |
 
 Three failed commands on the same interaction = wrong approach. Do not continue
-guessing. Escalate in this order:
+guessing. Escalate in this order — all within the user's specified site:
 
-1. `read tree -i -c` — get a fresh view of the full page state
-2. Try keyboard navigation: `action press Tab`, then `action press Enter`
-3. Try a completely different UI path to reach the same goal
-4. `network list --filter "/api/"` — check if the data is available via XHR
-5. Direct URL navigation if the site supports deep links
+1. `read tree -t <target> -i -c` — fresh view of the full page state, refs reset
+2. `action press Escape` then re-read tree — close any blocking overlay/modal
+3. `action scroll` to bring the target into view, then re-read tree
+4. Keyboard navigation: `action press Tab`, then `action press Enter`
+5. A different UI path to the same goal **on the same site** (e.g., from the
+   homepage menu instead of a homepage hero button)
+6. `network list --filter "/api/"` — check if the data is available via XHR
+   you can read without further interaction
+7. Direct URL navigation **on the same site** if the site supports deep links
+
+If all seven fail, stop and report the blocker to the user. Do not silently
+switch to a different site or service.
 
 ### Multi-page flows: capture then advance
 
