@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 
-const VERSION = "0.3.3";
+const VERSION = "0.3.4";
 const STATE_SCHEMA_VERSION = "owner-lease-1";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
@@ -82,10 +82,37 @@ const GROUPS = {
   chain: ["run"],
 };
 
+// Role classification adopted from openclaw's snapshot-roles.ts so the two
+// drivers produce equivalent snapshots. Sets match openclaw verbatim — keep in
+// sync if we ever update.
+
+// Roles that represent user-interactive elements; always get a ref.
 const INTERACTIVE_ROLES = new Set([
-  "button", "link", "textbox", "checkbox", "radio", "combobox",
-  "listbox", "menuitem", "menuitemcheckbox", "menuitemradio",
-  "option", "searchbox", "slider", "spinbutton", "switch", "tab", "treeitem",
+  "button", "checkbox", "combobox", "link", "listbox", "menuitem",
+  "menuitemcheckbox", "menuitemradio", "option", "radio", "searchbox", "slider",
+  "spinbutton", "switch", "tab", "textbox", "treeitem",
+]);
+
+// Roles that carry meaningful content; get a ref when named. Render in compact
+// mode regardless of name (openclaw does the same).
+const CONTENT_ROLES = new Set([
+  "article", "cell", "columnheader", "gridcell", "heading", "listitem",
+  "main", "navigation", "region", "rowheader",
+]);
+
+// Structural/container roles — skipped in compact mode unless named.
+const STRUCTURAL_ROLES = new Set([
+  "application", "directory", "document", "generic", "grid", "group", "ignored",
+  "list", "menu", "menubar", "none", "presentation", "row", "rowgroup", "table",
+  "tablist", "toolbar", "tree", "treegrid",
+]);
+
+// Extra landmarks Chrome's AX tree emits that openclaw doesn't classify but
+// we want to preserve as hierarchy anchors when they scope interactive
+// descendants. These render even without a name.
+const ALWAYS_LANDMARK_ROLES = new Set([
+  "banner", "complementary", "contentinfo", "dialog", "alertdialog", "tabpanel",
+  "form", "search",
 ]);
 
 const TARGET_REQUIRED_GROUPS = new Set([
@@ -6722,14 +6749,53 @@ function formatAxTreeV2(nodes, opts = {}) {
   const SKIP_ROLES = new Set(["none", "generic", "presentation", "InlineTextBox", "LineBreak"]);
   function getProp(node, name) { return node.properties?.find((p) => p.name === name)?.value?.value; }
   function isInteractive(role) { return INTERACTIVE_ROLES.has(role); }
+  function isContent(role) { return CONTENT_ROLES.has(role); }
+  function isStructural(role) { return STRUCTURAL_ROLES.has(role); }
+  function isLandmark(role) { return ALWAYS_LANDMARK_ROLES.has(role); }
+  // Pre-pass: mark each node with whether it has an interactive descendant.
+  // This lets landmark/content roles render in --interactive mode only when
+  // they scope something interactive — preserving "where am I" hierarchy
+  // without cluttering empty containers (matches openclaw's compactTree
+  // post-pass which drops parents whose subtree has no [ref=] descendants).
+  function markDescendants(node) {
+    if (node._descendantMarked) return Boolean(node._hasInteractiveDescendant);
+    node._descendantMarked = true;
+    let has = false;
+    for (const child of node._children || []) {
+      const childRole = child.role?.value || "";
+      if (isInteractive(childRole)) has = true;
+      if (markDescendants(child)) has = true;
+    }
+    node._hasInteractiveDescendant = has;
+    return has;
+  }
+  for (const root of roots) markDescendants(root);
   function shouldShow(node) {
     if (node.ignored) return false;
     const role = node.role?.value || "";
     if (!role || SKIP_ROLES.has(role)) return false;
-    if (opts.interactive && !isInteractive(role)) return false;
     const name = node.name?.value || "";
     const value = node.value?.value;
-    if (opts.compact && !isInteractive(role) && !name && value == null) return false;
+    if (opts.interactive) {
+      // Always show interactive elements.
+      if (isInteractive(role)) return true;
+      // Hierarchy preservation (deviates from openclaw's flat interactive mode):
+      // keep landmark + named content roles when they scope at least one
+      // interactive node. Empty/unnamed structural containers are still hidden.
+      if (!node._hasInteractiveDescendant) return false;
+      if (isLandmark(role)) return true;
+      if (isContent(role)) {
+        // Named content (region "Search", heading "Title") always shown;
+        // unnamed `main`/`navigation`/`heading` shown as primary landmarks.
+        if (name) return true;
+        if (role === "main" || role === "navigation" || role === "heading") return true;
+      }
+      return false;
+    }
+    // Non-interactive modes follow openclaw's processLine semantics:
+    // - compact: skip unnamed structural roles (group/list/table/tablist/...)
+    // - default: render everything except SKIP_ROLES
+    if (opts.compact && isStructural(role) && !name && value == null) return false;
     return true;
   }
   function stateAttrs(node) {
@@ -7393,6 +7459,26 @@ async function runSelfTest() {
   assert(tree.interactiveNodes.length === 2, "formatAxTreeV2 interactive nodes");
   const treeI = formatAxTreeV2(mockNodes, { interactive: true, compact: false });
   assert(!treeI.text.includes("document") && treeI.text.includes("button"), "formatAxTreeV2 interactive filter");
+  // 0.3.4: context roles preserved with interactive descendants
+  const hierMockNodes = [
+    { nodeId: "1", role: { value: "WebArea" }, name: { value: "Page" }, childIds: ["2", "9"], properties: [] },
+    { nodeId: "2", parentId: "1", role: { value: "main" }, name: { value: "" }, childIds: ["3", "5"], properties: [] },
+    { nodeId: "3", parentId: "2", role: { value: "region" }, name: { value: "Search" }, childIds: ["4"], properties: [] },
+    { nodeId: "4", parentId: "3", role: { value: "button" }, name: { value: "Find" }, childIds: [], backendDOMNodeId: 100, properties: [{ name: "focusable", value: { value: true } }] },
+    { nodeId: "5", parentId: "2", role: { value: "tabpanel" }, name: { value: "Departures" }, childIds: ["6"], properties: [] },
+    { nodeId: "6", parentId: "5", role: { value: "button" }, name: { value: "Origin" }, childIds: [], backendDOMNodeId: 101, properties: [{ name: "focusable", value: { value: true } }] },
+    { nodeId: "9", parentId: "1", role: { value: "region" }, name: { value: "Empty" }, childIds: [], properties: [] },
+  ];
+  const hier = formatAxTreeV2(hierMockNodes, { interactive: true, compact: true });
+  assert(hier.text.includes("main") && hier.text.includes("Search"), "formatAxTreeV2 keeps named main+region in interactive mode");
+  assert(hier.text.includes("tabpanel") && hier.text.includes("Departures"), "formatAxTreeV2 keeps tabpanel in interactive mode");
+  assert(hier.text.includes("Origin") && hier.text.includes("Find"), "formatAxTreeV2 keeps interactive buttons");
+  assert(!hier.text.includes("Empty"), "formatAxTreeV2 skips context role with no interactive descendants");
+  // Indentation: button under main->region nests deeper than direct button under main
+  const lineFind = hier.text.split("\n").find((l) => l.includes("Find"));
+  const lineOrigin = hier.text.split("\n").find((l) => l.includes("Origin"));
+  const indent = (line) => line ? line.match(/^\s*/)[0].length : 0;
+  assert(indent(lineFind) > 0 && indent(lineOrigin) > 0, "formatAxTreeV2 indents interactive elements under context");
   // read tree parser
   const readTree = parseCli(["read", "tree", "-t", "app", "-i", "-c", "-D", "-d", "4"]);
   assert(readTree.group === "read" && readTree.command === "tree", "read tree parser group/command");

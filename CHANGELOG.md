@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.3.4 - 2026-05-08
+
+Adopts openclaw's canonical ARIA role classification verbatim and adds
+hierarchy preservation in `read tree --interactive --compact`. The 0.3.3
+test run produced a flat 112-line `read tree -i -c` output with no "where
+am I" context — every button at depth 0, no enclosing region/tabpanel/
+landmark to ground the model's mental map of the page.
+
+Changed:
+
+- ARIA role classification refactored to mirror
+  openclaw's `snapshot-roles.ts` exactly:
+  - `INTERACTIVE_ROLES` (17 roles, was already aligned).
+  - `CONTENT_ROLES` (10 roles): article, cell, columnheader, gridcell,
+    heading, listitem, main, navigation, region, rowheader. Get a ref
+    when named; render in compact mode regardless of name.
+  - `STRUCTURAL_ROLES` (19 roles): application, directory, document,
+    generic, grid, group, ignored, list, menu, menubar, none,
+    presentation, row, rowgroup, table, tablist, toolbar, tree,
+    treegrid. Skipped in compact mode unless named.
+  Sets are documented "keep in sync with openclaw" so future divergence is
+  obvious.
+- Plus an `ALWAYS_LANDMARK_ROLES` set (banner, complementary, contentinfo,
+  dialog, alertdialog, tabpanel, form, search) for landmarks that
+  openclaw doesn't classify but that Chrome's AX tree emits and that we
+  always want as hierarchy anchors.
+- `read tree --interactive --compact` now preserves landmark + content-role
+  hierarchy when the role scopes at least one interactive descendant.
+  Empty regions are still skipped (matches openclaw's `compactTree` post-
+  pass that drops parents whose subtree has no `[ref=]` children). This
+  deviates from openclaw's interactive mode (which is flat) — verified
+  improvement: a page with 100+ buttons now shows them grouped under their
+  `region "Search"` / `tabpanel "Mua vé"` / `heading "..."` ancestors
+  instead of as a flat list.
+- `read tree --compact` (without `--interactive`) now matches openclaw's
+  `processLine` semantics: skip `STRUCTURAL_ROLES && !name`, render
+  everything else.
+
+Validation:
+
+- `node --check scripts/realbrowser.mjs`
+- `./scripts/realbrowser --version` → 0.3.4
+- `./scripts/realbrowser self-test` (parser, ref-pattern, ariaTree,
+  lineDiff, bug-fix regressions, plus 0.3.2/0.3.3/0.3.4 assertions
+  including 4 new hierarchy preservation checks: named main+region
+  rendered, tabpanel rendered, interactive buttons rendered, empty region
+  skipped, indentation > 0 for nested elements).
+
+Reference: openclaw's role classification at
+`extensions/browser/src/browser/snapshot-roles.ts` and
+`pw-role-snapshot.ts` (line-by-line YAML processing of Playwright's
+`ariaSnapshot({ mode: "ai" })` output). We adopt the role sets verbatim
+and add hierarchy preservation in the `-i -c` interactive view since raw
+CDP doesn't ship with Playwright's ai-mode formatter.
+
 ## 0.3.3 - 2026-05-08
 
 Tightens `read autocomplete` after the v0.3.2 run showed the reader picking
