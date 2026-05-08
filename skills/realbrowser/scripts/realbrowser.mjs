@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 
-const VERSION = "0.3.2";
+const VERSION = "0.3.3";
 const STATE_SCHEMA_VERSION = "owner-lease-1";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
@@ -110,6 +110,7 @@ const VALUE_FLAGS = new Set([
   "--ready-text", "--min-cards", "--params", "--var", "--set", "--ref",
   "--foreach", "--reuse", "--wait", "--duration", "--har", "--settle-ms",
   "-d", "--depth", "--max-nodes", "--max-labels", "--max-stitch-captures",
+  "--near",
 ]);
 
 const BOOLEAN_FLAGS = new Set([
@@ -2062,19 +2063,22 @@ BrowserDaemon.prototype.read = async function read(command, args, flags) {
     return await maybeWriteReadOut(result({ text: String(payload.ok), target: tab, ...payload }), flags, payload, "is");
   }
   if (command === "autocomplete" || command === "overlay") {
-    const payload = await this.callFunction(tab.targetId, readOverlayFunction, [{ limit: Number(flags.limit || 30) }]);
+    const opts = { limit: Number(flags.limit || 30) };
+    if (flags.near) opts.anchorSelector = this.selectorFor(tab.targetId, flags.near);
+    const payload = await this.callFunction(tab.targetId, readOverlayFunction, [opts]);
     if (!payload?.ok) {
-      const text = `(no floating layer found; if a dropdown should be open, focus the input first with action click <ref> then action type <ref> "<text>")`;
-      return result({ text, target: tab, ok: false, reason: payload?.reason });
+      const reasonLine = payload?.reason ? `(${payload.reason})` : "(no floating layer found)";
+      const hint = "if a dropdown should be open, focus the field first (action click <ref>), type to filter (action type <ref> \"<text>\"), then retry with --near <ref> to anchor at the field you clicked";
+      return result({ text: `${reasonLine}\n${hint}`, target: tab, ok: false, reason: payload?.reason });
     }
     this.storeRefs(tab.targetId, payload.refs || {}, { merge: true });
-    const headerParts = [
-      `floating layer: ${payload.layer.tag}${payload.layer.role ? `[${payload.layer.role}]` : ""} z=${payload.layer.zIndex} ${payload.layer.rect.width}x${payload.layer.rect.height}@${payload.layer.rect.x},${payload.layer.rect.y}`,
-    ];
-    if (payload.focused) {
-      const f = payload.focused;
-      headerParts.push(`near focused: ${f.tag}${f.role ? `[${f.role}]` : ""}${f.name ? ` "${f.name}"` : ""}${f.value ? ` value="${f.value}"` : ""}`);
+    const layerHeader = `floating layer: ${payload.layer.tag}${payload.layer.role ? `[${payload.layer.role}]` : ""} z=${payload.layer.zIndex}${payload.layer.isListLike ? ` listItems=${payload.layer.listItems}` : ""} ${payload.layer.rect.width}x${payload.layer.rect.height}@${payload.layer.rect.x},${payload.layer.rect.y}`;
+    const headerParts = [layerHeader];
+    if (payload.anchor) {
+      const f = payload.anchor;
+      headerParts.push(`anchor (${f.source || "auto"}): ${f.tag}${f.role ? `[${f.role}]` : ""}${f.name ? ` "${f.name}"` : ""}${f.value ? ` value="${f.value}"` : ""}`);
     }
+    if (payload.skippedLayers) headerParts.push(`(skipped ${payload.skippedLayers} ineligible layer${payload.skippedLayers === 1 ? "" : "s"})`);
     const lines = payload.options.map((o) => `- ${o.ref} ${o.tag}${o.role ? `[${o.role}]` : ""} "${o.text}"`);
     const truncatedNote = payload.truncated ? `\n(${payload.totalFound - payload.options.length} more; pass --limit N to expand)` : "";
     const text = `${headerParts.join("\n")}\n${lines.join("\n")}${truncatedNote}`;
@@ -4133,25 +4137,63 @@ function readOverlayFunction(opts = {}) {
     layers.push({ el, rect: r, zIndex: z });
   }
   if (!layers.length) return { ok: false, reason: "no floating layer found (no fixed/absolute element with z-index >= 1)" };
-  const focused = document.activeElement && document.activeElement !== document.body && document.activeElement !== document.documentElement
-    ? document.activeElement : null;
-  let chosen;
-  if (focused) {
-    const fr = focused.getBoundingClientRect();
-    const near = layers.filter(({ rect }) => {
-      const horizontalNear = rect.left < fr.right + 300 && rect.right > fr.left - 300;
-      const verticallyBelowOrCovering = rect.top >= fr.bottom - 50 && rect.top < fr.bottom + 600;
-      const verticallyOverlap = rect.top < fr.bottom && rect.bottom > fr.top;
-      return horizontalNear && (verticallyBelowOrCovering || verticallyOverlap);
+  const LIST_ITEM_SELECTOR = 'li,[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="row"],[role="listitem"],[role="treeitem"],[role="combobox"] [role="option"]';
+  const listLikeCount = (el) => {
+    let n = el.querySelectorAll(LIST_ITEM_SELECTOR).length;
+    if (n >= 3) return n;
+    const directChildLeaves = [...el.children].filter((c) => {
+      const t = (c.innerText || c.textContent || "").trim();
+      return t.length > 0 && t.length < 200 && c.children.length <= 4;
     });
-    if (near.length) {
-      near.sort((a, b) => b.zIndex - a.zIndex || (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height));
-      chosen = near[0];
+    return Math.max(n, directChildLeaves.length);
+  };
+  for (const layer of layers) {
+    layer.listItems = listLikeCount(layer.el);
+    layer.isListLike = layer.listItems >= 3;
+    layer.area = layer.rect.width * layer.rect.height;
+    layer.bigEnough = layer.rect.width >= 150 && layer.rect.height >= 80;
+  }
+  const eligible = layers.filter((l) => l.bigEnough || l.isListLike);
+  if (!eligible.length) {
+    const summary = layers.slice(0, 3).map((l) => `${l.el.tagName.toLowerCase()} z=${l.zIndex} ${Math.round(l.rect.width)}x${Math.round(l.rect.height)} listItems=${l.listItems}`).join("; ");
+    return { ok: false, reason: `no eligible layer (all floating layers are tiny popovers without list items): ${summary}` };
+  }
+  let anchor = null;
+  let anchorSource = "";
+  if (opts.anchorSelector) {
+    anchor = document.querySelector(opts.anchorSelector)
+      || (typeof pierceQuerySelector === "function" ? pierceQuerySelector(document, opts.anchorSelector) : null);
+    anchorSource = anchor ? "near-arg" : "";
+  }
+  if (!anchor) {
+    const ae = document.activeElement;
+    if (ae && ae !== document.body && ae !== document.documentElement
+      && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) {
+      anchor = ae;
+      anchorSource = "active-input";
     }
   }
-  if (!chosen) {
-    layers.sort((a, b) => b.zIndex - a.zIndex || (b.rect.width * b.rect.height) - (a.rect.width * a.rect.height));
-    chosen = layers[0];
+  let chosen;
+  if (anchor) {
+    const ar = anchor.getBoundingClientRect();
+    const nearAnchor = eligible.filter(({ rect }) => {
+      const horizontalOverlap = rect.left < ar.right + 150 && rect.right > ar.left - 150;
+      const verticallyBelow = rect.top >= ar.bottom - 50 && rect.top < ar.bottom + 700;
+      const verticallyOverlap = rect.top < ar.bottom && rect.bottom > ar.top;
+      const verticallyAbove = rect.bottom > ar.top - 700 && rect.bottom <= ar.top + 50;
+      return horizontalOverlap && (verticallyBelow || verticallyOverlap || verticallyAbove);
+    });
+    if (nearAnchor.length) {
+      nearAnchor.sort((a, b) => (b.isListLike - a.isListLike) || (b.zIndex - a.zIndex) || (b.area - a.area));
+      chosen = nearAnchor[0];
+    } else {
+      const summary = eligible.slice(0, 3).map((l) => `${l.el.tagName.toLowerCase()} z=${l.zIndex} ${Math.round(l.rect.width)}x${Math.round(l.rect.height)}@${Math.round(l.rect.x)},${Math.round(l.rect.y)} listItems=${l.listItems}`).join("; ");
+      return { ok: false, reason: `no eligible layer near anchor (${anchor.tagName.toLowerCase()}${anchor.id ? "#" + anchor.id : ""} at ${Math.round(ar.x)},${Math.round(ar.y)}); the dropdown may have closed or render elsewhere. Eligible layers: ${summary || "(none)"}. Try clicking the field again, or pass --near <ref> to anchor the search.` };
+    }
+  } else {
+    const ranked = [...eligible];
+    ranked.sort((a, b) => (b.isListLike - a.isListLike) || (b.zIndex - a.zIndex) || (b.area - a.area));
+    chosen = ranked[0];
   }
   const layer = chosen.el;
   const interactiveTags = new Set(["button", "a", "option"]);
@@ -4212,11 +4254,12 @@ function readOverlayFunction(opts = {}) {
     return refs[ref];
   });
   const layerRect = chosen.rect;
-  const focusedDesc = focused ? {
-    tag: focused.tagName.toLowerCase(),
-    role: focused.getAttribute("role") || undefined,
-    name: (focused.getAttribute("aria-label") || focused.placeholder || focused.name || "").slice(0, 80) || undefined,
-    value: typeof focused.value === "string" ? focused.value.slice(0, 80) : undefined,
+  const anchorDesc = anchor ? {
+    tag: anchor.tagName.toLowerCase(),
+    role: anchor.getAttribute("role") || undefined,
+    name: (anchor.getAttribute("aria-label") || anchor.placeholder || anchor.name || (anchor.innerText || "").trim().slice(0, 80) || "").slice(0, 80) || undefined,
+    value: typeof anchor.value === "string" ? anchor.value.slice(0, 80) : undefined,
+    source: anchorSource,
   } : null;
   return {
     ok: true,
@@ -4224,13 +4267,17 @@ function readOverlayFunction(opts = {}) {
       tag: layer.tagName.toLowerCase(),
       role: layer.getAttribute("role") || undefined,
       zIndex: chosen.zIndex,
+      listItems: chosen.listItems,
+      isListLike: chosen.isListLike,
       rect: { x: Math.round(layerRect.x), y: Math.round(layerRect.y), width: Math.round(layerRect.width), height: Math.round(layerRect.height) },
     },
-    focused: focusedDesc,
+    focused: anchorDesc,
+    anchor: anchorDesc,
     options,
     refs,
     truncated: dedup.length > limit,
     totalFound: dedup.length,
+    skippedLayers: layers.length - eligible.length,
   };
 }
 
@@ -6990,17 +7037,24 @@ All read commands require -t/--target or --handle.
   read autocomplete -t app                  (after typing into a focused input;
                                              enumerates the floating layer's
                                              items as o1, o2, ... refs)
+  read autocomplete -t app --near b21       (anchor at the button you just
+                                             clicked; preferred for
+                                             click-then-popup widgets where
+                                             activeElement is unreliable)
 
 read query expects CSS selectors, not literal text. For text checks, use
 wait text, read text --out plus rg, or read query '<css>' --text-filter '<text>'.
 Use --out for large/debug reads. Text-like reads write plain text; structured
 reads write JSON for jq/rg/editor inspection.
 
-read autocomplete (alias: read overlay) finds the topmost floating layer
-(position fixed/absolute, z-index >= 1) near the focused input and emits
-o1, o2, ... refs for its visible items. Use after action type when the
-dropdown items don't appear in read tree (custom autocomplete without
-role=listbox/option). Then action click <ref> works without selector hunting.
+read autocomplete (alias: read overlay) finds the floating layer near the
+input or button you specify (--near <ref>) or near document.activeElement
+and emits o1, o2, ... refs for its visible items. Eligibility rules: layer
+must be >= 150x80 OR contain >= 3 list-like items (li, [role=option],
+[role=menuitem], etc.). Use after action type or after a click that opens a
+custom dropdown. Then action click <ref> works without selector hunting.
+If the result reports "no eligible layer near anchor", the dropdown likely
+closed — re-click the field, then retry with --near <field-ref>.
 `,
   wait: `
 realbrowser wait
@@ -7361,6 +7415,11 @@ async function runSelfTest() {
   assert(oRefParsed.args[0] === "o4", "o-ref accepted as click target");
   // o-ref recognized by selectorFor regex (validated indirectly: ref should match the same shape as b/e/l)
   assert(/^[ebfrilco]\d+$/i.test("o7") && /^[ebfrilco]\d+$/i.test("b1"), "ref pattern accepts o-prefix");
+  // 0.3.3: --near anchor flag for read autocomplete
+  const nearParsed = parseCli(["read", "autocomplete", "-t", "app", "--near", "b21"]);
+  assert(nearParsed.command === "autocomplete" && nearParsed.flags.near === "b21", "read autocomplete --near parser");
+  const nearShortRef = parseCli(["read", "overlay", "-t", "app", "--near", "e9", "--limit", "20"]);
+  assert(nearShortRef.flags.near === "e9" && nearShortRef.flags.limit === "20", "read overlay --near + --limit parser");
   stdout("realbrowser self-test passed\n");
 }
 

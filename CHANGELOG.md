@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.3.3 - 2026-05-08
+
+Tightens `read autocomplete` after the v0.3.2 run showed the reader picking
+a small Login/Register popup (z=9999, 200x131) instead of the actual airport
+autocomplete on every call. The new heuristic + a `--near <ref>` anchor
+makes the reader usable on real sites where small high-z overlays coexist
+with the dropdown the user opened.
+
+Changed:
+
+- `read autocomplete` (alias `read overlay`) layer eligibility now requires
+  the layer to be either >= 150x80 OR contain >= 3 list-like items
+  (`li`, `[role=option]`, `[role=menuitem]`, `[role=row]`, `[role=listitem]`,
+  `[role=treeitem]`, plus a fallback that counts text-bearing direct
+  children). Tiny popups without list structure are skipped — the result
+  reports `(skipped N ineligible layers)` so the model knows.
+- Anchor proximity is now strictly enforced when an anchor exists: layer
+  must horizontally overlap (anchor.left/right ± 150px) and be within
+  ±700px vertically (below, overlapping, or above). When no eligible layer
+  is near the anchor, returns `ok:false` with `(no eligible layer near
+  anchor)` and a list of skipped candidates instead of silently falling
+  through to the wrong layer.
+- Anchor source priority changed: explicit `--near <ref>` first, then
+  `document.activeElement` (only if it is an `INPUT`/`TEXTAREA`/contentEditable —
+  this prevents `BODY` or unrelated buttons from being the anchor when the
+  page lost focus).
+- Output now reports the chosen layer's `listItems` count and whether it
+  was list-like, plus the `anchor source` (`near-arg` vs `active-input`),
+  so the model can verify the reader picked the right layer.
+
+Added:
+
+- `read autocomplete --near <ref>` — anchor the floating-layer search at a
+  specific button or input ref. Use this whenever the dropdown opened from
+  a click rather than a focused input. Tiny ~10-line wiring; the in-page
+  evaluator resolves the anchor selector first via `pierceQuerySelector`
+  fallback so shadow-DOM-stamped refs work.
+- SKILL.md: "Report partial success and stop" rule (~14 lines under
+  Efficiency Rules). When the user asked for multi-part data and you have
+  one part captured with confidence, report what you have *first* before
+  navigating away to fetch the rest. SPA results pages frequently lose
+  state on back/forward — a 6-minute happy path can become a 12-minute
+  timeout if you abandon a captured result to chase the next one.
+- SKILL.md: `read autocomplete --near <ref>` guidance under
+  "Dropdowns, pickers, and autocomplete" with explicit click-then-popup
+  use case and the recovery for `(no eligible layer near anchor)`.
+
+Validation:
+
+- `node --check scripts/realbrowser.mjs`
+- `./scripts/realbrowser --version` → 0.3.3
+- `./scripts/realbrowser self-test` (parser, ref-pattern, ariaTree, lineDiff,
+  bug-fix regressions, plus 7 0.3.2/0.3.3 assertions including
+  `read autocomplete --near` parser)
+
 ## 0.3.2 - 2026-05-08
 
 Generic, cross-platform fixes for three loop patterns observed in skill-run

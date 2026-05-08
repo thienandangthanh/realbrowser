@@ -383,10 +383,22 @@ misread small digits. Pick the right shot:
 
 When a click opens a dropdown/picker/autocomplete with a search input, type
 immediately — the input is usually auto-focused: `action type "search text"`.
+
 If the dropdown items don't show up in `read tree` (custom autocomplete
 without `role=listbox/option`), run `read autocomplete -t <label>` — it
 enumerates the floating layer's visible items as `o1, o2, …` refs that work
 with `action click <ref>`. No selector hunting.
+
+**Anchor with `--near <ref>` for click-then-popup widgets** — when the
+dropdown opens after clicking a button (not typing into an input), pass
+`read autocomplete -t <label> --near <button-ref>`. Without `--near`, the
+reader uses `document.activeElement`, which lies for custom popovers and can
+return an unrelated layer (e.g. a "Login/Register" pill in the corner).
+Use `--near` whenever you opened the picker via `action click` rather than
+`action type`.
+
+If `read autocomplete` returns `(no eligible layer near anchor)`, the
+dropdown likely closed — re-click the field, then retry with `--near`.
 
 If typing does nothing, `action press Escape`, re-read tree, try a different
 UI path. Do not cycle CSS selectors hoping to find a clickable item inside a
@@ -422,6 +434,30 @@ Examples of authoritative signals:
 
 If you have one of these, stop. Do not also screenshot, scroll to a header,
 re-read the full tree, or query a related field "to make sure".
+
+### Report partial success and stop
+
+When the user asks for multi-part data — round-trip flights, a comparison,
+"both A and B", a summary across pages — and you have already captured at
+least one part with confidence, **report what you have first**. Don't
+navigate away from a working results page to re-fetch the rest.
+
+Why: SPA results pages frequently lose state on back/forward, direct nav,
+or full reload. A 6-minute happy path becomes a 12-minute timeout when you
+abandon a captured result to chase the next one and the page resets. The
+user can ask you to continue from the partial answer; they cannot get back
+the time burned in a doom loop.
+
+Concrete examples:
+- Round-trip search, captured outbound list → report outbound times+prices
+  *now*, then continue to return leg.
+- Compare two products, scraped product A → report A's spec *now*, then
+  navigate to B (in a new tab if practical, so A stays available).
+- Multi-step form with progress saved at step 3/5 → if the user asked about
+  step 3, answer it before pushing further.
+
+A partial answer with a clear "still pending: X" note is always better than
+silence followed by a timeout.
 
 ### Failure budget
 
