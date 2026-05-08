@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 
-const VERSION = "0.3.4";
+const VERSION = "0.3.5";
 const STATE_SCHEMA_VERSION = "owner-lease-1";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
@@ -740,15 +740,31 @@ function contextFlagsForKnownTarget(target, owner) {
   const raw = String(target || "").replace(/^label:/, "").trim();
   if (!raw || raw.startsWith("cdp:")) return {};
   const labels = readJson(LABELS_FILE) || {};
-  const matches = [];
+  // Two-tier resolution:
+  //   1. Owner-scoped first (preserves existing behavior for parallel/scoped
+  //      sessions where you don't want a stale-labeled tab from another agent
+  //      to hijack your --target).
+  //   2. Cross-owner fallback when no same-owner match exists. This is what
+  //      rescues the "label persisted in iTerm pane A but pane B has a fresh
+  //      TERM_SESSION_ID-derived owner" case — the same base context (e.g.
+  //      profile:chrome:Default) is unambiguous even across owners, so we
+  //      apply it. The daemon-side label resolver does the same kind of
+  //      fallback so the label itself also resolves to the right targetId.
+  const sameOwner = [];
+  const otherOwner = [];
   for (const [contextKey, contextLabels] of Object.entries(labels)) {
     if (!contextLabels || typeof contextLabels !== "object") continue;
+    if (typeof contextLabels[raw] !== "string") continue;
     const scopedOwner = ownerFromScopedContextKey(contextKey);
-    if (scopedOwner && scopedOwner !== owner) continue;
-    if (contextLabels[raw]) matches.push(contextKey);
+    if (!scopedOwner || scopedOwner === owner) sameOwner.push(contextKey);
+    else otherOwner.push(contextKey);
   }
-  const unique = [...new Set(matches.map(baseContextKeyFromScopedKey))];
-  return unique.length === 1 ? contextFlagsFromString(unique[0]) : {};
+  const sameUnique = [...new Set(sameOwner.map(baseContextKeyFromScopedKey))];
+  if (sameUnique.length === 1) return contextFlagsFromString(sameUnique[0]);
+  if (sameUnique.length > 1) return {};
+  const otherUnique = [...new Set(otherOwner.map(baseContextKeyFromScopedKey))];
+  if (otherUnique.length === 1) return contextFlagsFromString(otherUnique[0]);
+  return {};
 }
 
 async function defaultContextFlags(owner) {
@@ -1175,10 +1191,25 @@ class BrowserDaemon {
   contextScopeKey() {
     return ownerScopedContextKey(this.context.key, this.owner());
   }
-  labelsForContext({ includeLegacy = true } = {}) {
+  labelsForContext({ includeLegacy = true, includeCrossOwner = false } = {}) {
     const scoped = this.labels[this.contextScopeKey()] || {};
-    if (!includeLegacy) return scoped;
-    return { ...(this.labels[this.context.key] || {}), ...scoped };
+    let merged = includeLegacy ? { ...(this.labels[this.context.key] || {}), ...scoped } : { ...scoped };
+    if (includeCrossOwner) {
+      // Fallback: include labels from OTHER owners under the same base context
+      // (e.g. profile:chrome:Default). Same-owner labels still win on conflict.
+      // Surfaces label-set-in-pane-A from pane-B when TERM_SESSION_ID changed.
+      const baseKey = this.context.key;
+      const crossOwner = {};
+      for (const [storedKey, storedLabels] of Object.entries(this.labels || {})) {
+        if (!storedLabels || typeof storedLabels !== "object") continue;
+        if (baseContextKeyFromScopedKey(storedKey) !== baseKey) continue;
+        for (const [label, targetId] of Object.entries(storedLabels)) {
+          if (typeof targetId === "string" && !(label in crossOwner)) crossOwner[label] = targetId;
+        }
+      }
+      merged = { ...crossOwner, ...merged };
+    }
+    return merged;
   }
   labelMetaForContext({ includeLegacy = true } = {}) {
     const scoped = this.labelMeta[this.contextScopeKey()] || {};
@@ -1351,7 +1382,11 @@ class BrowserDaemon {
   }
   async tabs() {
     const raw = await this.tabsRaw();
-    const labelsForContext = this.labelsForContext();
+    // Display labels include cross-owner same-base-context entries so a label
+    // set in another iTerm pane (different TERM_SESSION_ID) still surfaces in
+    // tab list. Mutations (setLabel) still write under the current owner, so
+    // session-local label registry behavior is preserved.
+    const labelsForContext = this.labelsForContext({ includeCrossOwner: true });
     const targetIds = raw.map((tab) => tab.targetId);
     const prefixLen = getDisplayPrefixLength(targetIds);
     return raw.map((tab) => {
@@ -1445,7 +1480,32 @@ class BrowserDaemon {
         if (!allowUnprovenProfileTarget && !this.profileTargetProven(tab)) throw this.unprovenProfileTargetError(tab, operation);
         return tab;
       }
+      // Same-owner label points to a dead/closed tab. Try cross-owner fallback
+      // before declaring stale — another pane may have an alive labeling.
+    }
+    // Cross-owner label fallback: same base context (e.g. profile:chrome:Default)
+    // but a different owner stored the label. Only used when the same-owner
+    // lookup did not return a live tab. Rescues iTerm-pane / multi-session use.
+    const crossLabels = this.labelsForContext({ includeCrossOwner: true });
+    const crossLabelId = crossLabels[raw];
+    if (crossLabelId && crossLabelId !== labelId) {
+      const tab = tabs.find((candidate) => candidate.targetId === crossLabelId);
+      if (tab) {
+        if (!allowUnprovenProfileTarget && !this.profileTargetProven(tab)) throw this.unprovenProfileTargetError(tab, operation);
+        return tab;
+      }
+    }
+    if (labelId) {
       throw new CliError(`target label "${raw}" is stale`, { code: "target_stale", exitCode: 3, next: ["realbrowser tab list"] });
+    }
+    if (crossLabelId) {
+      // Cross-owner label exists but points to a dead tab — surface this
+      // explicitly rather than falling through to the generic not-found path.
+      throw new CliError(`target label "${raw}" is stale (resolved across owners; the underlying tab was closed)`, {
+        code: "target_stale",
+        exitCode: 3,
+        next: ["realbrowser tab list", `realbrowser tab ensure <url> --label ${raw}`],
+      });
     }
     const exact = tabs.find((tab) => tab.targetId === raw || tab.targetPrefix === raw || tab.id === ref || tab.suggestedTarget === raw);
     if (exact) {
@@ -7506,6 +7566,41 @@ async function runSelfTest() {
   assert(nearParsed.command === "autocomplete" && nearParsed.flags.near === "b21", "read autocomplete --near parser");
   const nearShortRef = parseCli(["read", "overlay", "-t", "app", "--near", "e9", "--limit", "20"]);
   assert(nearShortRef.flags.near === "e9" && nearShortRef.flags.limit === "20", "read overlay --near + --limit parser");
+  // 0.3.5: cross-owner label fallback (rescues iTerm-pane / multi-session
+  // workflow where TERM_SESSION_ID-derived owner changes between calls).
+  const xLabels = {
+    [`profile:chrome:Default${OWNER_SCOPE_SEPARATOR}owner-old`]: { vn: "TID-VN-OLD", solo: "TID-SOLO" },
+    [`profile:chrome:Default${OWNER_SCOPE_SEPARATOR}owner-new`]: { other: "TID-OTHER" },
+    [`anonymous:s1${OWNER_SCOPE_SEPARATOR}owner-old`]: { aaa: "TID-A" },
+  };
+  const xDaemon = {
+    labels: xLabels,
+    context: { key: "profile:chrome:Default" },
+    contextScopeKey: () => `profile:chrome:Default${OWNER_SCOPE_SEPARATOR}owner-new`,
+    labelsForContext: BrowserDaemon.prototype.labelsForContext,
+  };
+  const sameOwner = xDaemon.labelsForContext.call(xDaemon);
+  assert(!sameOwner.vn, "labelsForContext same-owner does not see other owner's vn label");
+  assert(!sameOwner.solo, "labelsForContext same-owner does not see other owner's solo");
+  const cross = xDaemon.labelsForContext.call(xDaemon, { includeCrossOwner: true });
+  assert(cross.vn === "TID-VN-OLD", "labelsForContext cross-owner picks up vn from other owner under same base context");
+  assert(cross.solo === "TID-SOLO", "labelsForContext cross-owner picks up solo from other owner");
+  assert(!cross.aaa, "labelsForContext cross-owner does not bleed across base contexts (anonymous != profile)");
+  // contextFlagsForKnownTarget cross-owner fallback
+  // (uses LABELS_FILE so we test the function structurally with unique vs ambiguous)
+  const cfRaw = "vn";
+  const cfOwner = "owner-fresh";
+  const cfMatchesSame = [];
+  const cfMatchesOther = [];
+  for (const [contextKey, contextLabels] of Object.entries(xLabels)) {
+    if (typeof contextLabels[cfRaw] !== "string") continue;
+    const so = ownerFromScopedContextKey(contextKey);
+    if (!so || so === cfOwner) cfMatchesSame.push(contextKey);
+    else cfMatchesOther.push(contextKey);
+  }
+  assert(cfMatchesSame.length === 0, "contextFlagsForKnownTarget no same-owner matches when owner is fresh");
+  const cfOtherUnique = [...new Set(cfMatchesOther.map(baseContextKeyFromScopedKey))];
+  assert(cfOtherUnique.length === 1 && cfOtherUnique[0] === "profile:chrome:Default", "contextFlagsForKnownTarget cross-owner unique base context");
   stdout("realbrowser self-test passed\n");
 }
 

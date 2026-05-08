@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.3.5 - 2026-05-08
+
+Fixes the "target not found: vn" failure mode when CLI invocations span
+across iTerm panes (or any environment where TERM_SESSION_ID changes
+between calls). The fallback owner is derived from
+`TERM_SESSION_ID` / `ITERM_SESSION_ID` / `CLAUDE_SESSION_ID` etc., so each
+iTerm pane gets a different owner and labels stored in pane A become
+invisible to pane B even when both point at the same browser profile. The
+labels.json file showed 11+ owner-scoped entries for `vna` across
+different sessions, all under the same `profile:chrome:Default` base
+context — perfectly resolvable across owners but the lookup was
+strict-same-owner.
+
+Changed:
+
+- `contextFlagsForKnownTarget(target, owner)` is now two-tier:
+  1. Same-owner first (preserves prior behavior — parallel sessions
+     don't accidentally hijack each other's `-t app` references).
+  2. Cross-owner fallback when same-owner has no match. Picks up any
+     entry across owners under the SAME base context (e.g.
+     `profile:chrome:Default`); returns those flags only if the base
+     context is unique. Anonymous + profile contexts never bleed into
+     each other.
+- `BrowserDaemon.labelsForContext({ includeCrossOwner: true })` returns a
+  merged label map: cross-owner same-base-context labels first, then
+  same-owner overrides on conflict. Used internally for display + as a
+  resolution fallback.
+- `BrowserDaemon.resolveTarget(label)` now falls back to cross-owner
+  labels when the same-owner label is missing OR resolves to a dead tab.
+  Reports `target stale (resolved across owners; the underlying tab was
+  closed)` when an old label points to a closed tab so the user knows
+  to re-`tab ensure`.
+- `BrowserDaemon.tabs()` now displays cross-owner labels in `tab list`
+  output. A label set in another iTerm pane / Claude Code session
+  surfaces next to its tab. Mutations (`setLabel`) still write under the
+  current owner, so each session has its own label registry.
+
+Self-test gains 5 new assertions for the cross-owner fallback covering:
+mixed owner labels, base-context isolation between profile and
+anonymous, contextFlagsForKnownTarget unique-base-context resolution
+when no same-owner match exists.
+
+Validation:
+
+- `node --check scripts/realbrowser.mjs`
+- `./scripts/realbrowser --version` → 0.3.5
+- `./scripts/realbrowser self-test`
+
+User-facing impact: chained shell commands like
+`realbrowser tab select X --profile chrome:Default --label vn && realbrowser read tree -t vn`
+now succeed even when the chained second invocation lands in a context
+without `--profile` (which iTerm-spawned shells often produce because
+TERM_SESSION_ID changed). Previously this scenario errored
+`target not found: vn`. Mutations on cross-owner-resolved targets still
+respect `profileTargetProven`/`--allow-browser-scope-target` rules.
+
 ## 0.3.4 - 2026-05-08
 
 Adopts openclaw's canonical ARIA role classification verbatim and adds
