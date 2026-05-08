@@ -5271,7 +5271,7 @@ function canUseScreenshotQuality(format) {
 function screenshotNormalizationEnabled(flags = {}) {
   if (flags.rawSize || flags.noNormalize) return false;
   if (flags.normalize) return true;
-  const raw = String(process.env.REALBROWSER_SCREENSHOT_NORMALIZE ?? process.env.REALBROWSER_SCREENSHOT_NORMALIZE ?? "1").toLowerCase();
+  const raw = String(process.env.REALBROWSER_SCREENSHOT_NORMALIZE ?? "1").toLowerCase();
   return !["0", "false", "no", "off"].includes(raw);
 }
 
