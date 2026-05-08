@@ -187,9 +187,23 @@ than 10 commands.
 selector string in a prior command's output, the codebase, or the `forms`
 command, you MUST use refs instead. There are no exceptions.
 
-### The canonical read pattern: one tree, many diffs
+### Pick the reader for the task
 
-ONE read pattern handles 95% of interaction tasks:
+Match the task to the right first reader. This applies to any site — SPAs,
+static pages, dashboards, e-commerce, news, docs, social, internal apps:
+
+| Task | First reader | Then |
+|---|---|---|
+| Interact (click, fill, submit, navigate) | `read tree -i -c` | `read tree -i -c -D` after each action |
+| Bulk text content (article, docs, FAQ, terms) | `read text --out FILE` + `rg` | none — file is searchable |
+| Repeated rows (feed, table, search results, listings) | `read items` or `read tree -i -c` | `read item --index N` for one row |
+| Visual check (layout, image, canvas, color) | `screenshot capture` | none — pixels are the answer |
+| "What page am I on?" / load check | `read observe` | proceed to task-specific reader |
+| Console errors / network requests | `console list` / `network list` | scoped reader if needed |
+
+### The canonical read pattern (interaction): one tree, many diffs
+
+For any interaction task — clicking, filling, submitting, navigating UI:
 
 ```bash
 # Once per page state — captures the full interactive surface with refs
@@ -199,13 +213,35 @@ ONE read pattern handles 95% of interaction tasks:
 "$REALBROWSER" read tree -t app -i -c -D
 ```
 
+A "page state" is a tab whose visible interactive surface has not changed
+materially since the last full tree read. Re-read the full tree (drop `-D`) on:
+- New page load (`tab navigate`, top-level navigation, full reload)
+- Major layout swap (route change in an SPA, switching to a different view/tab)
+- Modal or full-screen overlay opens or closes
+
+For minor changes inside the same view (a dropdown opens, a value fills, a
+button enables), use `-D` — never the full tree.
+
 `read tree -i -c` IS the "one big read" that some agents reach for full HTML or
 full screenshot to get. It returns the entire interactive surface (buttons,
 links, inputs, tabs, dropdowns) in compact ARIA form with refs (`b1`, `l1`, `e1`)
 ready for `action click/fill/type/submit`. There is nothing to find with HTML or
 vision that this read does not already give you with refs attached.
 
-### Read cost (input tokens, typical SPA page)
+### When the tree is not enough
+
+Rare cases where `read tree -i -c` alone is insufficient:
+
+- Element has no ARIA role/name and is not in the interactive set —
+  `read tree -c` (drop `-i`) or `read snapshot --selector <css>` for DOM.
+- You need text content from non-interactive nodes (article body, table cells)
+  and the tree's labels do not include it — `read text --out FILE` + `rg`.
+- You need raw HTML structure (data attributes, custom elements, source view)
+  — `read html --out FILE` for offline grep.
+- You need to extract many similar rows from a feed/list with consistent
+  structure — `read items` returns each row as a structured entry.
+
+### Read cost (input tokens, typical web page)
 
 | Reader | Tokens | Refs? | Use when |
 |---|---|---|---|
@@ -224,10 +260,11 @@ vision that this read does not already give you with refs attached.
 
 These all feel like "one big read" but cost dramatically more than `read tree`:
 
-- **Full HTML to find elements.** Modern SPAs (Gmail, Twitter, booking sites)
-  ship 100k–1M tokens of HTML. Even after parsing, you still need refs to
-  click — `read tree` already returns them. `read html` is for offline grep
-  on a downloaded file, never for interaction planning.
+- **Full HTML to find elements.** Modern web apps routinely ship 100k–1M
+  tokens of HTML (inline scripts, styles, lazy data, hidden states). Even
+  after parsing, you still need refs to click — `read tree` already returns
+  them. `read html` is for offline grep on a downloaded file, never for
+  interaction planning.
 
 - **Full screenshot + vision to read content.** Vision tokens are 5–20× more
   expensive per byte than text and misread small text (form labels, dates,
