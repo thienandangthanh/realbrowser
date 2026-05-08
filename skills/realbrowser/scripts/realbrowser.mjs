@@ -1330,6 +1330,7 @@ class BrowserDaemon {
       const label = Object.entries(labelsForContext).find(([, id]) => id === tab.targetId)?.[0];
       const lease = this.leaseForTarget(tab.targetId);
       const targetPrefix = tab.targetId.slice(0, prefixLen);
+      const targetMeta = this.targetMetaForTarget(tab.targetId);
       const base = {
         id: `cdp:${targetPrefix}`,
         targetId: tab.targetId,
@@ -1339,6 +1340,7 @@ class BrowserDaemon {
         suggestedTarget: label || targetPrefix,
         title: tab.title || "",
         url: tab.url || "",
+        requestedUrl: targetMeta?.requestedUrl || "",
         attached: Boolean(tab.attached),
         context: this.publicContext(),
       };
@@ -1450,6 +1452,7 @@ class BrowserDaemon {
         profileOwned: Boolean(meta.profileOwned),
         profile: meta.profile || this.context.profile?.id,
         source: meta.source || previous.source || "",
+        requestedUrl: meta.requestedUrl !== undefined ? meta.requestedUrl : previous.requestedUrl,
         updatedAt: new Date().toISOString(),
       };
       return current;
@@ -1777,10 +1780,11 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
           existingFromLabel = false;
         }
       }
+      const urlMatches = (tab) => sameUrl(tab.url, url) || (tab.requestedUrl && sameUrl(tab.requestedUrl, url));
       if (!existing && flags.reuse !== "none" && !this.isBrowserScopedProfileContext()) {
-        existing = tabs.find((tab) => sameUrl(tab.url, url)) || null;
+        existing = tabs.find(urlMatches) || null;
       } else if (!existing && flags.reuse !== "none" && this.isBrowserScopedProfileContext()) {
-        existing = tabs.find((tab) => sameUrl(tab.url, url) && this.profileTargetProven(tab)) || null;
+        existing = tabs.find((tab) => urlMatches(tab) && this.profileTargetProven(tab)) || null;
       }
       if (existing && !existingFromLabel && this.targetLeaseWouldConflict(existing, flags)) {
         existing = null;
@@ -1833,8 +1837,8 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
           if (targetId) {
             const restoreTarget = await this.findTabToRestore(visibleByWindow, targetId).catch(() => null);
             if (restoreTarget) await this.cdp.send("Target.activateTarget", { targetId: restoreTarget }).catch(() => {});
-            await this.setTargetMeta(targetId, { profileOwned: false, profile: this.context.profile.id, source: "browser-scope-cdp-create" });
-            if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: false, profile: this.context.profile.id, source: "browser-scope-cdp-create", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
+            await this.setTargetMeta(targetId, { profileOwned: true, profile: this.context.profile.id, source: "browser-scope-cdp-create", requestedUrl: url });
+            if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: true, profile: this.context.profile.id, source: "browser-scope-cdp-create", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
             else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "browser-scope-cdp-create");
             await this.attach(targetId);
             await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
@@ -1845,7 +1849,6 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
               target: tab,
               created: true,
               launch: "cdp-background",
-              warning: "browser-scoped CDP cannot prove profile ownership; tab created via CDP background",
               context: this.publicContext(),
             });
           }
@@ -1863,7 +1866,7 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
         if (restoreTarget) await this.cdp.send("Target.activateTarget", { targetId: restoreTarget }).catch(() => {});
       }
       await restoreForegroundAppAfterBackgroundLaunch(launch?.focusRestore, { delayMs: 50 }).catch(() => {});
-      await this.setTargetMeta(tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open" });
+      await this.setTargetMeta(tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open", requestedUrl: url });
       if (flags.label) await this.setLabel(flags.label, tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease), url: tab.url });
       else await this.claimTarget(tab, flags, "profile-open");
       await this.attach(tab.targetId);
@@ -1894,7 +1897,7 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
         if (restoreTarget) await this.cdp.send("Target.activateTarget", { targetId: restoreTarget }).catch(() => {});
       }
       const profileOwnedCreate = this.context.kind === "profile" && this.context.endpointScope === "profile";
-      if (profileOwnedCreate) await this.setTargetMeta(targetId, { profileOwned: true, profile: this.context.profile.id, source: "target-create" });
+      await this.setTargetMeta(targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create", requestedUrl: url });
       if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
       else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "target-create");
       await this.attach(targetId);
@@ -1926,6 +1929,7 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
     }
     assertNavigationUrl(url, flags.force);
     await this.sendToTarget(tab.targetId, "Page.navigate", { url }, flags.timeout || 30_000);
+    await this.setTargetMeta(tab.targetId, { profileOwned: this.profileTargetProven(tab), source: "navigate", requestedUrl: url });
     await waitForUrl(this, tab.targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
     await waitForReadyState(this, tab.targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
     const updated = await this.resolveTargetForOperation(tab.suggestedTarget, flags, "tab navigate");
