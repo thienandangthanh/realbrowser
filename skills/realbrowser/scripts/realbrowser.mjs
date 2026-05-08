@@ -1270,6 +1270,7 @@ class BrowserDaemon {
     });
   }
   async findActiveTab(tabs) {
+    if (!tabs.length) return null;
     for (const tab of tabs) {
       const sessionId = this.sessions.get(tab.targetId);
       if (!sessionId) continue;
@@ -1281,7 +1282,23 @@ class BrowserDaemon {
         if (res.result?.value === "visible") return tab.targetId;
       } catch {}
     }
-    return tabs[0]?.targetId || null;
+    const unattached = tabs.filter(t => !this.sessions.has(t.targetId)).slice(0, 10);
+    for (const tab of unattached) {
+      let sessionId;
+      try {
+        const att = await this.cdp.send("Target.attachToTarget", { targetId: tab.targetId, flatten: true }, undefined, 3000);
+        sessionId = att.sessionId;
+        const res = await this.cdp.send("Runtime.evaluate", {
+          expression: "document.visibilityState",
+          returnByValue: true,
+        }, sessionId, 2000);
+        await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => {});
+        if (res.result?.value === "visible") return tab.targetId;
+      } catch {
+        if (sessionId) await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => {});
+      }
+    }
+    return null;
   }
   async tabsRaw() {
     const { targetInfos } = await this.cdp.send("Target.getTargets", {}, undefined, DEFAULT_TIMEOUT);
@@ -1777,7 +1794,7 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
     }
     const previousActiveTab = !flags.front ? await this.findActiveTab(tabs).catch(() => null) : null;
     if (this.context.kind === "profile" && this.context.profile && this.context.endpointScope !== "profile") {
-      if (!flags.front && !flags.bestEffortBackground) {
+      if (!flags.front && !flags.bestEffortBackground && !flags.background) {
         throw new CliError(`cannot safely create a background tab in profile ${this.context.profile.id}`, {
           code: "profile_background_launch_guard",
           exitCode: 4,
@@ -1789,15 +1806,46 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
           ],
         });
       }
+      // Try CDP Target.createTarget first — no focus steal, true background.
+      // Fall back to launchProfileTab only if CDP creation fails.
+      if (!flags.front) {
+        try {
+          const created = await this.cdp.send("Target.createTarget", {
+            url,
+            background: true,
+          }, undefined, flags.timeout || 30_000);
+          const targetId = created.targetId;
+          if (targetId) {
+            if (previousActiveTab) await this.cdp.send("Target.activateTarget", { targetId: previousActiveTab }).catch(() => {});
+            await this.setTargetMeta(targetId, { profileOwned: false, profile: this.context.profile.id, source: "browser-scope-cdp-create" });
+            if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: false, profile: this.context.profile.id, source: "browser-scope-cdp-create", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
+            else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "browser-scope-cdp-create");
+            await this.attach(targetId);
+            await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
+            await waitForReadyState(this, targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
+            const tab = await this.resolveTarget(flags.label || targetId, { operation: `tab ${command}` });
+            return result({
+              text: `created ${tab.suggestedTarget} ${url}`,
+              target: tab,
+              created: true,
+              launch: "cdp-background",
+              warning: "browser-scoped CDP cannot prove profile ownership; tab created via CDP background",
+              context: this.publicContext(),
+            });
+          }
+        } catch (_cdpErr) {
+          // CDP create failed — fall through to launchProfileTab
+        }
+      }
       const beforeIds = new Set(tabs.map((tab) => tab.targetId));
       const launch = await this.launchProfileTab(url, { front: Boolean(flags.front) });
       const tab = await waitForOpenedTab(this, url, beforeIds, flags.timeout || 30_000, { requireFresh: true });
+      if (flags.front) await this.cdp.send("Target.activateTarget", { targetId: tab.targetId }).catch(() => {});
+      else if (previousActiveTab) await this.cdp.send("Target.activateTarget", { targetId: previousActiveTab }).catch(() => {});
       await restoreForegroundAppAfterBackgroundLaunch(launch?.focusRestore, { delayMs: 50 }).catch(() => {});
       await this.setTargetMeta(tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open" });
       if (flags.label) await this.setLabel(flags.label, tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease), url: tab.url });
       else await this.claimTarget(tab, flags, "profile-open");
-      if (flags.front) await this.cdp.send("Target.activateTarget", { targetId: tab.targetId }).catch(() => {});
-      else if (previousActiveTab) await this.cdp.send("Target.activateTarget", { targetId: previousActiveTab }).catch(() => {});
       await this.attach(tab.targetId);
       await waitForReadyState(this, tab.targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
       const updated = await this.resolveTarget(flags.label || tab.targetId, { operation: `tab ${command}` });
@@ -1818,12 +1866,12 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
       }, undefined, flags.timeout || 30_000);
       const targetId = created.targetId;
       if (!targetId) throw new Error("Target.createTarget returned no targetId");
+      if (flags.front) await this.cdp.send("Target.activateTarget", { targetId }).catch(() => {});
+      else if (previousActiveTab) await this.cdp.send("Target.activateTarget", { targetId: previousActiveTab }).catch(() => {});
       const profileOwnedCreate = this.context.kind === "profile" && this.context.endpointScope === "profile";
       if (profileOwnedCreate) await this.setTargetMeta(targetId, { profileOwned: true, profile: this.context.profile.id, source: "target-create" });
       if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
       else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "target-create");
-      if (flags.front) await this.cdp.send("Target.activateTarget", { targetId }).catch(() => {});
-      else if (previousActiveTab) await this.cdp.send("Target.activateTarget", { targetId: previousActiveTab }).catch(() => {});
       await this.attach(targetId);
       await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
       await waitForReadyState(this, targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
@@ -3521,13 +3569,27 @@ function viewportInfo(el) {
   const center = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   const centerInViewport = center.x >= 0 && center.x <= innerWidth && center.y >= 0 && center.y <= innerHeight;
   const hit = centerInViewport ? document.elementFromPoint(center.x, center.y) : null;
+  let topmost = Boolean(hit && (hit === el || el.contains(hit)));
+  if (!topmost && hit && hit.contains && hit.contains(el)) {
+    const floatingRoles = ["tooltip", "listbox", "menu", "menubar", "dialog", "alertdialog", "combobox", "tree"];
+    let ancestor = hit;
+    while (ancestor && ancestor !== document.body) {
+      const role = ancestor.getAttribute && ancestor.getAttribute("role");
+      const popover = ancestor.getAttribute && ancestor.getAttribute("popover");
+      const style = ancestor.nodeType === 1 ? getComputedStyle(ancestor) : null;
+      const isFloating = (role && floatingRoles.includes(role)) || popover != null ||
+        (style && (style.position === "fixed" || style.position === "absolute") && parseInt(style.zIndex, 10) > 0);
+      if (isFloating) { topmost = true; break; }
+      ancestor = ancestor.parentElement;
+    }
+  }
   return {
     inViewport: viewportArea > 0,
     centerInViewport,
     viewportArea,
     viewportRatio: viewportArea / elementArea,
     center,
-    topmost: Boolean(hit && (hit === el || el.contains(hit))),
+    topmost,
     hit,
   };
 }
@@ -3583,6 +3645,21 @@ function queryFunction(selector, opts = {}) {
     const style = getComputedStyle(el);
     const center = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
     const top = document.elementFromPoint(center.x, center.y);
+    let isTopmost = top === el || el.contains(top);
+    if (!isTopmost && top && top.contains && top.contains(el)) {
+      const floatingRoles = ["tooltip", "listbox", "menu", "menubar", "dialog", "alertdialog", "combobox", "tree"];
+      let anc = top;
+      while (anc && anc !== document.body) {
+        const aRole = anc.getAttribute && anc.getAttribute("role");
+        const aPop = anc.getAttribute && anc.getAttribute("popover");
+        const aStyle = anc.nodeType === 1 ? getComputedStyle(anc) : null;
+        if ((aRole && floatingRoles.includes(aRole)) || aPop != null ||
+          (aStyle && (aStyle.position === "fixed" || aStyle.position === "absolute") && parseInt(aStyle.zIndex, 10) > 0)) {
+          isTopmost = true; break;
+        }
+        anc = anc.parentElement;
+      }
+    }
     const text = (el.innerText || el.textContent || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
     const entry = {
       tag: el.tagName.toLowerCase(),
@@ -3593,7 +3670,7 @@ function queryFunction(selector, opts = {}) {
       visible: isVisibleInPage(el),
       enabled: !(el.disabled || el.getAttribute("aria-disabled") === "true"),
       pointerEnabled: style.pointerEvents !== "none",
-      topmost: top === el || el.contains(top),
+      topmost: isTopmost,
       rect: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) },
       htmlPreview: opts.maxHtmlChars ? el.outerHTML.slice(0, opts.maxHtmlChars) : undefined,
     };
@@ -3972,7 +4049,7 @@ function clickFunction(selector, opts = {}) {
       entry.enabled ? "" : "disabled",
       entry.pointerEnabled ? "" : "no-pointer",
       entry.inViewport ? "" : "out-viewport",
-      entry.topmost ? "" : "covered",
+      entry.topmost ? "" : (entry.coveredBy ? `covered-by:${entry.coveredBy}` : "covered"),
     ].filter(Boolean);
     return `${entry.ref || entry.tag}${entry.text ? `:${entry.text}` : ""}${flags.length ? ` (${flags.join(",")})` : ""}`;
   }).join("; ");
@@ -4000,9 +4077,21 @@ function clickFunction(selector, opts = {}) {
   const checked = checkedPairs.map((pair) => pair.entry);
   const visiblePairs = checkedPairs.filter((pair) => pair.entry.visible && pair.entry.enabled && pair.entry.pointerEnabled && pair.entry.inViewport && pair.entry.topmost);
   if (opts.final && visiblePairs.length !== 1) throw new Error(`Final action requires exactly one visible enabled topmost candidate; found ${visiblePairs.length}${checked.length ? `; candidates: ${formatCandidates(checked)}` : ""}`);
-  if (visiblePairs.length < 1) throw new Error(`No visible enabled topmost click candidate${checked.length ? `; candidates: ${formatCandidates(checked)}` : ""}`);
-  if (visiblePairs.length > 1 && opts.text) throw new Error(`Ambiguous click candidate; found ${visiblePairs.length}`);
-  const chosen = visiblePairs[0];
+  let chosen;
+  if (visiblePairs.length < 1) {
+    const interactablePairs = checkedPairs.filter((pair) => pair.entry.visible && pair.entry.enabled && pair.entry.pointerEnabled && pair.entry.inViewport);
+    if (interactablePairs.length >= 1) {
+      chosen = interactablePairs[0];
+      chosen.el.click();
+      chosen.entry.clickMethod = "synthetic";
+      chosen.entry.warning = `topmost check failed (${chosen.entry.coveredBy || "covered"}); used synthetic el.click()`;
+    } else {
+      throw new Error(`No visible enabled click candidate${checked.length ? `; candidates: ${formatCandidates(checked)}` : ""}`);
+    }
+  } else {
+    if (visiblePairs.length > 1 && opts.text) throw new Error(`Ambiguous click candidate; found ${visiblePairs.length}`);
+    chosen = visiblePairs[0];
+  }
   const fileDialogReason = fileDialogTriggerReason(chosen.el);
   if (fileDialogReason && !opts.allowFileDialog) {
     throw new Error(`Ref ${chosen.entry.ref || chosen.entry.text || chosen.entry.tag} targets a file input path (${fileDialogReason}); use action upload --trigger-ref <ref> <file> or pass --allow-file-dialog`);
@@ -4011,11 +4100,24 @@ function clickFunction(selector, opts = {}) {
 }
 
 function preflightElement(el, opts = {}) {
-  if (opts.scroll !== false) el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+  if (opts.scroll !== false) {
+    const pre = el.getBoundingClientRect();
+    const cx = pre.left + pre.width / 2;
+    const cy = pre.top + pre.height / 2;
+    const alreadyInView = pre.width > 0 && pre.height > 0 && cx >= 0 && cx <= innerWidth && cy >= 0 && cy <= innerHeight;
+    if (!alreadyInView) el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+  }
   const r = el.getBoundingClientRect();
   const viewport = viewportInfo(el);
   const style = getComputedStyle(el);
   const text = (el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().slice(0, 160);
+  const hitDesc = (!viewport.topmost && viewport.hit) ? (() => {
+    const h = viewport.hit;
+    const hTag = h.tagName ? h.tagName.toLowerCase() : "?";
+    const hRole = h.getAttribute ? (h.getAttribute("role") || "") : "";
+    const hClass = h.className ? String(h.className).split(/\s+/).slice(0, 2).join(".") : "";
+    return `${hTag}${hRole ? `[role=${hRole}]` : ""}${hClass ? `.${hClass}` : ""}`;
+  })() : undefined;
   return {
     ref: el.getAttribute("data-realbrowser-ref") || undefined,
     tag: el.tagName.toLowerCase(),
@@ -4027,6 +4129,7 @@ function preflightElement(el, opts = {}) {
     pointerEnabled: style.pointerEvents !== "none",
     inViewport: viewport.inViewport,
     topmost: viewport.topmost,
+    coveredBy: hitDesc,
   };
 }
 
@@ -5107,7 +5210,7 @@ async function dispatchMouseClick(daemon, targetId, x, y) {
 async function callAndDispatchMouseClickWithFileChooserGuard(daemon, targetId, selector, options = {}, opts = {}) {
   if (opts.allowFileDialog) {
     const payload = await daemon.callFunction(targetId, clickFunction, [selector, { ...options, allowFileDialog: true }], { timeoutMs: opts.timeoutMs || DEFAULT_TIMEOUT });
-    await dispatchMouseClick(daemon, targetId, payload.center.x, payload.center.y);
+    if (payload.clickMethod !== "synthetic") await dispatchMouseClick(daemon, targetId, payload.center.x, payload.center.y);
     return payload;
   }
   const sessionId = await daemon.attach(targetId);
@@ -5126,7 +5229,7 @@ async function callAndDispatchMouseClickWithFileChooserGuard(daemon, targetId, s
       selector,
       { ...options, allowFileDialog: true, fileDialogIntent: true },
     ], { timeoutMs: opts.timeoutMs || DEFAULT_TIMEOUT });
-    await dispatchMouseClick(daemon, targetId, payload.center.x, payload.center.y);
+    if (payload.clickMethod !== "synthetic") await dispatchMouseClick(daemon, targetId, payload.center.x, payload.center.y);
     const chooser = await chooserPromise.catch(() => null);
     if (chooser?.params) {
       const target = payload.ref || opts.ref || payload.text || payload.tag || "target";
