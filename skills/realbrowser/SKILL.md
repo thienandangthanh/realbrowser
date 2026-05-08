@@ -136,7 +136,7 @@ Read-only commands can still inspect the target after it is explicitly selected.
    `read query` is only for a CSS selector you have already seen verbatim,
    accepts CSS only (no `:has-text()` / `:text()` Playwright syntax — use
    `--text-filter '<text>'` instead). Use `read items`/`read item` for feeds
-   or repeated rows. Use `read text --out FILE` + `rg` for bulk text
+   or repeated rows. Use `read text --out FILE` + file search for bulk text
    extraction (free of model tokens). Use `wait ready --visual-stable`
    instead of `sleep N && screenshot capture` for readiness checks.
 7. For forms/uploads/submits, run `action state -t <label> --root active`, adding
@@ -191,6 +191,25 @@ These are hard rules, not suggestions. Violating them is a failure mode
 equivalent to producing wrong output. A typical read-only task (check prices,
 extract listings, inspect a page) should complete in under 2 minutes and fewer
 than 10 commands.
+
+**Shell portability:** examples below use POSIX shell syntax (`grep`, `sleep`,
+`head`, `wc`) which works on macOS, Linux, WSL, and Git Bash on Windows.
+Native Windows PowerShell substitutes:
+
+| POSIX | PowerShell | Notes |
+|---|---|---|
+| `grep -E "x" FILE` | `sls -Pattern "x" FILE` | `sls` = `Select-String` |
+| `grep -c "x" FILE` | `(sls "x" FILE).Count` | count matches |
+| `head -50 FILE` | `gc FILE -Head 50` | `gc` = `Get-Content` |
+| `wc -l FILE` | `(gc FILE).Count` | line count |
+| `sleep 1` | `Start-Sleep 1` | (but prefer `wait ready`) |
+| `cat FILE` | `gc FILE` |  |
+| `rg "x" FILE` | `sls -Pattern "x" FILE` | ripgrep is third-party |
+| `jq '.x' FILE.json` | `gc FILE.json \| ConvertFrom-Json \| % x` | jq is third-party |
+
+`node -e "<js>"` is a portable last resort — Node is required to run
+`realbrowser`, so it's available wherever the CLI runs. Use it for one-off
+parsing that exceeds shell ergonomics on any platform.
 
 ### Read before acting: the tree is data, not a checklist
 
@@ -254,26 +273,32 @@ refs from that output directly.
 ### If it's on disk, search the file — don't ask the browser again
 
 Once any reader has written page content to disk via `--out`, the next search
-MUST be on the file (`grep`, `rg`, `jq`, `awk`), never another browser
-round-trip. This rule is universal — flights, products, articles,
-dashboards, social feeds, internal apps — any reader that produces a file:
+MUST be on the file using whatever search tool your shell provides, never
+another browser round-trip. This rule is universal — flights, products,
+articles, dashboards, social feeds, internal apps — any reader that produces
+a file:
 
-| Captured to disk | Search with | Don't run |
+| Captured to disk | Search with (POSIX / PowerShell) | Don't run |
 |---|---|---|
-| `read tree --out FILE` | `grep -nE "<label\|role>" FILE` | `read query --text-filter '...'` |
-| `read text --out FILE` | `rg "..." FILE` or `grep -n` | another `read text` |
-| `read html --out FILE` | `grep`/`pup`/`htmlq` on FILE | another `read html` |
-| `read items --out FILE` | `grep -n` (or `jq` if `--json`) | another `read items` |
+| `read tree --out FILE` | `grep -nE 'pat' FILE` / `sls -Pattern 'pat' FILE` | `read query --text-filter '...'` |
+| `read text --out FILE` | `grep -n 'pat' FILE` / `sls 'pat' FILE` | another `read text` |
+| `read html --out FILE` | `grep 'pat' FILE` / `sls 'pat' FILE` | another `read html` |
+| `read items --out FILE` | `grep -n 'pat' FILE` / `sls 'pat' FILE` | another `read items` |
+| any `--json --out FILE` | `node -e "JSON.parse(require('fs').readFileSync('FILE')).filter(...)"` | another reader |
 
 **Why:** `read query --text-filter` is a CDP round-trip that re-evaluates the
 page (~1-3 sec) and may return nothing if the label is in a different element
 type than you guessed. The text was already captured to a file; labels are
-exact strings; `grep` finishes in milliseconds.
+exact strings; a local search finishes in milliseconds.
 
 **Banned anti-pattern:** capture a tree/text to disk, then run 3+
 `read query --text-filter` calls hunting for a label that is already in the
 file. The first failed `read query` on captured content means the next step
-is `grep FILE`, not another `read query` with a different selector.
+is a file search, not another `read query` with a different selector.
+
+`rg` (ripgrep), `jq`, `pup`, `htmlq` are convenient but not universally
+installed — fall back to `grep`/`sls`/`node -e` rather than asking the user
+to install tools.
 
 ### Don't sleep — wait for the page
 
@@ -313,7 +338,7 @@ static pages, dashboards, e-commerce, news, docs, social, internal apps:
 | Task | First reader | Then |
 |---|---|---|
 | Interact (click, fill, submit, navigate) | `read tree -i -c` | `read tree -i -c -D` after each action |
-| Bulk text content (article, docs, FAQ, terms) | `read text --out FILE` + `rg` | none — file is searchable |
+| Bulk text content (article, docs, FAQ, terms) | `read text --out FILE` + file search | none — file is searchable |
 | Repeated rows (feed, table, search results, listings) | `read items` or `read tree -i -c` | `read item --index N` for one row |
 | Visual check (layout, image, canvas, color) | `screenshot capture` | none — pixels are the answer |
 | "What page am I on?" / load check | `read observe` | proceed to task-specific reader |
@@ -353,7 +378,7 @@ Rare cases where `read tree -i -c` alone is insufficient:
 - Element has no ARIA role/name and is not in the interactive set —
   `read tree -c` (drop `-i`) or `read snapshot --selector <css>` for DOM.
 - You need text content from non-interactive nodes (article body, table cells)
-  and the tree's labels do not include it — `read text --out FILE` + `rg`.
+  and the tree's labels do not include it — `read text --out FILE` + file search.
 - You need raw HTML structure (data attributes, custom elements, source view)
   — `read html --out FILE` for offline grep.
 - You need to extract many similar rows from a feed/list with consistent
@@ -366,7 +391,7 @@ Rare cases where `read tree -i -c` alone is insufficient:
 | `read tree -i -c` | 300–2,000 | yes | **Default for interaction** |
 | `read tree -i -c -D` | 0–200 | yes (delta) | **Verify after action** |
 | `read tree -i -c --selector main` | 100–500 | yes | Scope to a landmark |
-| `read text --out FILE` then `rg` | ~0 (file) | no | Bulk text extraction |
+| `read text --out FILE` then `grep`/`sls` | ~0 (file) | no | Bulk text extraction |
 | `read items / read item` | 200–2,000 | yes | Feeds, lists, repeated rows |
 | `read query <css>` | 50–500 | yes | One known CSS selector |
 | `read snapshot --selector <css>` | 5,000–50,000 | yes | Tree inadequate (rare) |
@@ -492,7 +517,8 @@ results, product listings, tables):
 
 - One `read tree -i -c` captures **all** interactive elements including those
   below the fold — labels, values, refs, everything.
-- Use `--out /tmp/data.txt` for pages with 50+ elements to avoid flooding
+- Use `--out tmp/data.txt` (or any writable path) for pages with 50+ elements
+  to avoid flooding
   context with tokens.
 - **Never** scroll + screenshot in a loop to read data that `read tree` already
   returned. If you have the data from a tree read, use it — do not screenshot
@@ -503,7 +529,7 @@ results, product listings, tables):
 screenshot → scroll down → screenshot → scroll down → screenshot → ...
 
 # GOOD: 1 command, ~2 seconds
-"$REALBROWSER" read tree -t app -i -c --out /tmp/results.txt
+"$REALBROWSER" read tree -t app -i -c --out tmp/results.txt
 ```
 
 Screenshots are for **visual verification** (did the modal open? is the layout
@@ -577,12 +603,14 @@ For multi-step flows (booking, checkout, wizards):
    choosing a fare class just to see the next page), pick the first available
    option by ref and move on.
 
-### Never pipe tree output through head/tail
+### Never truncate tree output
 
-`read tree` returns the full interactive element set. Piping through
-`| head -60` or `| tail` discards elements you need. If the output is too
-large for context, use `--out /tmp/tree.txt` and read the file, or scope with
-`--selector <css>`. Never truncate tree output with shell pipes.
+`read tree` returns the full interactive element set. Truncating it discards
+elements you need — applies equally to POSIX (`| head -60`, `| tail -30`)
+and PowerShell (`| Select-Object -First 60`, `gc -Head 60`). If the output
+is too large for context, write it with `--out tmp/tree.txt` and read the
+file, or scope the read at the source with `--selector <css>` /
+`--depth N` / `--limit N`. Never truncate tree output downstream.
 
 ## No Repeated Allow Prompts
 

@@ -207,8 +207,8 @@ Graduated reader hierarchy:
    isn't enough)
 5. `read query <css>` — only for a CSS selector you've already seen verbatim
 6. `read snapshot --selector <css>` — DOM structure when ARIA tree is inadequate
-7. `read text --out FILE` + `rg` — bulk text extraction (zero model tokens)
-8. `read html --out FILE` — offline HTML grep (zero model tokens)
+7. `read text --out FILE` + file search (`grep`/`sls`) — bulk text extraction
+8. `read html --out FILE` — offline HTML search (zero model tokens)
 
 ```bash
 realbrowser read tree -t app -i -c
@@ -366,8 +366,9 @@ Capture network before reload/action when response bodies matter.
 
 Use `daemon monitor --json` when debugging CDP health, stale daemons, or buffer
 growth. Use `network export --out` or `network body --out --full` when the
-response is too large for stdout and should be inspected with `jq`, `rg`, or an
-editor.
+response is too large for stdout and should be inspected with the search tool
+your shell provides (`grep`/`jq`/`rg` on POSIX shells, `Select-String` /
+`ConvertFrom-Json` on PowerShell, or `node -e` anywhere) or an editor.
 
 Use `network capture --include-body --out tmp/network.json` only for explicit
 debug sessions; body capture requires `--out` unless `--force` is explicit.
