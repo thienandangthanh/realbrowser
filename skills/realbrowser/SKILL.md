@@ -510,30 +510,73 @@ Before the first interaction, spend one `read tree -i -c` to map the page:
 what controls exist, what needs filling, what the multi-step flow looks like.
 Do not discover the page structure one click at a time.
 
-### Data extraction: one tree read, not scroll+screenshot
+### Data extraction: one read, never scroll+screenshot in a loop
 
 When the goal is extracting structured data (prices, flight schedules, search
-results, product listings, tables):
+results, product listings, tables) — the data lives below the fold and on
+some sites loads lazily as you scroll:
 
-- One `read tree -i -c` captures **all** interactive elements including those
-  below the fold — labels, values, refs, everything.
-- Use `--out tmp/data.txt` (or any writable path) for pages with 50+ elements
-  to avoid flooding
-  context with tokens.
-- **Never** scroll + screenshot in a loop to read data that `read tree` already
-  returned. If you have the data from a tree read, use it — do not screenshot
-  the same information.
+- One `read tree -i -c` captures **all** interactive elements regardless of
+  fold position — labels, values, refs, everything. CDP reads the full DOM,
+  not just the rendered viewport.
+- One `read text --selector main --out tmp/data.txt` captures all text in
+  one shot, free of model tokens — `grep`/`sls` it for prices, times, names.
+- Use `--out` for pages with 50+ elements to avoid flooding context.
+- **Never** scroll + screenshot in a loop to read data. If a tree/text read
+  returned it, use it. Screenshots are 5-20× more expensive per byte and
+  misread small digits.
 
 ```bash
-# BAD: 13 commands, ~10 minutes
-screenshot → scroll down → screenshot → scroll down → screenshot → ...
+# BAD: 13 commands, ~10 minutes — scroll-and-screenshot loop
+screenshot capture → scroll → screenshot → scroll → screenshot → ...
 
-# GOOD: 1 command, ~2 seconds
-"$REALBROWSER" read tree -t app -i -c --out tmp/results.txt
+# GOOD: 2 commands, ~3 seconds — one bulk text capture, then local search
+"$REALBROWSER" read text -t app --selector main --out tmp/results.txt
+grep -E "from|VN [0-9]|[0-9]{2}:[0-9]{2}" tmp/results.txt   # POSIX
+sls -Pattern "from|VN \d|\d{2}:\d{2}" tmp/results.txt       # PowerShell
 ```
 
-Screenshots are for **visual verification** (did the modal open? is the layout
-correct?), not for reading text or prices off the screen.
+### Lazy-loaded content (infinite scroll, virtualized lists)
+
+A small subset of sites only render rows into the DOM as you scroll past
+them (virtualized lists, infinite-scroll feeds). For these, `read tree` /
+`read text` only see the rendered subset. Symptoms: tree shows 5 results
+when the page advertises 30; `read text` text contains "Showing 1-5 of 30".
+
+When you confirm virtualization (not just below-the-fold-but-rendered):
+- Issue 2-3 progressively-deeper scrolls (`action scroll down 2000`),
+  re-reading text or tree once after the last scroll — not after each.
+- Or, if the URL supports a `?page=N` / `?limit=100` query, prefer
+  `tab navigate` to a deeper page over scroll.
+- Cap at 3 scrolls. If results still incomplete, report what you have —
+  do not loop indefinitely.
+
+Most sites are NOT virtualized. Try one tree read first; if it shows the
+expected number of items, scrolling is unnecessary.
+
+### Visual verification: one full screenshot, never a viewport loop
+
+Screenshots are for visual decisions (modal opened, image rendered, layout
+correct, error toast visible). When a visual decision needs the **whole long
+page** (a results page, a long form, a confirmation receipt that scrolls
+beyond the viewport):
+
+- **Right tool:** `screenshot full` — one call, captures the entire scrollable
+  page in a single image (~2-4k image tokens).
+- **Wrong tool:** `screenshot capture` + `action scroll` + `screenshot
+  capture` + ... — N viewport shots cost N× ~600 tokens (often more than
+  one full shot) plus N× round-trip latency, and gives a fragmented view.
+
+`screenshot full` is the right answer when you need ONE picture of a long
+page. It is the wrong answer for reading text or prices off the page —
+that's `read text --out FILE` + grep, every time.
+
+| Goal | Tool |
+|---|---|
+| "What does the whole results page look like?" | `screenshot full` (one shot) |
+| "Did the modal open?" / "Is the spinner gone?" | `screenshot capture` (viewport) |
+| "What flights are listed?" | `read text --selector main --out` + grep |
+| "What buttons exist on the long form?" | `read tree -i -c --out` + grep |
 
 ### Dropdowns, pickers, and autocomplete: type-first
 
@@ -560,9 +603,42 @@ After each action:
 "$REALBROWSER" read tree -t app -i -c --diff
 ```
 
-This returns only what changed — typically 2-5 lines. Reserve screenshot
-verification for visual-only state (image previews, canvas, layout shifts)
-and for final evidence the user explicitly asked for.
+This returns only what changed — typically 2-5 lines (~50 tokens). Each
+screenshot capture costs ~600 image tokens — 12× more — and the model still
+has to interpret pixels. Use `--diff` as the default verify step.
+
+Screenshot verification is for **visual-only state** (modal opened, spinner
+gone, image rendered, layout shift, canvas/chart drew correctly) — things a
+text tree cannot represent. **Anti-pattern:** taking a `screenshot capture`
+after every click "to confirm it worked" — `read tree --diff` already tells
+you whether the click changed the DOM, in 5% of the tokens.
+
+### After-submit waits: one wait, never sleep + wait + sleep + sleep
+
+Submitting a search, login, or navigation that triggers a network round-trip:
+
+```bash
+# RIGHT — one wait, returns as soon as the page settles
+"$REALBROWSER" action click <submit-ref>
+"$REALBROWSER" wait ready -t app --visual-stable --timeout 30000
+"$REALBROWSER" read tree -t app -i -c --diff      # verify the new state
+```
+
+```bash
+# WRONG — stacked sleeps + wait + more sleeps; agent waits 25-60 sec for a
+# page that probably settled in 3 sec
+"$REALBROWSER" action click <submit-ref>
+sleep 8
+"$REALBROWSER" wait ready -t app --visual-stable --timeout 30000
+sleep 15                  # ← this never helps; wait already returned
+"$REALBROWSER" tab focus -t app --front      # ← undoes background mode
+```
+
+`wait ready --visual-stable` already waits for network + DOM stability up to
+its timeout. Adding `sleep` before or after it is dead time. Do not chain
+`tab focus --front` to "make the page work" — the page works in the
+background; visual focus is a user-experience concern, not a correctness
+concern.
 
 ### Failure budget
 
