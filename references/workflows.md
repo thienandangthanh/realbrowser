@@ -68,7 +68,7 @@ realbrowser read observe -t ninzap
 realbrowser session clear
 ```
 
-In multi-Codex workflows, keep each project/session in its own owner namespace:
+In multi-agent workflows (Codex, Claude Code, or other CLIs), keep each project/session in its own owner namespace:
 
 ```bash
 export REALBROWSER_OWNER=ninzap
@@ -76,7 +76,7 @@ realbrowser session use profile:chrome:Default
 realbrowser tab ensure http://localhost:3000 --profile chrome:Default --label app --background
 ```
 
-Labels, default context, and target leases are owner-aware. If one Codex session
+Labels, default context, and target leases are owner-aware. If one agent session
 has leased a tab, another session should create/select its own target instead of
 mutating that tab. Use `--take-lease` only when the user intentionally wants the
 second session to take over the target.

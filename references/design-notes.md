@@ -32,10 +32,10 @@ Long-term invariants:
 - `tab navigate` requires a target and never falls back to selected/first tab.
 - `session use` sets only the default context; it never implies a selected tab.
 - Default context and labels are owner-scoped. Owner comes from
-  `--owner`/`REALBROWSER_OWNER`, then Codex/terminal session environment, then the
-  project path fallback. This keeps parallel Codex sessions from reusing labels
-  such as `app` or `page` by accident.
-- Element refs are also owner-scoped. A read-only query in one Codex session must
+  `--owner`/`REALBROWSER_OWNER`, then Codex/Claude Code/terminal session environment,
+  then the project path fallback. This keeps parallel agent sessions from reusing
+  labels such as `app` or `page` by accident.
+- Element refs are also owner-scoped. A read-only query in one agent session must
   not replace the `b1`/`e1` ref table another session is about to use for a
   guarded action.
 - Mutating commands must honor target leases. A tab can be inspected by explicit

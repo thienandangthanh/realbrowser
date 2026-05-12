@@ -12,7 +12,7 @@ Global flags:
 -t, --target <label|targetId|prefix>   Target for reads/actions
 --handle <name|path>                   Saved target handle
 --context <id>                         profile:..., anonymous:..., session:..., endpoint:...
---owner <id>                           Scope labels/defaults/leases to a Codex run or project
+--owner <id>                           Scope labels/defaults/leases to an agent session (Codex, Claude Code) or project
 --global                               Use the shared global owner namespace intentionally
 -p, --profile <profile>                Browser profile, e.g. chrome:Default
 --anonymous --session <name>           Isolated managed browser context
@@ -122,7 +122,7 @@ Important command semantics:
   in browser-scoped profile contexts, reuse is limited to tabs proven to have
   been created through that named profile.
 - Labels, default context, and element refs are scoped by owner. Use
-  `--owner <id>` or `REALBROWSER_OWNER=<id>` when several Codex sessions are open
+  `--owner <id>` or `REALBROWSER_OWNER=<id>` when several agent sessions are open
   and should not share labels such as `app` or overwrite each other's `b1`/`e1`
   action refs.
 - Mutating commands claim/check a target lease. If a target is leased by another
