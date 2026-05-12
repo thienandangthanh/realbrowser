@@ -6608,6 +6608,21 @@ async function runSelfTest() {
   assert(substituted[2] === "https://example.com" && substituted[4] === "ex" && substituted[5] === "file.png", "chain variable substitution");
   const profiles = await listProfiles().catch(() => []);
   assert(Array.isArray(profiles), "profile list returns array");
+  // Claude env-var owner resolution
+  {
+    const saved = {};
+    const ownerKeys = ["REALBROWSER_OWNER","CODEX_THREAD_ID","CODEX_SESSION_ID","CODEX_SESSION","OPENAI_SESSION_ID","CLAUDE_SESSION_ID","TERM_SESSION_ID","ITERM_SESSION_ID"];
+    for (const k of ownerKeys) { saved[k] = process.env[k]; delete process.env[k]; }
+    process.env.CLAUDE_SESSION_ID = "claude-st-1";
+    const claudeParsed = parseCli(["tab", "ensure", "https://example.com", "--anonymous", "--session", "st"]);
+    const claudeCtx = await resolveContext({ ...claudeParsed.flags }, claudeParsed);
+    assert(claudeCtx.owner === "claude-st-1", "CLAUDE_SESSION_ID flows to owner");
+    delete process.env.CLAUDE_SESSION_ID;
+    const noParsed = parseCli(["tab", "ensure", "https://example.com", "--anonymous", "--session", "st"]);
+    const noCtx = await resolveContext({ ...noParsed.flags }, noParsed);
+    assert(typeof noCtx.owner === "string" && noCtx.owner.length > 0, "fallback owner is non-empty without env vars");
+    for (const k of ownerKeys) { if (saved[k] !== undefined) process.env[k] = saved[k]; }
+  }
   stdout("realbrowser self-test passed\n");
 }
 
