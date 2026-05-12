@@ -1,7 +1,8 @@
 # Realbrowser
 
-Realbrowser is a Codex skill and small local CLI for fast target-first browser
-automation against Chrome/Chromium. It is built for the cases where the useful
+Realbrowser is a skill compatible with Codex and Claude Code (and any CDP-friendly
+agent), plus a small local CLI for fast target-first browser automation against
+Chrome/Chromium. It is built for the cases where the useful
 state is in the browser the developer is already using: signed-in profiles,
 cookies, local storage, active tabs, console logs, network traffic, downloads,
 and local app state.
@@ -18,7 +19,7 @@ downloads, and exports.
 
 ## What It Provides
 
-- A Codex skill named `realbrowser`.
+- A skill named `realbrowser`, compatible with Codex and Claude Code.
 - A zero-dependency Node CLI at `scripts/realbrowser.mjs`.
 - Portable wrappers:
   - `scripts/realbrowser` for macOS/Linux shells.
@@ -26,8 +27,8 @@ downloads, and exports.
   - `scripts/realbrowser.cmd` for Windows `cmd.exe`.
 - Signed-in profile attach through Chrome/Chromium DevTools endpoints.
 - Anonymous managed sessions for clean browser state.
-- Stable labeled tab targets, scoped per owner/Codex session.
-- Target leases for mutating commands so parallel Codex sessions do not
+- Stable labeled tab targets, scoped per owner/agent session.
+- Target leases for mutating commands so parallel agent sessions do not
   accidentally navigate, close, or click each other's tabs.
 - Compact page reads, structured item extraction, screenshots, console logs,
   network request/response capture, uploads, guarded submits, downloads, and PDF
@@ -45,14 +46,20 @@ downloads, and exports.
 macOS/Linux:
 
 ```bash
+# Codex
 REALBROWSER="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
+# Claude Code
+REALBROWSER="$HOME/.claude/skills/realbrowser/scripts/realbrowser"
 "$REALBROWSER" help
 ```
 
 Windows PowerShell:
 
 ```powershell
+# Codex
 $Realbrowser = Join-Path $HOME ".codex\skills\realbrowser\scripts\realbrowser.ps1"
+# Claude Code
+$Realbrowser = Join-Path $HOME ".claude\skills\realbrowser\scripts\realbrowser.ps1"
 & $Realbrowser help
 ```
 
@@ -70,7 +77,7 @@ Run the built-in checks:
 
 ## Common Flows
 
-Parallel Codex sessions:
+Parallel agent sessions (Codex / Claude Code):
 
 ```bash
 export REALBROWSER_OWNER=my-project
@@ -80,8 +87,8 @@ export REALBROWSER_OWNER=my-project
 ```
 
 `REALBROWSER_OWNER` or `--owner <id>` scopes labels and default context. Without
-an explicit owner, Realbrowser uses the current Codex/terminal session when one is
-available, falling back to the project path. Mutating commands claim a target
+an explicit owner, Realbrowser uses the current Codex/Claude Code/terminal session
+when one is available, falling back to the project path. Mutating commands claim a target
 lease; if another owner already owns that tab, rerun with `--take-lease` only when
 you intentionally want to take it over. `tab ensure` creates a fresh tab instead
 of reusing another owner's URL match.
