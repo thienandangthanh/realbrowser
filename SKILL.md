@@ -22,13 +22,19 @@ scoped read proves it is correct for the current page.
 macOS/Linux:
 
 ```bash
+# Codex
 REALBROWSER="$HOME/.codex/skills/realbrowser/scripts/realbrowser"
+# Claude Code
+REALBROWSER="$HOME/.claude/skills/realbrowser/scripts/realbrowser"
 ```
 
 Windows PowerShell:
 
 ```powershell
+# Codex
 $Realbrowser = Join-Path $HOME ".codex\skills\realbrowser\scripts\realbrowser.ps1"
+# Claude Code
+$Realbrowser = Join-Path $HOME ".claude\skills\realbrowser\scripts\realbrowser.ps1"
 ```
 
 Anonymous page:
@@ -84,9 +90,9 @@ For repeated work, set a default context without dropping target safety:
 "$REALBROWSER" session clear
 ```
 
-Default contexts, labels, and element refs are owner-scoped. When multiple Codex
-sessions are open, set a stable owner for the project/session if the environment
-does not already provide one:
+Default contexts, labels, and element refs are owner-scoped. When multiple agent
+sessions are open (Codex, Claude Code, or other CLIs), set a stable owner for the
+project/session if the environment does not already provide one:
 
 ```bash
 export REALBROWSER_OWNER=my-project
