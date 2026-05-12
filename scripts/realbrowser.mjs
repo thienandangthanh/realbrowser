@@ -1455,7 +1455,7 @@ class BrowserDaemon {
       next: [
         `current owner: ${this.owner()}`,
         "rerun with --take-lease only when intentionally taking this tab",
-        "use --owner <id> or REALBROWSER_OWNER=<id> to keep related Codex sessions in the same namespace",
+        "use --owner <id> or REALBROWSER_OWNER=<id> to keep related agent sessions in the same namespace",
         "use realbrowser tab list --json to inspect target leases",
       ],
     });
@@ -6192,7 +6192,7 @@ Common:
   realbrowser export pdf -t app tmp/page.pdf --print-background
 
 Global flags:
-  --owner <id> scopes labels, default context, and leases to a Codex/project owner
+  --owner <id> scopes labels, default context, and leases to an agent session or project owner
   --take-lease intentionally takes a target leased by another owner
   --global uses the shared global owner namespace intentionally
 
