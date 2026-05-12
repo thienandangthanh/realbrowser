@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.3.0 - 2026-05-12
+
+This release adds first-class Claude Code support alongside existing Codex support.
+
+Added:
+
+- Dual install paths documented for Codex (`$HOME/.codex/skills/realbrowser`) and
+  Claude Code (`$HOME/.claude/skills/realbrowser`) in `SKILL.md` and `README.md`.
+- `scripts/install-claude.sh` to symlink or copy the repo into
+  `~/.claude/skills/realbrowser`.
+- `agents/claude.md` manifest mirroring `agents/openai.yaml` for Claude Code.
+- Self-test assertion that `CLAUDE_SESSION_ID` flows through owner resolution
+  (verifies the `OWNER_ENV_KEYS` coverage added in 0.2.1).
+
+Changed:
+
+- Doc prose is now vendor-neutral: "agent sessions" instead of "Codex sessions" in
+  `SKILL.md`, `README.md`, `references/workflows.md`, `references/design-notes.md`,
+  `references/commands.md`, and CLI help strings.
+- CLI help now reads "agent sessions" instead of "Codex sessions" for `--owner` flag
+  and target lease conflict messages.
+
+Validation:
+
+- `node --check scripts/realbrowser.mjs`
+- `./scripts/realbrowser --version` (expects `0.3.0`)
+- `./scripts/realbrowser self-test`
+- `bash scripts/install-claude.sh` (then again for idempotency)
+- `test -f agents/claude.md`
+- Anonymous Brave smoke: `BROWSER=brave-browser ./scripts/realbrowser tab ensure https://example.com --anonymous --session smoke --label page --background` → `read observe` → `screenshot capture /tmp/rb-smoke.png` → `daemon stop`
+
 ## 0.2.1 - 2026-05-07
 
 This release hardens `0.2.0` for parallel Codex sessions and lower-approval
