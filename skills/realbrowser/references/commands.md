@@ -21,7 +21,7 @@ Global flags:
 --out, -o <path>                       Write large output/artifact
 --values                               Include normally redacted values
 --background                           Safe no-focus creation only
---best-effort-background               Explicit opt-in to profile launch focus risk
+--best-effort-background               Allow stopped-profile launch focus risk
 --front                                Explicit foreground handoff
 --incognito, --private                 Visual Chrome Incognito UI for anonymous sessions
 --allow-browser-scope-target           Explicit opt-in to cross-profile target risk
@@ -62,6 +62,8 @@ Profile scope:
   preferred over HTTP `/json/version`; stale port files are probed and ignored.
   This command is passive and must not open CDP WebSockets or trigger Chrome's
   Allow debugging prompt.
+- The `PROFILE_ID` column is the selector to pass to `--profile`, for example
+  `chrome:Default`.
 - `profile` scope means the endpoint was discovered inside that profile
   directory.
 - `browser` scope means the root browser endpoint is available. It is valid for
@@ -75,20 +77,19 @@ Profile scope:
   `--allow-browser-scope-target` or `--browser-url` only for intentional
   browser-wide debugging.
 - For `tab ensure/new --profile ...`, browser-scoped CDP can inspect explicit
-  targets but cannot prove profile-specific background creation. The command
-  reuses only proven profile-owned labels/URLs. If no proven target exists, it
-  fails unless the user explicitly accepts OS launch focus risk with
-  `--best-effort-background` or `--front`.
-- On macOS, `--best-effort-background` captures the currently active app before
-  profile launch and restores it after the new target appears. This is the
-  default mitigation for Chrome self-activation; `--front` is the explicit
-  foreground handoff.
+  targets but cannot by itself prove profile-specific background creation. The
+  command reuses only proven profile-owned labels/URLs. If no proven target
+  exists, it uses verified background probes or fails with recovery hints.
+- `--front` is the explicit foreground handoff. `--best-effort-background`
+  allows stopped-profile launch risk, but it must not OS-launch an
+  already-running browser-scoped profile.
 - If the profile is already running without a direct WebSocket endpoint, creation
   fails fast with an approval/recovery hint instead of trying to control the
   wrong browser.
 - `--best-effort-background` can launch a stopped profile with accepted focus
   risk. It cannot retrofit DevTools onto an already-running non-debuggable
-  browser process.
+  browser process or force an already-running browser-scoped profile to open in
+  the background.
 - `profile relaunch <profile> --confirm` is the last-resort approval-gated
   recovery for signed-in tasks blocked by a locked non-debuggable profile. It
   quits the browser app for that user data directory, then starts it with remote

@@ -34,7 +34,7 @@ realbrowser tab list --profile chrome:Default              # everything, with mi
 `tab ensure` is now origin-deduped:
 
 ```bash
-realbrowser tab ensure https://www.example.com/ --label app --profile chrome:Default --background --best-effort-background
+realbrowser tab ensure https://www.example.com/ --label app --profile chrome:Default --background
 # created app https://www.example.com/
 # task-tab origin=https://www.example.com label=app target=A0637EC0 status=active
 
@@ -83,10 +83,10 @@ realbrowser tab close -t app --profile chrome:Default       # close one specific
 `--mine` and `tab done` only ever touch tabs the registry says belong to this
 task. The user's tabs are never closed.
 
-When `tab ensure --background` returns `background_create_unavailable` (no
-proven `browserContextId` for the requested profile yet), retry exactly once
-with `--best-effort-background` — that bootstraps a proven tab via the OS
-profile launcher. Subsequent `--background` calls work without it.
+When `tab ensure --background` returns `background_create_unavailable`, keep
+the user's requested profile. Do not switch to anonymous or another profile
+unless the user approves. Use an existing proven tab, ask for `--front`, or ask
+for one-shot `profile relaunch --confirm` if CDP is locked.
 
 ## Existing Tab In A Profile
 
@@ -110,10 +110,10 @@ tab ownership as unproven unless the tab was created by `realbrowser` through
 that named profile. URL/title/content can disambiguate browser-wide debugging,
 but it is not profile ownership proof. Creation is not silently promoted to OS
 launch. `tab ensure/new --profile ... --background` uses background-safe paths
-only; use `--best-effort-background` or `--front` only when you explicitly accept
-profile app launch risk. On macOS, `--best-effort-background` restores the
-previously active app after launch; only `--front` intentionally leaves Chrome
-frontmost.
+only. Use `--front` when the user explicitly accepts visible handoff.
+`tab ensure --background` already performs verified browserContextId discovery
+when possible. `--best-effort-background` allows stopped-profile launch risk,
+but it must not OS-launch an already-running browser-scoped profile.
 
 For named-profile opens, browser-scoped matches are not profile proof. If
 `tab list "example.com" --profile chrome:Default` shows related tabs but none
@@ -121,7 +121,7 @@ was created by `realbrowser` through that profile, do not select a related tab
 and navigate it. Create a new tab through the named profile:
 
 ```bash
-realbrowser tab ensure https://example.com --profile chrome:Default --label app --best-effort-background
+realbrowser tab ensure https://example.com --profile chrome:Default --label app --background
 ```
 
 Use `--browser-url` or `--allow-browser-scope-target` only for intentional
@@ -528,7 +528,7 @@ Two entry-point classes — pick by URL stability, not by site domain.
 
 ```bash
 "$REALBROWSER" tab ensure "https://<site>/<path>?<your-query-params>" \
-  --profile chrome:Default --label search --background --best-effort-background
+  --profile chrome:Default --label search --background
 "$REALBROWSER" wait ready -t search --visual-stable --timeout 8000
 "$REALBROWSER" read observe -t search   # if title looks wrong, abandon to UI immediately
 "$REALBROWSER" read text -t search --selector main --out tmp/results.txt
@@ -546,7 +546,7 @@ filtered listings, multi-step checkout flows, internal dashboards with
 filters, configurators, registration forms. The mechanics are the same —
 pick form triggers, set values, submit, read results.
 
-1. `tab ensure <homepage> --profile <p> --label <L> --background --best-effort-background`
+1. `tab ensure <homepage> --profile <p> --label <L> --background`
 2. `read tree -t <L> -i -c` — list every input, dropdown, and primary
    action button. Look for a `# cursor-clickables` section listing
    `c<n>` refs for non-ARIA widgets (recent-action chips, custom day

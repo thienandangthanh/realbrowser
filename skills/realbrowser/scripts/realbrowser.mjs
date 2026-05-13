@@ -67,6 +67,16 @@ const OWNER_ENV_KEYS = [
 ];
 const OWNER_SCOPE_SEPARATOR = "@@owner:";
 const LEASE_STALE_MS = parseOptionalIntegerEnv("REALBROWSER_LEASE_STALE_MS", 7 * 24 * 60 * 60 * 1000);
+const TRUSTED_PROFILE_SOURCES = new Set([
+  "profile-open",
+  "profile-open-verified",
+  "cdp-create-with-context",
+  "cdp-create-verified-profile",
+]);
+
+function trustedProfileSource(source) {
+  return TRUSTED_PROFILE_SOURCES.has(source || "");
+}
 
 const GROUPS = {
   profile: ["list", "inspect", "relaunch"],
@@ -903,11 +913,10 @@ async function rpc(context, payload) {
       "content-length": Buffer.byteLength(body),
     },
     body,
-    // CLI->daemon RPC timeout. Cold-start tab ensure (chrome://version probe
-    // + named-profile launcher + slow SPA load + bot-challenge) can take
-    // 30-50s legitimately. The CLI is a thin client and should wait as long
-    // as the daemon is willing to process. Per-flag override still wins.
-    timeoutMs: payload.flags?.timeout || 60_000,
+    // CLI->daemon RPC timeout. Command --timeout bounds the browser operation;
+    // the thin client must wait longer so a slow but successful daemon action
+    // does not look like a failure and then succeed on retry.
+    timeoutMs: Math.max(60_000, Number(payload.flags?.timeout || 0) + 30_000),
   });
   if (response.statusCode >= 400) {
     let parsed;
@@ -1326,6 +1335,25 @@ class BrowserDaemon {
   targetMetaForTarget(targetId) {
     return this.targetMeta?.[this.contextScopeKey()]?.[targetId] || this.targetMeta?.[this.context.key]?.[targetId];
   }
+  profileProofMetaForTarget(targetId) {
+    if (!targetId) return [];
+    const baseKey = this.context.key;
+    const sameOwnerKey = this.contextScopeKey();
+    const matched = Object.keys(this.targetMeta || {}).filter(
+      (key) => baseContextKeyFromScopedKey(key) === baseKey,
+    );
+    const orderedKeys = [
+      ...matched.filter((key) => key === sameOwnerKey),
+      ...matched.filter((key) => key !== sameOwnerKey && key !== baseKey),
+      ...matched.filter((key) => key === baseKey),
+    ];
+    const out = [];
+    for (const key of orderedKeys) {
+      const meta = this.targetMeta?.[key]?.[targetId];
+      if (meta) out.push(meta);
+    }
+    return out;
+  }
   leasesForContext() {
     return this.leases[this.leaseContextKey()] || {};
   }
@@ -1659,6 +1687,14 @@ class BrowserDaemon {
     const key = this.canonicalSessionKey();
     return { key, bucket: this.sessionRegistry?.[key] || { tabs: {}, labels: {} } };
   }
+  sessionRecordForTarget(targetId) {
+    if (!targetId) return null;
+    const { bucket } = this.sessionRegistryBucket();
+    for (const record of Object.values(bucket.tabs || {})) {
+      if (record?.targetId === targetId) return record;
+    }
+    return null;
+  }
   async reconcileSessionRegistry() {
     const { key: sessionKey } = this.sessionRegistryBucket();
     const raw = await this.tabsRaw().catch(() => []);
@@ -1725,6 +1761,10 @@ class BrowserDaemon {
       bucket.tabs = bucket.tabs || {};
       bucket.labels = bucket.labels || {};
       const prev = bucket.tabs[origin] || {};
+      const incomingSource = source || "";
+      const nextSource = trustedProfileSource(prev.source)
+        ? (trustedProfileSource(incomingSource) ? incomingSource : prev.source)
+        : (incomingSource || prev.source || "");
       bucket.tabs[origin] = {
         ...prev,
         targetId: tab.targetId,
@@ -1738,7 +1778,7 @@ class BrowserDaemon {
         pid: process.pid,
         url: tab.url || url || prev.url || "",
         requestedUrl: url || prev.requestedUrl || "",
-        source,
+        source: nextSource,
         status: "active",
         createdAt: prev.createdAt || now,
         updatedAt: now,
@@ -1838,29 +1878,17 @@ class BrowserDaemon {
   //
   // We deliberately do NOT trust user-set labels or older
   // "browser-scope-cdp-create" entries here: under multi-profile Chrome, labels
-  // and pre-0.3.7 cdp-create entries can point to tabs in any profile (the
-  // user can label any tab they happen to select; pre-0.3.7 cdp-create lied
+  // and pre-0.3.0 cdp-create entries can point to tabs in any profile (the
+  // user can label any tab they happen to select; pre-0.3.0 cdp-create lied
   // about ownership). Using them as a context anchor would silently land new
-  // tabs in the wrong profile — exactly the bug 0.3.7 was meant to fix.
+  // tabs in the wrong profile — exactly the bug 0.3.0 was meant to fix.
   //
-  // Returns null when no live trusted tab matches — caller falls through to
-  // launchProfileTab (Chrome's --profile-directory at OS level), which
-  // bootstraps a proven tab whose browserContextId becomes available for all
-  // subsequent calls. OpenClaw's "managed" profiles sidestep this entirely by
-  // dedicating one Chrome process per profile; for attached-Chrome we can't.
+  // Returns null when no live trusted tab matches. The caller may try a verified
+  // background probe, but must not OS-launch an already-running browser-scoped
+  // Chrome profile just to bootstrap. OpenClaw's "managed" profiles sidestep
+  // this by dedicating one Chrome process per profile; attached Chrome can't.
   async resolveBrowserContextIdForProfile(profileId) {
     if (!profileId) return null;
-    // v0.3.0 (codex P0 fix): include the v0.3.0 chrome://version-verified
-    // sources so the trust chain extends to tabs we proved are in the right
-    // profile via that probe. Without this, verified tabs were dropped on
-    // the floor by resolveBrowserContextIdForProfile and setTargetMeta would
-    // not preserve their source through subsequent updates.
-    const TRUSTED_SOURCES = new Set([
-      "profile-open",
-      "profile-open-verified",
-      "cdp-create-with-context",
-      "cdp-create-verified-profile",
-    ]);
     const raw = await this.tabsRaw().catch(() => []);
     const liveById = new Map(raw.map((tab) => [tab.targetId, tab]));
     const baseKey = this.context.key;
@@ -1880,7 +1908,7 @@ class BrowserDaemon {
       if (!store || typeof store !== "object") continue;
       for (const [targetId, meta] of Object.entries(store)) {
         if (!meta || meta.profile !== profileId || meta.profileOwned !== true) continue;
-        if (!TRUSTED_SOURCES.has(meta.source || "")) continue;
+        if (!trustedProfileSource(meta.source)) continue;
         const live = liveById.get(targetId);
         if (live?.browserContextId) return live.browserContextId;
       }
@@ -1922,13 +1950,73 @@ class BrowserDaemon {
     }
     return contexts;
   }
+  async browserContextCandidates(exclude = new Set()) {
+    const counts = new Map();
+    try {
+      const result = await this.cdp.send("Target.getBrowserContexts", {}, undefined, 2000).catch(() => null);
+      if (result && Array.isArray(result.browserContextIds)) {
+        for (const id of result.browserContextIds) {
+          if (typeof id === "string" && id.length > 0 && !exclude.has(id)) counts.set(id, 0);
+        }
+      }
+    } catch {}
+    const rawTabs = await this.tabsRaw().catch(() => []);
+    for (const tab of rawTabs) {
+      const bcid = tab.browserContextId;
+      if (typeof bcid !== "string" || bcid.length === 0 || exclude.has(bcid)) continue;
+      const tabUrl = tab.url || "";
+      if (tabUrl.startsWith("devtools://") || tabUrl.startsWith("chrome-extension://")) continue;
+      counts.set(bcid, (counts.get(bcid) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([bcid]) => bcid);
+  }
+  async discoverBrowserContextIdForProfile(profileId, expectedDir, exclude = new Set()) {
+    if (!profileId || !expectedDir || !this.isBrowserScopedProfileContext()) return null;
+    const candidates = await this.browserContextCandidates(exclude);
+    const checked = [];
+    for (const bcid of candidates) {
+      let targetId = null;
+      try {
+        const created = await this.cdp.send("Target.createTarget", {
+          url: "chrome://version/",
+          background: true,
+          focus: false,
+          browserContextId: bcid,
+        }, undefined, 5000);
+        targetId = created?.targetId || null;
+        if (!targetId) continue;
+        await waitForUrl(this, targetId, "chrome://version", 2500).catch(() => {});
+        await waitForReadyState(this, targetId, "interactive", 2500).catch(() => {});
+        const actualDir = await this.readTargetProfileDir(targetId, 2500);
+        checked.push({ browserContextId: bcid, profileDir: actualDir || "" });
+        if (actualDir === expectedDir) {
+          return { browserContextId: bcid, profileDir: actualDir, checked };
+        }
+      } catch (err) {
+        checked.push({ browserContextId: bcid, error: err?.message || String(err) });
+      } finally {
+        if (targetId) await this.cdp.send("Target.closeTarget", { targetId }).catch(() => {});
+      }
+    }
+    return { browserContextId: null, checked };
+  }
   profileTargetProven(tab) {
     if (!this.isBrowserScopedProfileContext()) return true;
-    const targetMeta = this.targetMetaForTarget(tab.targetId);
+    for (const targetMeta of this.profileProofMetaForTarget(tab.targetId)) {
+      if (
+        targetMeta &&
+        targetMeta.profileOwned === true &&
+        targetMeta.profile === this.context.profile.id &&
+        trustedProfileSource(targetMeta.source)
+      ) return true;
+    }
+    const sessionRecord = this.sessionRecordForTarget(tab.targetId);
     if (
-      targetMeta &&
-      targetMeta.profileOwned === true &&
-      targetMeta.profile === this.context.profile.id
+      sessionRecord &&
+      sessionRecord.contextKey === this.context.key &&
+      trustedProfileSource(sessionRecord.source)
     ) return true;
     const label = tab.label || this.labelForTarget(tab);
     if (!label) return false;
@@ -1937,7 +2025,8 @@ class BrowserDaemon {
       meta &&
       meta.targetId === tab.targetId &&
       meta.profileOwned === true &&
-      meta.profile === this.context.profile.id
+      meta.profile === this.context.profile.id &&
+      trustedProfileSource(meta.source)
     );
   }
   unprovenProfileTargetError(tab, operation = "target") {
@@ -1947,7 +2036,7 @@ class BrowserDaemon {
       exitCode: 4,
       next: [
         `The current CDP endpoint is browser-scoped and may list tabs from other Chrome profiles.`,
-        `Open a new tab through the requested profile instead: realbrowser tab new <url> --profile "${profile}" --label app --best-effort-background`,
+        `Open a new tab through the requested profile instead: realbrowser tab new <url> --profile "${profile}" --label app --background`,
         `Use --browser-url ${this.browserUrl || "<endpoint>"} only for intentional browser-wide debugging.`,
         `Use --allow-browser-scope-target only when you explicitly accept cross-profile target risk.`,
       ],
@@ -2029,17 +2118,6 @@ class BrowserDaemon {
   async setTargetMeta(targetId, meta = {}) {
     if (!targetId) return;
     const scopeKey = this.contextScopeKey();
-    // v0.3.0 (codex P0 fix): include the v0.3.0 chrome://version-verified
-    // sources so the trust chain extends to tabs we proved are in the right
-    // profile via that probe. Without this, verified tabs were dropped on
-    // the floor by resolveBrowserContextIdForProfile and setTargetMeta would
-    // not preserve their source through subsequent updates.
-    const TRUSTED_SOURCES = new Set([
-      "profile-open",
-      "profile-open-verified",
-      "cdp-create-with-context",
-      "cdp-create-verified-profile",
-    ]);
     this.targetMeta = await updateJsonFile(this.targetMetaFile, {}, (current) => {
       current[scopeKey] ??= {};
       const previous = current[scopeKey][targetId] || {};
@@ -2047,8 +2125,8 @@ class BrowserDaemon {
       // working after subsequent navigate/label/reuse calls. Only allow
       // the source to be overwritten when the new source is itself trusted.
       const incomingSource = meta.source || "";
-      const nextSource = TRUSTED_SOURCES.has(previous.source || "")
-        ? (TRUSTED_SOURCES.has(incomingSource) ? incomingSource : previous.source)
+      const nextSource = trustedProfileSource(previous.source)
+        ? (trustedProfileSource(incomingSource) ? incomingSource : previous.source)
         : (incomingSource || previous.source || "");
       // v0.3.0: profileOwned is monotonic. A tab's profile is fixed by Chrome
       // at create-time — once we verified ownership (chrome://version or
@@ -2101,12 +2179,16 @@ class BrowserDaemon {
       const nextProfileOwned = previous?.profileOwned === true && previous?.targetId === targetId
         ? true
         : Boolean(meta.profileOwned);
+      const incomingSource = meta.source || "";
+      const nextSource = trustedProfileSource(previous?.source)
+        ? (trustedProfileSource(incomingSource) ? incomingSource : previous.source)
+        : (incomingSource || previous?.source || "");
       current[scopeKey][label] = {
         targetId,
         profileOwned: nextProfileOwned,
         profile: meta.profile || previous?.profile || this.context.profile?.id,
         owner: this.owner(),
-        source: meta.source || "",
+        source: nextSource,
         updatedAt: new Date().toISOString(),
       };
       return current;
@@ -2300,22 +2382,32 @@ class BrowserDaemon {
   // current browser context, not necessarily the one requested.
   // chrome://version's Profile Path line is the definitive answer; no deps.
   async readTargetProfileDir(targetId, timeoutMs = 8000) {
-    // v0.3.0 (codex P0 fix, take 2): chrome://version renders Profile Path as
-    // a two-line label/value pair (label "Profile Path" on one line, the
-    // actual path on the next), NOT as "Profile Path: <value>". Empirically
-    // confirmed via Runtime.evaluate(document.body.innerText) on the user's
-    // Chrome 148: the bytes between "Profile Path" and the path are "\n",
-    // not ": ". The original v0.3.0 regex `/Profile Path:\s*(\S+)/` required
-    // a colon AND a single non-space token — neither holds — so the verify
-    // helper has been returning null since v0.3.0 (silent no-op). New regex
-    // accepts either separator (colon or any whitespace including newline)
-    // and captures to end-of-line, which handles paths containing spaces
-    // like "Application Support".
+    // chrome://version can render Profile Path as a table cell or as
+    // label/value text split across lines. Only accept path-like values; broad
+    // regex matching can otherwise capture unrelated version/variation text.
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
         const value = await this.evaluate(targetId,
-          "(()=>{const b=document.body;if(!b)return null;const t=b.innerText||'';const m=t.match(/Profile Path[:\\s]+([^\\n\\r]+)/);return m?m[1].trim():null})()",
+          `(()=>{
+            const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+            const pathLike = (value) => /^([A-Za-z]:[\\\\/]|\\\\\\\\|\\/)/.test(clean(value));
+            const fromCell = document.querySelector("#profile_path,#profile-path");
+            if (fromCell && pathLike(fromCell.textContent)) return clean(fromCell.textContent);
+            for (const row of document.querySelectorAll("tr")) {
+              const cells = [...row.children].map((cell) => clean(cell.textContent));
+              if (cells.length >= 2 && /^Profile Path:?$/i.test(cells[0]) && pathLike(cells.slice(1).join(" "))) {
+                return cells.slice(1).join(" ");
+              }
+            }
+            const lines = String(document.body?.innerText || "").split(/[\\n\\r]+/).map(clean).filter(Boolean);
+            for (let i = 0; i < lines.length; i += 1) {
+              const inline = lines[i].match(/^Profile Path:?\\s+(.+)$/i);
+              if (inline && pathLike(inline[1])) return clean(inline[1]);
+              if (/^Profile Path:?$/i.test(lines[i]) && pathLike(lines[i + 1])) return clean(lines[i + 1]);
+            }
+            return null;
+          })()`,
           { timeoutMs: 2000 });
         if (typeof value === "string" && value.length > 0) {
           return path.basename(value);
@@ -2361,11 +2453,13 @@ class BrowserDaemon {
         code: "profile_routing_failed",
         exitCode: 4,
         next: [
-          `Chrome routed the new tab away from --profile-directory=${expectedDir}.`,
+          `Chrome/CDP routed the new tab away from the requested profile ${profileId}.`,
           `the wrong-profile tab was closed via CDP; no user tabs were touched`,
-          `bring a window for ${profileId} to the foreground first, then retry the same command`,
+          `do not switch to anonymous or another profile unless the user approves`,
+          `ask whether to use anonymous for a clean public-page check, or continue with ${profileId}`,
+          `if continuing with ${profileId}, use explicit visual handoff: realbrowser tab ensure ${intendedUrl || "<url>"} --profile "${profileId}" --label app --front`,
           `OR list existing tabs in the target profile: realbrowser tab list --profile "${profileId}"`,
-          `if a tab in ${profileId} is already open, attach to it: realbrowser tab select <target> --profile "${profileId}" --label app`,
+          `for read-only existing-tab inspection only, attach with: realbrowser tab select <target> --profile "${profileId}" --label app --allow-browser-scope-target`,
         ],
       });
     }
@@ -2679,22 +2773,24 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
           code: "profile_background_launch_guard",
           exitCode: 4,
           next: [
-            "the available DevTools endpoint is browser-scoped, so profile app launch may steal focus",
+            "the available DevTools endpoint is browser-scoped; choose a no-focus background attempt or explicit visual handoff",
             `realbrowser tab list --profile "${this.context.profile.id}"`,
-            `realbrowser tab ensure ${url} --profile "${this.context.profile.id}" --label ${flags.label || "app"} --best-effort-background`,
+            `realbrowser tab ensure ${url} --profile "${this.context.profile.id}" --label ${flags.label || "app"} --background`,
             `realbrowser tab ensure ${url} --profile "${this.context.profile.id}" --label ${flags.label || "app"} --front`,
           ],
         });
       }
       // Try CDP Target.createTarget first — no focus steal, true background.
-      // Fall back to launchProfileTab only if CDP creation fails or the
-      // browserContextId for this profile is not yet known.
+      // OS launch is guarded below and refused for already-running browser-
+      // scoped profiles because it can steal focus or route to another profile.
       if (!flags.front) {
-        // CDP create is always attempted before falling back to launchProfileTab.
-        // Two paths:
+        // CDP create is always attempted before any explicit handoff path.
+        // Three paths:
         //   (a) trusted: a prior `profile-open` or `cdp-create-with-context`
         //       record gives us this profile's browserContextId — use it.
-        //   (b) default-context: no proven id yet — call Target.createTarget
+        //   (b) discovery: probe live browserContextIds with chrome://version
+        //       in background, close mismatches, then use the proven id.
+        //   (c) default-context: no proven id yet — call Target.createTarget
         //       WITHOUT browserContextId, which lands the tab in Chrome's
         //       currently-active browser context. For single-profile users
         //       this is correct; for multi-profile setups it can land in
@@ -2703,167 +2799,177 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
         //       resolveBrowserContextIdForProfile) so a wrong-profile tab
         //       can never poison future context resolution.
         // Either path avoids the launchProfileTab subprocess and macOS focus
-        // flash. launchProfileTab below stays as the last-resort fallback
-        // when Target.createTarget itself throws.
+        // flash. launchProfileTab below is guarded and refused for running
+        // browser-scoped profiles.
         let browserContextId = await this.resolveBrowserContextIdForProfile(this.context.profile.id).catch(() => null);
         let bcidIsTrusted = Boolean(browserContextId);
-        // v0.3.0: when no TRUSTED bcid is known, pick the bcid with the most
-        // existing live tabs as a HEURISTIC for the user's main profile
-        // window. Chrome's Target.createTarget(browserContextId=X) appends
-        // the new tab to one of X's existing windows (rather than spawning a
-        // new browser instance, which CDP does when bcid is NULL — that's
-        // the "new window per tab" bug users see). If the heuristic picks
-        // the WRONG profile's bcid, the chrome://version readback below
-        // catches the mismatch, closes the tab, and throws
-        // profile_routing_failed; no orphan wrong-profile tabs.
-        //
-        // Heuristic: highest live tab count = most likely the user's primary
-        // profile. Anonymous/incognito contexts and devtools contexts are
-        // skipped. Heuristic-derived bcid is still subject to chrome://version
-        // verification (probeProfile stays true below).
-        if (!browserContextId && this.isBrowserScopedProfileContext()) {
-          try {
-            const rawTabs = await this.tabsRaw();
-            const counts = new Map();
-            for (const t of rawTabs) {
-              const bcid = t.browserContextId;
-              if (typeof bcid !== "string" || bcid.length === 0) continue;
-              const u = t.url || "";
-              if (u.startsWith("devtools://") || u.startsWith("chrome-extension://")) continue;
-              counts.set(bcid, (counts.get(bcid) || 0) + 1);
-            }
-            if (counts.size > 0) {
-              let bestBcid = null;
-              let bestCount = -1;
-              for (const [bcid, c] of counts.entries()) {
-                if (c > bestCount) { bestCount = c; bestBcid = bcid; }
-              }
-              if (bestBcid) browserContextId = bestBcid;
-            }
-          } catch {}
+        if (!browserContextId && this.isBrowserScopedProfileContext() && this.context.profile?.profileDirName) {
+          const discovered = await this.discoverBrowserContextIdForProfile(
+            this.context.profile.id,
+            this.context.profile.profileDirName,
+          ).catch(() => null);
+          if (discovered?.browserContextId) {
+            browserContextId = discovered.browserContextId;
+            bcidIsTrusted = true;
+          }
         }
-        // v0.3.0: when we have no bcid AND --background --best-effort-background
-        // neither set AND browser-scoped multi-profile, refuse rather than
-        // silently route to wrong profile.
-        if (!browserContextId && !flags.front && !flags.bestEffortBackground && this.isBrowserScopedProfileContext()) {
+        // If discovery still cannot prove the requested profile in a
+        // browser-scoped multi-profile endpoint, refuse instead of creating in
+        // whatever profile Chrome considers current. The caller should ask the
+        // user for --front/relaunch/anonymous consent rather than switching.
+        if (!browserContextId && !flags.front && this.isBrowserScopedProfileContext()) {
           const liveContexts = await this.enumerateLiveBrowserContexts().catch(() => new Set());
           if (liveContexts.size > 1) {
             throw new CliError(`cannot disambiguate background tab for profile ${this.context.profile.id} across ${liveContexts.size} live browser contexts`, {
               code: "background_create_unavailable",
               exitCode: 4,
               next: [
-                `${liveContexts.size} distinct browserContextIds visible on the endpoint; default-context createTarget would land in the wrong profile`,
-                `realbrowser tab ensure ${url} --profile "${this.context.profile.id}" --label ${flags.label || "app"} --best-effort-background`,
+                `${liveContexts.size} distinct browserContextIds visible on the endpoint, but none was proven as ${this.context.profile.id}`,
+                "do not switch to anonymous or another profile unless the user approves",
                 `realbrowser tab ensure ${url} --profile "${this.context.profile.id}" --label ${flags.label || "app"} --front`,
-                "after a single bootstrap with --best-effort-background, subsequent --background calls resolve the correct context automatically",
+                "or ask for one-shot profile relaunch approval, then retry --background",
               ],
             });
           }
         }
         {
           const cdpFocusRestore = await captureForegroundAppForBackgroundLaunch({ front: false }).catch(() => null);
-          try {
-            // v0.3.0: when no proven browserContextId, open chrome://version
-            // FIRST so we can read the actual profile path before committing.
-            // If chrome://version reveals a profile mismatch, the tab is closed
-            // and we throw profile_routing_failed — no orphan tabs in the wrong
-            // profile, ever. With a known browserContextId we skip the probe
-            // (Target.createTarget honors the context id deterministically).
-            // v0.3.0: probe when bcid is unTRUSTED (NULL bcid OR heuristic-
-            // derived bcid). Only skip the probe when bcid came from a prior
-            // proven tab (resolveBrowserContextIdForProfile returned non-null).
-            const probeProfile = !bcidIsTrusted && Boolean(this.context.profile?.profileDirName);
-            const initialUrl = probeProfile ? "chrome://version/" : url;
-            const createParams = { url: initialUrl, background: true, focus: false };
-            if (browserContextId) createParams.browserContextId = browserContextId;
-            const created = await this.cdp.send("Target.createTarget", createParams, undefined, flags.timeout || 30_000);
-            const targetId = created.targetId;
-            if (targetId) {
-              // Tab is created. Commit to it. Every metadata/label/attach step
-              // below is best-effort: if a downstream call throws, the tab is
-              // STILL real and we MUST NOT fall through to launchProfileTab
-              // (which would spawn Chrome and steal focus). Wrap every call
-              // in .catch and return success regardless.
-              await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
-              // v0.3.0: if we probed chrome://version, verify the actual
-              // profile path matches what was requested. Mismatch closes the
-              // tab and throws profile_routing_failed (propagates to the
-              // caller; nothing else needs cleanup). Match yields a proven
-              // tab AND navigates to the user's intended URL.
-              let verifiedProfileDir = null;
-              if (probeProfile) {
-                verifiedProfileDir = await this.verifyTargetProfile(targetId, this.context.profile.profileDirName, url, {
-                  strict: true,
-                  profileId: this.context.profile.id,
+          for (let cdpAttempt = 0; cdpAttempt < 2; cdpAttempt += 1) {
+            try {
+              // v0.3.0: when no proven browserContextId, open chrome://version
+              // FIRST so we can read the actual profile path before committing.
+              // If chrome://version reveals a profile mismatch, the tab is closed
+              // and we throw profile_routing_failed — no orphan tabs in the wrong
+              // profile, ever. With a known browserContextId we skip the probe
+              // (Target.createTarget honors the context id deterministically).
+              // v0.3.0: probe when bcid is unTRUSTED (NULL bcid OR heuristic-
+              // derived bcid). Only skip the probe when bcid came from a prior
+              // proven tab (resolveBrowserContextIdForProfile returned non-null).
+              const probeProfile = !bcidIsTrusted && Boolean(this.context.profile?.profileDirName);
+              const initialUrl = probeProfile ? "chrome://version/" : url;
+              const createParams = { url: initialUrl, background: true, focus: false };
+              if (browserContextId) createParams.browserContextId = browserContextId;
+              const created = await this.cdp.send("Target.createTarget", createParams, undefined, flags.timeout || 30_000);
+              const targetId = created.targetId;
+              if (targetId) {
+                // Tab is created. Commit to it. Every metadata/label/attach step
+                // below is best-effort: if a downstream call throws, the tab is
+                // STILL real and we MUST NOT fall through to launchProfileTab
+                // (which would spawn Chrome and steal focus). Wrap every call
+                // in .catch and return success regardless.
+                await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
+                // v0.3.0: if we probed chrome://version, verify the actual
+                // profile path matches what was requested. Mismatch closes the
+                // tab and throws profile_routing_failed (propagates to the
+                // caller; nothing else needs cleanup). Match yields a proven
+                // tab AND navigates to the user's intended URL.
+                let verifiedProfileDir = null;
+                if (probeProfile) {
+                  verifiedProfileDir = await this.verifyTargetProfile(targetId, this.context.profile.profileDirName, url, {
+                    strict: true,
+                    profileId: this.context.profile.id,
+                  });
+                }
+                // profileOwned reflects whether we KNOW this tab is in the
+                // requested profile. Either:
+                //  - browserContextId was known (trusted source), OR
+                //  - chrome://version probe confirmed the profile dir matches.
+                // v0.3.0: profileProven requires TRUSTED bcid (from prior
+                // proof) OR fresh chrome://version verification — NOT just
+                // "we passed some bcid to createTarget", which may have been a
+                // heuristic pick that landed in the wrong profile.
+                const profileProven = bcidIsTrusted || Boolean(verifiedProfileDir);
+                const trustedSource = bcidIsTrusted
+                  ? "cdp-create-with-context"
+                  : (verifiedProfileDir ? "cdp-create-verified-profile" : "cdp-create-default-context");
+                await this.setTargetMeta(targetId, { profileOwned: profileProven, profile: this.context.profile.id, source: trustedSource, requestedUrl: url }).catch(() => {});
+                if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileProven, profile: this.context.profile.id, source: trustedSource, force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) }).catch(() => {});
+                else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, trustedSource).catch(() => {});
+                await this.recordTaskTab({ targetId, suggestedTarget: flags.label || targetId, label: flags.label || "", url }, url, flags.label, flags, trustedSource).catch(() => {});
+                await this.attach(targetId).catch(() => {});
+                await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
+                await waitForReadyState(this, targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
+                await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
+                const tab = await this.resolveTarget(flags.label || targetId, { operation: `tab ${command}` }).catch(() => ({ targetId, suggestedTarget: flags.label || targetId, targetPrefix: targetId.slice(0, 8), label: flags.label || "", url }));
+                return result({
+                  text: [
+                    `created ${tab.suggestedTarget} ${url}`,
+                    `task-tab origin=${canonicalOriginKey(url)} label=${tab.suggestedTarget} target=${tab.targetPrefix} status=active`,
+                    `next: realbrowser read observe -t ${tab.suggestedTarget}`,
+                  ].join("\n"),
+                  target: tab,
+                  created: true,
+                  launch: bcidIsTrusted ? "cdp-background" : (verifiedProfileDir ? "cdp-verified-profile" : "cdp-default-context"),
+                  taskId: this.taskId(flags),
+                  context: this.publicContext(),
                 });
               }
-              // profileOwned reflects whether we KNOW this tab is in the
-              // requested profile. Either:
-              //  - browserContextId was known (trusted source), OR
-              //  - chrome://version probe confirmed the profile dir matches.
-              // v0.3.0: profileProven requires TRUSTED bcid (from prior
-              // proof) OR fresh chrome://version verification — NOT just
-              // "we passed some bcid to createTarget", which may have been a
-              // heuristic pick that landed in the wrong profile.
-              const profileProven = bcidIsTrusted || Boolean(verifiedProfileDir);
-              const trustedSource = bcidIsTrusted
-                ? "cdp-create-with-context"
-                : (verifiedProfileDir ? "cdp-create-verified-profile" : "cdp-create-default-context");
-              await this.setTargetMeta(targetId, { profileOwned: profileProven, profile: this.context.profile.id, source: trustedSource, requestedUrl: url }).catch(() => {});
-              if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileProven, profile: this.context.profile.id, source: trustedSource, force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) }).catch(() => {});
-              else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, trustedSource).catch(() => {});
-              await this.recordTaskTab({ targetId, suggestedTarget: flags.label || targetId, label: flags.label || "", url }, url, flags.label, flags, trustedSource).catch(() => {});
-              await this.attach(targetId).catch(() => {});
-              await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
-              await waitForReadyState(this, targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
+            } catch (cdpErr) {
+              if (cdpErr instanceof CliError && ["profile_routing_failed", "profile_verification_unavailable"].includes(cdpErr.code)) {
+                throw cdpErr;
+              }
+              const message = cdpErr?.message || String(cdpErr);
+              if (/Failed to find browser context/i.test(message) && browserContextId && this.isBrowserScopedProfileContext()) {
+                const staleBcid = browserContextId;
+                const discovered = cdpAttempt === 0 && this.context.profile?.profileDirName
+                  ? await this.discoverBrowserContextIdForProfile(
+                    this.context.profile.id,
+                    this.context.profile.profileDirName,
+                    new Set([staleBcid]),
+                  ).catch(() => null)
+                  : null;
+                if (discovered?.browserContextId) {
+                  browserContextId = discovered.browserContextId;
+                  bcidIsTrusted = true;
+                  continue;
+                }
+                throw new CliError(`cannot create a non-disruptive background tab for profile ${this.context.profile.id}: Chrome rejected stale browserContextId ${staleBcid}`, {
+                  code: "background_create_unavailable",
+                  exitCode: 4,
+                  next: [
+                    "No OS profile launch was attempted because it may open a new Chrome window.",
+                    `realbrowser tab list --profile "${this.context.profile.id}"`,
+                    `realbrowser tab ensure ${url} --profile "${this.context.profile.id}" --label ${flags.label || "app"} --front`,
+                    "or relaunch the target profile once, then retry --background",
+                  ],
+                });
+              }
+              // CDP create itself failed (the Target.createTarget call threw).
+              // Record the error to /tmp so we can diagnose; the guarded launch
+              // path below will decide whether handoff is allowed.
+              try {
+                const dbg = `[${new Date().toISOString()}] CDP create failed: ${cdpErr?.message || cdpErr} url=${url} bcid=${browserContextId || "(default)"}\n`;
+                fs.appendFileSync("/tmp/realbrowser-cdp-create-errors.log", dbg);
+              } catch {}
+              break;
+            } finally {
               await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
-              const tab = await this.resolveTarget(flags.label || targetId, { operation: `tab ${command}` }).catch(() => ({ targetId, suggestedTarget: flags.label || targetId, targetPrefix: targetId.slice(0, 8), label: flags.label || "", url }));
-              return result({
-                text: [
-                  `created ${tab.suggestedTarget} ${url}`,
-                  `task-tab origin=${canonicalOriginKey(url)} label=${tab.suggestedTarget} target=${tab.targetPrefix} status=active`,
-                  `next: realbrowser read observe -t ${tab.suggestedTarget}`,
-                ].join("\n"),
-                target: tab,
-                created: true,
-                launch: bcidIsTrusted ? "cdp-background" : (verifiedProfileDir ? "cdp-verified-profile" : "cdp-default-context"),
-                taskId: this.taskId(flags),
-                context: this.publicContext(),
-              });
             }
-          } catch (cdpErr) {
-            if (cdpErr instanceof CliError && ["profile_routing_failed", "profile_verification_unavailable"].includes(cdpErr.code)) {
-              throw cdpErr;
-            }
-            // CDP create itself failed (the Target.createTarget call threw).
-            // Record the error to /tmp so we can diagnose; fall through to
-            // launchProfileTab only if --best-effort-background was passed.
-            try {
-              const dbg = `[${new Date().toISOString()}] CDP create failed: ${cdpErr?.message || cdpErr} url=${url} bcid=${browserContextId || "(default)"}\n`;
-              fs.appendFileSync("/tmp/realbrowser-cdp-create-errors.log", dbg);
-            } catch {}
-          } finally {
-            await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
+            break;
           }
         }
       }
-      // Phase 4: refuse the launchProfileTab fallback for default --background.
-      // launchProfileTab spawns Chrome via --profile-directory which can
-      // steal focus and add tabs the user did not ask for. Per Codex § 4
-      // we only allow this when --front (visible) or --best-effort-background
-      // (explicit acceptance of brief focus risk during bootstrap) is set.
-      if (!flags.front && !flags.bestEffortBackground) {
+      // Phase 4: refuse OS Chrome launch for browser-scoped profile endpoints.
+      // launchProfileTab uses --profile-directory through the OS/browser app. If
+      // Chrome is already running with multiple profiles, the OS can route that
+      // request to the frontmost profile or open a visible window. That violates
+      // the background/no-focus contract even under --best-effort-background.
+      const osLaunchWouldViolateBackgroundContract = !flags.front && this.isBrowserScopedProfileContext();
+      if (!flags.front && (!flags.bestEffortBackground || osLaunchWouldViolateBackgroundContract)) {
+        const next = [
+          "No Chrome launch was attempted.",
+          `realbrowser tab list --mine --profile "${this.context.profile.id}"`,
+          `realbrowser tab list --profile "${this.context.profile.id}"`,
+          `realbrowser tab ensure ${url} --profile "${this.context.profile.id}" --label ${flags.label || "app"} --front`,
+          "if a proven tab in this profile already exists, select it or read it first to reuse its browserContextId, then retry --background",
+        ];
+        if (!osLaunchWouldViolateBackgroundContract) {
+          next.splice(3, 0, `realbrowser tab ensure ${url} --profile "${this.context.profile.id}" --label ${flags.label || "app"} --best-effort-background`);
+        }
         throw new CliError(`cannot create a non-disruptive background tab for profile ${this.context.profile.id} because no proven browserContextId is available`, {
           code: "background_create_unavailable",
           exitCode: 4,
-          next: [
-            "No Chrome launch was attempted.",
-            `realbrowser tab list --mine --profile "${this.context.profile.id}"`,
-            `realbrowser tab list --profile "${this.context.profile.id}"`,
-            `realbrowser tab ensure ${url} --profile "${this.context.profile.id}" --label ${flags.label || "app"} --best-effort-background`,
-            `realbrowser tab ensure ${url} --profile "${this.context.profile.id}" --label ${flags.label || "app"} --front`,
-            "if a tab in this profile is already open in Chrome, run any read command first to bootstrap a proven browserContextId, then retry --background",
-          ],
+          next,
         });
       }
       const beforeIds = new Set(tabs.map((tab) => tab.targetId));
@@ -4055,7 +4161,10 @@ async function handleProfileCli(parsed) {
     const profile = await resolveProfile(query || parsed.args[0], parsed.flags.browser);
     return await relaunchProfileCli(profile, parsed.flags);
   }
-  const text = filtered.map((p) => `${p.id.padEnd(24)} ${p.active ? "active" : (p.userDataInUse ? "locked" : "      ")} ${(p.cdpScope || "").padEnd(7)} ${p.displayName || ""} ${p.email || ""}`).join("\n");
+  const rows = filtered.map((p) => `${p.id.padEnd(24)} ${(p.active ? "active" : (p.userDataInUse ? "locked" : "")).padEnd(6)} ${(p.cdpScope || "").padEnd(7)} ${p.displayName || ""} ${p.email || ""}`);
+  const text = rows.length
+    ? [`${"PROFILE_ID".padEnd(24)} ${"STATUS".padEnd(6)} ${"CDP".padEnd(7)} NAME EMAIL`, ...rows].join("\n")
+    : "";
   const runningWithoutCdp = parsed.flags.active && filtered.length === 0 && profiles.some((p) => p.userDataInUse);
   return result({
     text: text || (runningWithoutCdp
@@ -8720,9 +8829,9 @@ Creates or reuses a stable target in the selected context.
   tab ensure https://example.com --anonymous --session private --label page --front --incognito
   tab ensure https://example.com --profile chrome:Default --label app --background
 
-Safe rule: --background only uses background-safe browser/CDP paths. If the
-profile must be launched through the OS or only a browser-scoped endpoint is
-available, use --best-effort-background or --front explicitly.
+Safe rule: --background only uses background-safe browser/CDP paths. Running
+browser-scoped profiles are never OS-launched in background; use --front for
+explicit visual handoff.
 --anonymous uses an isolated temporary Chrome profile. --incognito/--private
 adds Chrome's visual private window and is supported only with anonymous managed
 sessions, not signed-in profiles or arbitrary CDP endpoints.
@@ -9006,9 +9115,10 @@ async function runSelfTest() {
   const fakeDaemon = Object.create(BrowserDaemon.prototype);
   fakeDaemon.context = { kind: "profile", key: "profile:chrome:Default", profile: { id: "chrome:Default" }, endpointScope: "browser" };
   fakeDaemon.labels = { "profile:chrome:Default": { app: "target-1" } };
-  fakeDaemon.labelMeta = { "profile:chrome:Default": { app: { targetId: "target-1", profileOwned: true, profile: "chrome:Default" } } };
-  fakeDaemon.targetMeta = { "profile:chrome:Default": { "target-3": { targetId: "target-3", profileOwned: true, profile: "chrome:Default" } } };
+  fakeDaemon.labelMeta = { "profile:chrome:Default": { app: { targetId: "target-1", profileOwned: true, profile: "chrome:Default", source: "profile-open" } } };
+  fakeDaemon.targetMeta = { "profile:chrome:Default": { "target-3": { targetId: "target-3", profileOwned: true, profile: "chrome:Default", source: "profile-open" } } };
   fakeDaemon.leases = {};
+  fakeDaemon.sessionRegistry = {};
   assert(fakeDaemon.profileTargetProven({ targetId: "target-1", label: "app" }) === true, "profile-open label proves browser-scoped target");
   assert(fakeDaemon.profileTargetProven({ targetId: "target-2", label: "other" }) === false, "browser-scoped profile target is unproven by default");
   assert(fakeDaemon.profileTargetProven({ targetId: "target-3" }) === true, "profile-open target provenance works without a label");
@@ -9127,7 +9237,7 @@ async function runSelfTest() {
   assert(tree.interactiveNodes.length === 2, "formatAxTreeV2 interactive nodes");
   const treeI = formatAxTreeV2(mockNodes, { interactive: true, compact: false });
   assert(!treeI.text.includes("document") && treeI.text.includes("button"), "formatAxTreeV2 interactive filter");
-  // 0.3.4: context roles preserved with interactive descendants
+  // 0.3.0: context roles preserved with interactive descendants
   const hierMockNodes = [
     { nodeId: "1", role: { value: "WebArea" }, name: { value: "Page" }, childIds: ["2", "9"], properties: [] },
     { nodeId: "2", parentId: "1", role: { value: "main" }, name: { value: "" }, childIds: ["3", "5"], properties: [] },
@@ -9157,7 +9267,7 @@ async function runSelfTest() {
   assert(actionOptions([], { root: "e5" }).rootSelector === "e5", "actionOptions ref root passes rootSelector");
   const wopts = waitReadyOptions(["/tmp/ready.png"], { screenshot: true }, 10000);
   assert(wopts.selector === "", "waitReadyOptions does not use positional arg as selector");
-  // 0.3.2 features
+  // 0.3.0 features
   assert(actionOptions([], { bypassOverlay: true }).bypassOverlay === true, "actionOptions surfaces bypassOverlay");
   const bypassParsed = parseCli(["action", "click", "-t", "app", "b3", "--bypass-overlay"]);
   assert(bypassParsed.flags.bypassOverlay === true, "--bypass-overlay parsed as boolean flag");
@@ -9169,17 +9279,17 @@ async function runSelfTest() {
   assert(oRefParsed.args[0] === "o4", "o-ref accepted as click target");
   // o-ref recognized by selectorFor regex (validated indirectly: ref should match the same shape as b/e/l)
   assert(/^[ebfrilco]\d+$/i.test("o7") && /^[ebfrilco]\d+$/i.test("b1"), "ref pattern accepts o-prefix");
-  // 0.3.3: --near anchor flag for read autocomplete
+  // 0.3.0: --near anchor flag for read autocomplete
   const nearParsed = parseCli(["read", "autocomplete", "-t", "app", "--near", "b21"]);
   assert(nearParsed.command === "autocomplete" && nearParsed.flags.near === "b21", "read autocomplete --near parser");
   const nearShortRef = parseCli(["read", "overlay", "-t", "app", "--near", "e9", "--limit", "20"]);
   assert(nearShortRef.flags.near === "e9" && nearShortRef.flags.limit === "20", "read overlay --near + --limit parser");
-  // 0.3.6: --require-change flag for action fill (silent no-op detection)
+  // 0.3.0: --require-change flag for action fill (silent no-op detection)
   const reqChange = parseCli(["action", "fill", "-t", "app", "e3", "09/05/2026", "--require-change"]);
   assert(reqChange.flags.requireChange === true, "--require-change parsed as boolean flag");
   const aoptsChange = actionOptions([], { requireChange: true });
   assert(aoptsChange.requireChange === true, "actionOptions surfaces requireChange");
-  // 0.3.11: click auto-fallback. We can't run the in-page functions here,
+  // 0.3.0: click auto-fallback. We can't run the in-page functions here,
   // but we verify their shape and that the wiring functions exist so a
   // refactor that drops the auto-fallback breaks the self-test.
   assert(typeof postClickFallbackFunction === "function" && postClickFallbackFunction.length === 2,
@@ -9203,7 +9313,7 @@ async function runSelfTest() {
     "clickFunction surfaces inFloatingLayer + preClickSignature on payload");
   assert(clickSrc.includes("clickMethod = \"cdp\""),
     "clickFunction defaults clickMethod to 'cdp' for the CDP-dispatch path");
-  // 0.3.12: cursor-clickables (non-ARIA DOM clickables surfaced in read tree).
+  // 0.3.0: cursor-clickables (non-ARIA DOM clickables surfaced in read tree).
   // Verify the function exists, accepts opts, and contains the expected
   // predicates so a refactor that drops a predicate fails the self-test.
   assert(typeof cursorClickablesFunction === "function",
@@ -9234,7 +9344,7 @@ async function runSelfTest() {
   assert(fallbackEntrySrc.includes('isCRef') && fallbackEntrySrc.includes('data-realbrowser-ref="c'),
     "maybeRunClickAutoFallback tags c-ref clicks for diagnostics");
   assert(!fallbackEntrySrc.match(/if\s*\(\s*!payload\.inFloatingLayer\s*&&\s*!isCRef\s*\)\s*return/),
-    "maybeRunClickAutoFallback no longer gates on floating-layer || c-ref (drops the v0.3.11 gate)");
+    "maybeRunClickAutoFallback no longer gates on floating-layer || c-ref (drops the v0.3.01 gate)");
   // Signature must include scrollHeight + xhrCount (catches panel-swap
   // SPAs whose body text doesn't change and submit handlers that kick
   // off fetches before any DOM mutation). xhrCount filters to
@@ -9245,7 +9355,7 @@ async function runSelfTest() {
     "pageStateSignature includes scrollHeight + xhrCount");
   assert(sigSrc.includes('"fetch"') && sigSrc.includes('"xmlhttprequest"'),
     "pageStateSignature filters resource entries to fetch + xmlhttprequest only");
-  // 0.3.11: multi-OS browser executable resolver. We can't fs.existsSync the
+  // 0.3.0: multi-OS browser executable resolver. We can't fs.existsSync the
   // candidate paths in a portable test, so we exercise the candidate
   // generator + the kind-filtering logic that drives findBrowserExecutable.
   const candidates = browserExecutableCandidates();
@@ -9290,7 +9400,7 @@ async function runSelfTest() {
     else process.env.CHROME_PATH = priorChromePath;
     await fsp.rm(overrideStashPath, { force: true });
   }
-  // 0.3.5: cross-owner label fallback (rescues terminal-pane / multi-session
+  // 0.3.0: cross-owner label fallback (rescues terminal-pane / multi-session
   // workflow where TERM_SESSION_ID-derived owner changes between calls).
   const xLabels = {
     [`profile:chrome:Default${OWNER_SCOPE_SEPARATOR}owner-old`]: { vn: "TID-VN-OLD", solo: "TID-SOLO" },
@@ -9325,14 +9435,15 @@ async function runSelfTest() {
   assert(cfMatchesSame.length === 0, "contextFlagsForKnownTarget no same-owner matches when owner is fresh");
   const cfOtherUnique = [...new Set(cfMatchesOther.map(baseContextKeyFromScopedKey))];
   assert(cfOtherUnique.length === 1 && cfOtherUnique[0] === "profile:chrome:Default", "contextFlagsForKnownTarget cross-owner unique base context");
-  // 0.3.8: resolveBrowserContextIdForProfile picks the right browserContextId
+  // 0.3.0: resolveBrowserContextIdForProfile picks the right browserContextId
   // when Chrome runs browser-scoped CDP across multiple profiles. Single
   // strict pass: only profileOwned=true with a trusted source
   // (profile-open from --profile-directory launch, or cdp-create-with-context
   // from a verified Target.createTarget). Labels and untrusted sources are
   // intentionally skipped — under multi-profile Chrome they may anchor to
   // tabs in any profile and would re-introduce the wrong-profile bug.
-  // Bootstrap (no proven tab yet) → caller falls through to launchProfileTab.
+  // Bootstrap (no proven tab yet) → caller must probe safely or return
+  // background_create_unavailable.
   const bcDaemon = Object.create(BrowserDaemon.prototype);
   bcDaemon.context = { kind: "profile", key: "profile:chrome:Default", profile: { id: "chrome:Default" }, endpointScope: "browser" };
   const bcOwnedKey = `profile:chrome:Default${OWNER_SCOPE_SEPARATOR}owner-me`;
@@ -9363,9 +9474,9 @@ async function runSelfTest() {
   };
   const bcCross = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
   assert(bcCross === "ctx-DEFAULT", "resolveBrowserContextIdForProfile falls back to cross-owner proven entry");
-  // Untrusted-source only: returns null so caller falls through to
-  // launchProfileTab. We intentionally do NOT use the "tid-untrusted" tab as
-  // a context anchor: that target was created by pre-0.3.7 cdp-create which
+  // Untrusted-source only: returns null so caller does not anchor on unsafe
+  // history. We intentionally do NOT use the "tid-untrusted" tab as
+  // a context anchor: that target was created by pre-0.3.0 cdp-create which
   // lied about profile attribution. Trusting it would re-introduce the
   // wrong-profile bug under multi-profile Chrome.
   bcDaemon.targetMeta = {

@@ -61,7 +61,7 @@ Stateful-SPA cold-start (canonical 5 cmds; typical 2-5 min, varies with bot
 defenses):
 
 ```bash
-"$REALBROWSER" tab ensure <homepage> --profile chrome:Default --label app --background --best-effort-background
+"$REALBROWSER" tab ensure <homepage> --profile chrome:Default --label app --background
 "$REALBROWSER" read tree -t app -i -c                    # find c<n> chips + HINT line
 "$REALBROWSER" action click -t app c1                    # chip pre-fills form (if one matches)
 "$REALBROWSER" action submit -t app --text "Search"      # exact visible label (localize as needed)
@@ -78,9 +78,9 @@ endpoint (rare).
 Creation = `tab ensure`/`tab new`; navigation = `tab navigate <t> <url>`;
 reads/actions require a target. `profile list` reports CDP scope (`profile`
 = one profile, `browser` = inspect-only for existing tabs). `--background`
-uses only background-safe paths; profile launch is gated behind
-`--best-effort-background` or `--front`. Mutating commands claim a target
-lease — don't navigate/click/close/focus/reload/download a leased target
+uses only background-safe paths. Running browser-scoped profiles are never
+OS-launched in background; use `--front` for explicit visual handoff. Mutating
+commands claim a target lease — don't navigate/click/close/focus/reload/download a leased target
 without `--take-lease` or explicit handoff. Full/responsive/device/annotated
 screenshots also require the lease.
 
@@ -105,17 +105,17 @@ Failure modes the registry prevents: inventing `app2`/`app3` after a click
 fails; closing one of the user's tabs thinking it was the agent's; losing
 track of which tab is owned.
 
-`background_create_unavailable` on `tab ensure --background`? Retry once
-with `--best-effort-background` to bootstrap.
+`background_create_unavailable` on `tab ensure --background`? Do not switch to
+anonymous or another profile unless the user approves. Use an existing proven
+tab, ask for `--front`, or ask for a one-shot profile relaunch if CDP is locked.
 
 **User tab in conflicting state.** If `tab list <site>` shows a user tab
 already on a page that doesn't match what the task needs (e.g. user is
 mid-flow on a stateful SPA), don't `--take-lease` and don't probe with a
 deep-link — for stateful SPAs the deep-link will 404 or 500. Open a
-fresh agent tab via the homepage with `tab ensure <homepage>
---force-new --label <new> --profile <p> --background
---best-effort-background`. The new tab carries its own session-scoped
-state from the same cookies, leaving the user's tab untouched.
+fresh agent tab via the homepage with `tab ensure <homepage> --force-new
+--label <new> --profile <p> --background`. The new tab carries its own
+session-scoped state from the same cookies, leaving the user's tab untouched.
 
 ## Operating Loop
 
@@ -123,7 +123,7 @@ state from the same cookies, leaving the user's tab untouched.
    read-only, or form/action.
 2. **Inspect before creating:** `profile list --active`, `tab list <q>
    --profile`. Browser-scoped targets are diagnostic; create through the named
-   profile with `tab ensure --best-effort-background`.
+   profile with `tab ensure --background`.
 3. **Acquire one stable target:** `tab select --label` (existing) or
    `tab ensure --label` (create). Multiple matches? Disambiguate by URL/title;
    never guess.
@@ -255,8 +255,8 @@ the user's pre-existing tabs without their request.
 tabs, clicking, navigating, reading must NEVER bring Chrome to the front or
 move keyboard focus from the user's current app.
 
-- `tab ensure --background --best-effort-background` is the default. Don't
-  promote to `--front` for routine work.
+- `tab ensure --background` is the default. Don't promote to `--front` for
+  routine work.
 - A click that "doesn't fire" in background is NOT a reason to focus the
   tab. Fix via CDP synthetic dispatch (`action click` auto-retries),
   `--bypass-overlay`, or `action submit --text <label>` — never
@@ -268,8 +268,10 @@ move keyboard focus from the user's current app.
 - Don't `osascript activate Google Chrome`/`activate Safari` — it always
   steals focus.
 
-Use `--front` only for explicit visual handoff. `--best-effort-background`
-is only for profile app launch and still restores the prior foreground app.
+Use `--front` only for explicit visual handoff. `tab ensure --background`
+already performs verified browserContextId discovery when possible.
+`--best-effort-background` is only for stopped-profile launch risk and must not
+OS-launch an already-running browser-scoped profile.
 
 ## Common Workflows
 

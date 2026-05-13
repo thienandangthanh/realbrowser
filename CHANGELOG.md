@@ -22,8 +22,7 @@ Added:
   tabs.
 - `action scroll`, `read autocomplete`, and `read overlay` for generic browsing
   flows that need scroll containers, transient UI, or overlay diagnostics.
-- Cross-platform focus capture/restore for explicit
-  `--best-effort-background` profile launches:
+- Cross-platform focus capture/restore for explicit stopped-profile launches:
   macOS via AppleScript, Linux via `xdotool` when present, and Windows via
   PowerShell.
 - Windows process-tree cleanup for anonymous browser sessions.
@@ -39,8 +38,9 @@ Changed:
   screenshots, and large body dumps are fallback/debug tools.
 - Large reads, network bodies, HAR files, screenshots, and traces are directed
   to `--out` so local tools can inspect them without spending model context.
-- `tab ensure --background` uses only background-safe CDP/browser paths. Profile
-  app launch is gated behind explicit `--best-effort-background` or `--front`.
+- `tab ensure --background` uses only background-safe CDP/browser paths. It now
+  probes live browserContextIds with `chrome://version`, closes mismatches, and
+  refuses OS Chrome launch for already-running browser-scoped profiles.
 - Signed-in profile handling prefers direct `DevToolsActivePort` WebSocket
   reuse to avoid repeated Chrome approval prompts.
 - Profile ownership is monotonic once proven, preventing later label/cache

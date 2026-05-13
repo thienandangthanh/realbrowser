@@ -174,9 +174,10 @@ anonymity and is not the same as Chrome's visible Incognito UI. Add
 needed.
 
 Realbrowser should keep signed-in profile work in the background when possible.
-Use `--front` only for explicit visual handoff. Use `--best-effort-background`
-when the CLI reports that a profile app launch is required and the focus risk is
-acceptable.
+Use `--front` only for explicit visual handoff. `tab ensure --background`
+performs verified browserContextId discovery when possible.
+`--best-effort-background` is only for stopped-profile launch risk and must not
+OS-launch an already-running browser-scoped profile.
 
 Chrome approval prompts are controlled by Chrome, not the skill. Realbrowser
 reduces repeated prompts by reusing the same direct `DevToolsActivePort`

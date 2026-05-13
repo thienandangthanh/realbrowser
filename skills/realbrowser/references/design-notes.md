@@ -54,16 +54,16 @@ Long-term invariants:
   can inspect explicit browser-wide targets, but it is not proof that a target
   belongs to the requested Chrome profile. Under `--profile`, unproven
   browser-scoped targets cannot be selected, navigated, read, or acted on by
-  default. Profile-specific creation opens through the named profile launcher
-  only when `--best-effort-background` or `--front` is explicit.
+  default. Profile-specific creation prefers proven `browserContextId` reuse or
+  a verified background probe; already-running browser-scoped profiles are not
+  OS-launched in background.
 - Profile-open provenance is target-based, not label-only. Labels are stable
   handles for agents, but a tab opened by `realbrowser` through a named profile
   remains proven even when the caller did not provide a label.
-- Profile app launch is still an OS/browser launch, so `--best-effort-background`
-  must mitigate focus instead of pretending launch is invisible. On macOS, the
-  daemon snapshots the active app before launch and restores it immediately
-  after spawn and again after the target is observed. `--front` bypasses this
-  because it is an explicit visual handoff.
+- Profile app launch is still an OS/browser launch. It is allowed only for
+  explicit handoff or stopped-profile launch where focus risk is accepted.
+  Already-running browser-scoped profiles return recovery hints instead of
+  launching through the OS.
 - Direct browser WebSocket endpoints from `DevToolsActivePort` are canonical for
   already-running Chrome. HTTP `/json/version` is a convenience fallback, not a
   prerequisite for considering the profile attachable.
@@ -153,6 +153,6 @@ Long-term invariants:
   `DOM.pushNodesByBackendIds` + `DOM.setAttributeValue` so existing click/fill/type
   code works unchanged. `read tree` and `read snapshot` maintain separate diff
   baselines so `--diff` on each diffs against its own history.
-- Focus restore on `--best-effort-background` uses platform-native tools:
+- Focus restore for explicit stopped-profile launches uses platform-native tools:
   `osascript` on macOS, `xdotool` on Linux, PowerShell on Windows. All degrade
   gracefully if the platform tool is not installed.
