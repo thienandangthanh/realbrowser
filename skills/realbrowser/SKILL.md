@@ -6,332 +6,302 @@ description: Use for fast target-first local Chrome/Chromium browser control wit
 # Realbrowser
 
 Use `realbrowser` when a task needs the user's local browser state or a fast
-managed browser. The contract is target-first: resolve or create one tab target,
-then pass `-t <label>` or `--handle` on every read, action, screenshot, console,
+managed browser. Target-first: resolve or create one tab target, then pass
+`-t <label>` or `--handle` on every read, action, screenshot, console,
 network, state, dialog, performance, download, or export command.
 
-The design is site-agnostic and OS-portable. Do not encode site names, UI copy,
-or language-specific picker labels into the workflow. Use generic browser
-state: profile/context, target, active root, refs, accessibility labels,
-structural selectors, viewport/topmost checks, network entries, downloads, and
-artifacts. Site-specific CSS or text is only a last-mile selector chosen after a
-scoped read proves it is correct for the current page.
+The design is site-agnostic and OS-portable. Do not encode site names, UI
+copy, or language-specific picker labels into the workflow. Use generic
+browser state: profile/context, target, active root, refs, accessibility
+labels, structural selectors, viewport/topmost checks, network entries,
+downloads, artifacts. Site-specific CSS or text is only a last-mile selector
+chosen after a scoped read proves it correct for the current page.
+
+**Read the full SKILL.md once before the first browser action.** End to end
+(no `head`/`tail`/`sed -n '1,N p'` slices). Efficiency Rules and Operating
+Loop contain non-negotiable rules whose absence drives cost and failure loops.
 
 ## Fast Start
 
-The `realbrowser` CLI is bundled at `scripts/realbrowser` (Node entry:
-`scripts/realbrowser.mjs`) relative to this skill's directory. Construct the
-`REALBROWSER` variable from the skill base directory shown above.
-
-macOS/Linux:
-
-```bash
-REALBROWSER="<skill-directory>/scripts/realbrowser"
-```
-
-Windows PowerShell:
-
-```powershell
-$Realbrowser = Join-Path "<skill-directory>" "scripts\realbrowser.ps1"
-```
-
-Anonymous page:
+CLI at `scripts/realbrowser` (Node: `scripts/realbrowser.mjs`). Set
+`REALBROWSER="<skill-directory>/scripts/realbrowser"` (POSIX) or
+`$Realbrowser = Join-Path "<skill-directory>" "scripts\realbrowser.ps1"`
+(PowerShell).
 
 ```bash
+# Anonymous (isolated temp state, not visible Incognito)
 "$REALBROWSER" tab ensure https://example.com --anonymous --session check --label page --background
 "$REALBROWSER" read observe -t page --anonymous --session check
-```
 
-Visible Chrome Incognito page:
-
-```bash
-"$REALBROWSER" tab ensure https://example.com --anonymous --session private --label page --front --incognito
-"$REALBROWSER" read observe -t page --anonymous --session private
-```
-
-`--anonymous` means isolated temporary browser state, not network anonymity and
-not Chrome's visible Incognito UI. Add `--incognito` or `--private` when the user
-explicitly wants a visible Chrome Incognito window. Incognito/private mode is
-only for anonymous managed sessions, not signed-in profiles.
-
-Signed-in profile or existing Chrome:
-
-```bash
+# Signed-in profile or existing Chrome
 "$REALBROWSER" profile list --active
-"$REALBROWSER" tab list "ninzap.dev" --profile chrome:Default
-# Creation stays background-safe; if profile app launch is required, the CLI
-# asks for explicit --best-effort-background or --front.
-"$REALBROWSER" tab ensure https://example.com --profile chrome:Default --label app --background
+"$REALBROWSER" tab ensure <url> --profile chrome:Default --label app --background
 "$REALBROWSER" read observe -t app --profile chrome:Default
+
+# Default context for repeated work; owner scoping for parallel sessions
+"$REALBROWSER" session use profile:chrome:Default
+export REALBROWSER_OWNER=my-project   # parallel sessions
+"$REALBROWSER" tab ensure <url> --label app --background
 ```
 
-Do not run top-level `open`, `goto`, or selected-tab workflows. In
-`realbrowser`, creation is `tab ensure` or `tab new`, navigation is
-`tab navigate <target> <url>`, and reads/actions require a target.
+Visible Incognito only when the user asks for a visible Incognito window: add
+`--incognito` (or `--private`) with `--front`.
 
-Profile listing shows the CDP scope. `profile` means the endpoint is scoped to
-that profile. `browser` means CDP can inspect existing browser tabs, but new
-tabs for a named profile cannot be proven safe by CDP alone. Direct WebSocket
-endpoints from `DevToolsActivePort` are the primary attach path; HTTP
-`/json/version` discovery is only a fallback. `--background` uses only
-background-safe CDP/browser paths. If profile app launch is required, the CLI
-fails with a recovery hint unless `--best-effort-background` or `--front` is
-explicit. `--best-effort-background` restores the previously active macOS app
-after launch; `--front` is the only normal path that intentionally leaves Chrome
-frontmost. Stale `DevToolsActivePort` files are ignored.
+**Pick by URL stability:**
 
-For repeated work, set a default context without dropping target safety:
+- **Stable-URL sites** (search engines, wikis, code hosts, news, docs):
+  deep-link FIRST. Verify with `read observe`; fall back to homepage UI on
+  "404"/"Not Found"/"error"/"Pardon".
+- **Stateful SPAs** (URL not source of truth — content hydrated from
+  session/cookie state or form-driven): **homepage + UI FIRST.** Constructed
+  deep-links frequently 404; the probe wastes 20-40s. Skip unless you have
+  evidence (bookmark, prior-session success in this Chrome).
+
+Stateful-SPA cold-start (canonical 5 cmds; typical 2-5 min, varies with bot
+defenses):
 
 ```bash
-"$REALBROWSER" session use profile:chrome:Default
-"$REALBROWSER" tab list ninzap.dev
-"$REALBROWSER" session clear
+"$REALBROWSER" tab ensure <homepage> --profile chrome:Default --label app --background --best-effort-background
+"$REALBROWSER" read tree -t app -i -c                    # find c<n> chips + HINT line
+"$REALBROWSER" action click -t app c1                    # chip pre-fills form (if one matches)
+"$REALBROWSER" action submit -t app --text "Search"      # exact visible label (localize as needed)
+"$REALBROWSER" wait ready -t app --visual-stable --timeout 30000
 ```
 
-Default contexts, labels, and element refs are owner-scoped. When multiple
-sessions are open, set a stable owner for the project/session if the environment
-does not already provide one:
+No matching chip? Picker UI fallback in `references/workflows.md`.
 
-```bash
-export REALBROWSER_OWNER=my-project
-"$REALBROWSER" session use profile:chrome:Default
-"$REALBROWSER" tab ensure http://localhost:3000 --profile chrome:Default --label app --background
-```
+**Don't add `--allow-browser-scope-target` reflexively.** Tabs created via
+`tab ensure --profile` are profile-proven — later `-t app` works without it.
+Only needed when claiming an existing user tab on a browser-scoped CDP
+endpoint (rare).
 
-Mutating commands claim a target lease. If another owner has leased the target,
-do not navigate, click, close, focus, reload, clear buffers, change state, or
-download from it unless the user explicitly wants that session to take over. Full
-or responsive/device screenshots also require the lease because they temporarily
-scroll or emulate the viewport. Annotated screenshots/checkpoints require the
-lease because they temporarily draw page overlays. Use `--take-lease` for
-intentional handoff.
-Read-only commands can still inspect the target after it is explicitly selected.
+Creation = `tab ensure`/`tab new`; navigation = `tab navigate <t> <url>`;
+reads/actions require a target. `profile list` reports CDP scope (`profile`
+= one profile, `browser` = inspect-only for existing tabs). `--background`
+uses only background-safe paths; profile launch is gated behind
+`--best-effort-background` or `--front`. Mutating commands claim a target
+lease — don't navigate/click/close/focus/reload/download a leased target
+without `--take-lease` or explicit handoff. Full/responsive/device/annotated
+screenshots also require the lease.
+
+## Tab Ownership And Task Registry
+
+Each invocation has a *task*. Agent tabs tracked per-task, separate from
+user tabs. `tab list --mine` shows only this task's tabs; `tab list` shows
+everything with `mine` / `user` / `other-agent` column.
+
+**Same task + same origin = same tab.** A second `tab ensure
+<same-origin-url>` reuses the original; passing a new label aliases the old.
+If the new label points elsewhere, realbrowser refuses with
+`duplicate_task_origin` and lists recovery commands verbatim. **USE the
+existing handle** — do not invent a new label. Mutating commands
+(`tab navigate`, `tab close`) refuse user-owned tabs by default; opt in with
+`tab select --take-lease` or `tab navigate --allow-user-tab-mutation`.
+
+End of task: `tab done` marks complete, leaves open (safe default). Add
+`--close` or use `tab close --mine` to close only agent tabs.
+
+Failure modes the registry prevents: inventing `app2`/`app3` after a click
+fails; closing one of the user's tabs thinking it was the agent's; losing
+track of which tab is owned.
+
+`background_create_unavailable` on `tab ensure --background`? Retry once
+with `--best-effort-background` to bootstrap.
+
+**User tab in conflicting state.** If `tab list <site>` shows a user tab
+already on a page that doesn't match what the task needs (e.g. user is
+mid-flow on a stateful SPA), don't `--take-lease` and don't probe with a
+deep-link — for stateful SPAs the deep-link will 404 or 500. Open a
+fresh agent tab via the homepage with `tab ensure <homepage>
+--force-new --label <new> --profile <p> --background
+--best-effort-background`. The new tab carries its own session-scoped
+state from the same cookies, leaving the user's tab untouched.
 
 ## Operating Loop
 
-1. Classify scope: existing tab, signed-in profile, anonymous page, screenshot,
-   console/network debug, repeated-content read, or form/action workflow.
-2. For current UI, logged-in state, console logs, inboxes, social sites, or
-   "already open" wording, inspect tabs before creating: `profile list --active`
-   then `tab list <query> --profile <profile>`.
-3. Acquire one stable target: `tab select --label` for an existing tab or
-   `tab ensure --label` only when no usable tab exists.
-   If `tab list --profile` warns that CDP is browser-scoped, its targets are
-   diagnostic only unless they were created by `realbrowser` through that
-   profile. Do not select or navigate a related tab from that list to satisfy a
-   named-profile open. If no proven matching tab exists, create a new tab through
-   the named profile with `tab ensure <url> --profile <profile> --label <label>
-   --best-effort-background` or ask for explicit `--front`.
-4. If multiple tabs match, do not guess. Disambiguate by URL/title/visible page
-   state before reading console, network, forms, or content.
-5. Verify small state first: `read observe -t <label>` or
-   `read size -t <label>`.
-6. Use the smallest reader that gives you what you need:
-   `read tree -i -c` (ARIA tree, interactive + compact) for interaction planning,
-   `read tree --diff` after an action to see only what changed,
-   `read query` for targeted CSS lookups, `read items`/`read item` for feeds,
-   `read snapshot` for DOM structure. Avoid full HTML unless the user asks.
-   Use `--out` for large/debug payloads instead of spending model tokens.
-   `read query` expects CSS selectors only — `:has-text()`, `:text()`, and other
-   Playwright pseudo-selectors are not valid CSS and will fail. Use
-   `--text-filter '<text>'` for text-based matching.
-   Use `wait ready --visual-stable` instead of `sleep N && screenshot capture`
-   for page readiness checks.
-7. For forms/uploads/submits, run `action state -t <label> --root active`, adding
-   `--screenshot --annotate-refs` when visual state can prevent a wrong click.
-   Checkpoint screenshots are bounded to the visible viewport/root; use
-   `screenshot area` or `screenshot full` only when you explicitly need a tall
-   artifact. If you request an annotated screenshot for action safety, inspect
-   that image before the next mutating action. Act on refs inside that root, and
-   submit once with `action submit --text <exact label>` or
-   `action submit <button-ref>`.
-8. Verify passively with `read tree --diff`, `wait ready --visual-stable`,
-   a scoped read, console/network check, screenshot, or URL/state change.
+1. **Classify scope:** existing tab, signed-in profile, anonymous, debug,
+   read-only, or form/action.
+2. **Inspect before creating:** `profile list --active`, `tab list <q>
+   --profile`. Browser-scoped targets are diagnostic; create through the named
+   profile with `tab ensure --best-effort-background`.
+3. **Acquire one stable target:** `tab select --label` (existing) or
+   `tab ensure --label` (create). Multiple matches? Disambiguate by URL/title;
+   never guess.
+4. **One tree, many diffs.** `read tree -t <L> -i -c` once per page state;
+   `read tree -i -c -D` after each action. Do not chain `read snapshot` /
+   `read query` / `screenshot full` to find elements.
+5. **Forms/uploads/submits:** `action state -t <L> --root active`. Add
+   `--screenshot --annotate-refs` only when visual check prevents a wrong
+   click. Submit with `action submit --text <label>` or `action submit
+   <button-ref>` — once.
+6. **Verify after action:** `read tree -i -c --diff` (~50 tokens) or
+   `wait ready --visual-stable`. Screenshots only when verification is
+   visual-only.
+7. **Ephemeral UI** (dropdowns, tooltips, autocomplete, modals): the opening
+   click invalidates prior refs. Re-read tree — never retry a failed
+   click/fill with the same ref.
+8. **"covered-by:..." / "not topmost":** the error names the cover. Recovery:
+   `action press Escape` → `action scroll` → `wait ready --visual-stable`.
+   Two identical "covered-by" errors = change strategy.
+9. **After navigation:** any route swap invalidates refs. Re-read tree.
+10. **End-of-turn cleanup.** Close tabs you created that aren't deliverable
+    (created/edited doc, cart, dashboard the user asked to inspect) or
+    handoff (waiting for login/approval/payment/CAPTCHA). Use `tab done
+    --close` or `tab close --mine` — never touches user tabs.
 
-For inspection-only work, preserve user state when practical: note the starting
-filter/sort/URL, avoid unnecessary focus changes, and restore temporary filter
-or tab changes before finishing.
+For inspection-only work, preserve user state: avoid focus changes, restore
+temporary filter/sort/tab changes before finishing. Never parallelize
+target-changing commands with reads on the same target.
 
-Never parallelize target-changing commands or mutating actions with reads on
-the same target. For example, do not run `network capture --reload` at the same
-time as `export pdf` or `screenshot` on the same tab.
+## Efficiency Rules
 
-## No Repeated Allow Prompts
+Hard rules, not suggestions. A typical read-only task should complete in
+under 2 minutes and fewer than 10 commands. Concrete patterns for each rule
+live in `references/workflows.md` (Efficiency Patterns).
 
-`profile list --active` is passive: it reads `DevToolsActivePort` and checks the
-loopback port, but it must not open a CDP WebSocket or trigger Chrome's Allow
-debugging prompt. The first real CDP attach belongs to the selected
-target/context daemon.
+- **Read before acting.** The tree is data — find the user's label in tree
+  text, act on its ref. State attrs (`[disabled]`, `[modal]`, `value="..."`)
+  change what action is correct. On failure: re-read, don't retry same ref.
+- **`c<n>` non-ARIA refs.** React/Vue custom widgets (recent-search bubbles,
+  calendar cells, chips) under `# cursor-clickables` — use like AX refs.
+- **Refs scoped to most recent tree.** Each `read tree` resets refs. "Ref
+  stale or unknown" = re-read tree.
+- **If it's on disk, grep.** After `read text --out` / `read tree --out`,
+  use `grep` / `sls` / `node -e` on the file. No more `read query
+  --text-filter` round trips for the same content.
+- **Don't sleep — wait for the page.** `wait ready --visual-stable`
+  (default), `wait selector`, `wait text`, `wait url --contains`. Chained
+  `sleep N` is dead time.
+- **Pick the cheapest reader.** `read tree -i -c` to interact; `read text
+  --out` for bulk; `read items` for feeds; `screenshot capture` only for
+  visual decisions. See Reader Cost Reference in workflows.md.
+- **One tree, many diffs.** `read tree -i -c` once per page state, `-D`
+  after every action (2-10 lines of delta).
+- **Refs first, CSS only when known.** A selector is a *guess* (banned) if
+  you used `[class*="..."]`, modified a seen selector, or copied from
+  another site. After one failed `read query`, switch to refs — no
+  iterative selector hunting.
+- **Data extraction: one read, never scroll+screenshot in a loop.**
+  `read tree` / `read text` see the full DOM regardless of fold. Vision is
+  5-20× more expensive per byte and misreads digits.
+- **Screenshots: visual state only.** See Screenshot Decision Table in
+  workflows.md. Never screenshot to read prices/dates/labels.
+- **Dropdowns: type-first.** When click opens a search input, type
+  immediately. For click-then-popup widgets, `read autocomplete --near
+  <button-ref>`. For silent fill no-ops on custom widgets, pass
+  `action fill <ref> "<v>" --require-change` to fail loudly.
+- **After-submit: one wait.** `wait ready --visual-stable --timeout 30000`
+  then `read tree --diff`. Don't stack sleeps; don't `tab focus --front`
+  "to make it work" — background works fine.
+- **One authoritative signal = answer.** Selected option, `[checked]`,
+  success toast, cart line item, URL change — treat as proof unless
+  another signal contradicts. Don't re-verify via alternate surfaces.
+- **Command-count checkpoints.** At cmd 5: am I making real progress? At
+  cmd 10: if not nearly complete, reassess fundamentally.
+- **Talk to the user every 5+ tool calls.** One sentence prevents silent
+  runs ending in `[Request interrupted by user]`.
+- **Report partial success and stop.** Multi-part request and you have
+  part A with confidence? Report A *now*. SPA results pages frequently
+  lose state on back/forward/reload.
+- **Stay on the user's site.** If the user named a site, don't substitute
+  when you hit friction. After the failure budget, report the blocker.
+- **Never truncate tree output.** `| head` / `| tail` discards elements.
+  Use `--out FILE`, or scope at source with `--selector` / `--depth N` /
+  `--limit N`.
 
-`realbrowser` should reuse the existing `DevToolsActivePort` direct WebSocket
-and its per-browser-endpoint daemon instead of starting extra browser controllers. This
-matches the `chrome-cdp`/`realbrowser` attach model: if Chrome shows an Allow
-debugging prompt, wait for the existing starting daemon rather than spawning
-another controller. Use `daemon monitor --json` to check target count, sessions,
-and buffer sizes before retrying.
+**ABSOLUTE RULE:** Never guess CSS selectors. If you haven't seen the exact
+selector verbatim in prior output, source you read, or `forms`, use refs.
 
-Chrome owns the real signed-in-profile approval boundary. The skill can make the
-approval one-per-browser-endpoint while the browser/daemon survives, but it
-cannot guarantee a one-time approval forever after Chrome or the computer
-restarts. For low-approval clean-state work, prefer anonymous managed sessions;
-for logged-in state, attach to the real profile and reuse the same daemon.
+**Failure budget:** Failure Recovery Matrix in `references/workflows.md`.
+Three failed commands on the same interaction = wrong approach.
 
-Do not probe several profiles in parallel when they report the same
-browser-scoped WebSocket. Pick the intended profile first, then run one
-target-acquisition command. After a labeled target is created, later `-t
-<label>` commands can infer that label's context; still passing `--profile` is
-fine, but falling back to a separate endpoint controller is not.
+**Shell portability:** examples use POSIX (`grep`, `head`, `wc`). PowerShell
+substitutes are in `references/workflows.md` (Shell Portability). `node -e
+"<js>"` is the portable last resort — Node ships with the CLI runtime.
 
-If `profile list --active` returns no DevTools profiles but `profile list` shows
-the target Chrome user data is running, first check whether Chrome is showing a
-debugging approval prompt and retry the same target after approval. If there is
-still no direct WebSocket endpoint, `--best-effort-background` cannot attach to
-that existing non-debuggable browser.
+## Profile Approval And Daemon Reuse
 
-Relaunch is the last-resort recovery, not the default. For signed-in tasks, do
-not end by asking the user to quit Chrome manually; ask for explicit approval to
-quit/relaunch the target browser, then continue the original task:
+`profile list --active` is passive — reads `DevToolsActivePort` without
+opening a CDP socket. Reuse the existing WebSocket and its
+per-browser-endpoint daemon. If Chrome shows an Allow-debugging prompt, wait
+for the existing daemon (`daemon monitor --json`). For low-approval
+clean-state work prefer anonymous; for signed-in state attach to the real
+profile.
 
-```bash
-"$REALBROWSER" profile relaunch chrome:Default --confirm
-"$REALBROWSER" tab ensure https://example.com --profile chrome:Default --label app --background
-```
+Don't probe multiple profiles in parallel on a browser-scoped WebSocket. Pick
+one profile, run one target-acquisition. Once a label is created, `-t <L>`
+infers context. If `profile list --active` returns nothing but `profile list`
+shows running data, Chrome is on the approval prompt — retry after approve.
+No WebSocket endpoint at all = `--best-effort-background` cannot attach.
 
-Do not use `--front` unless the user explicitly wants visual handoff or hidden
-interaction is impossible. Use `--best-effort-background` only when profile app
-launch is needed; it still records provenance and tries to return focus to the
-previous app.
+**`profile relaunch --confirm` IS DESTRUCTIVE — quits Chrome and closes ALL
+user tabs.** Never run without explicit one-shot user approval in the
+current turn. Standing approval from a previous run does NOT carry forward.
+
+If CDP attach fails (no `DevToolsActivePort`, port refused, "endpoint did not
+become ready"): run `profile inspect <profile>`, then **stop and report**.
+Quote the error, ask the user to approve the Chrome Allow dialog or relaunch.
+Do NOT auto-relaunch — each relaunch loses user tabs without recovering CDP
+when the underlying issue is approval policy. Run `profile relaunch
+--confirm` only after the user types something like "go ahead, relaunch
+Chrome" in the same turn — exactly once.
+
+**Only mutate tabs you created.** `tab close`, `tab navigate`, lease-taking
+clicks, full-screen screenshots scoped to labels/handles acquired via
+`tab ensure --label <L>` or explicit `tab select`. Never close or navigate
+the user's pre-existing tabs without their request.
+
+**Never steal focus.** The skill operates strictly in background — opening
+tabs, clicking, navigating, reading must NEVER bring Chrome to the front or
+move keyboard focus from the user's current app.
+
+- `tab ensure --background --best-effort-background` is the default. Don't
+  promote to `--front` for routine work.
+- A click that "doesn't fire" in background is NOT a reason to focus the
+  tab. Fix via CDP synthetic dispatch (`action click` auto-retries),
+  `--bypass-overlay`, or `action submit --text <label>` — never
+  `tab focus --front`.
+- `tab focus --front` is NOT routine recovery. Even for bot challenges
+  ("Pardon Our Interruption" / "Just a moment"), STOP and ask the user.
+  Only proceed if the user explicitly approves in the same turn; restore
+  prior app immediately after.
+- Don't `osascript activate Google Chrome`/`activate Safari` — it always
+  steals focus.
+
+Use `--front` only for explicit visual handoff. `--best-effort-background`
+is only for profile app launch and still restores the prior foreground app.
 
 ## Common Workflows
 
-Read one item from a huge feed without dumping HTML:
-
-```bash
-"$REALBROWSER" read size -t group --json
-"$REALBROWSER" read items -t group --collection auto --direct-children --limit 8 --max-text-chars 700 --json
-"$REALBROWSER" read item -t group --collection auto --direct-children --index 4 --max-text-chars 4000
-"$REALBROWSER" read snapshot -t group --selector '<small-container>' --urls --cursor-interactive
-```
-
-Copy console logs from one exact tab:
-
-```bash
-"$REALBROWSER" tab select "ninzap.dev" --profile chrome:Default --label ninzap
-"$REALBROWSER" console list -t ninzap --errors --limit 80
-"$REALBROWSER" console capture -t ninzap --reload --duration 3000 --out tmp/console.json
-```
-
-For "copy console output" tasks, paste DevTools-style console lines verbatim
-from the exact selected tab. Do not summarize, mix multiple matching tabs, or
-return empty output without checking whether capture needs to be armed before a
-reload.
-
-Capture network requests and a response body:
-
-```bash
-"$REALBROWSER" network capture -t app --reload --duration 5000 --out tmp/app-network.json
-"$REALBROWSER" network capture -t app --include-body --out tmp/app-network-with-bodies.json
-"$REALBROWSER" network list -t app --filter "/api/" --json
-"$REALBROWSER" network body -t app req_12 --response --out tmp/req_12-response.json --full
-```
-
-Upload and submit:
-
-```bash
-"$REALBROWSER" action state -t app --root active --compact --screenshot --annotate-refs
-"$REALBROWSER" action fill -t app e1 "caption text"
-"$REALBROWSER" action type -t app e1 "additional text"
-"$REALBROWSER" action press -t app Escape
-"$REALBROWSER" action upload -t app --root active --input-ref e2 ~/Downloads/media.png
-"$REALBROWSER" action upload -t app --root active --trigger-ref b7 ~/Downloads/media.png
-"$REALBROWSER" wait ready -t app --visual-stable --screenshot --out tmp/upload-ready.png
-"$REALBROWSER" action submit -t app --root active --text "Submit"
-```
-
-`action fill` replaces an input/editor value. `action type <ref> <text>` first
-focuses the ref, then sends native CDP text input; use it when a rich editor does
-not accept synthetic value replacement. `action submit --text` requires an exact
-accessible label from the current active root, such as `Submit`, `Save`, `Send`,
-`Post`, or the localized label actually shown by the app. Do not hardcode those
-labels in reusable flows; enumerate with `action state` and submit by ref when
-labels are ambiguous. If the root is wrong or a media picker/dialog is active,
-use `action press -t <label> Escape`, re-run `action state`, then continue.
-
-For uploads, do not use standalone `action click` on visible media, attachment,
-or file-picker controls; that can open the OS file picker and block the user.
-Prefer `action upload --input-ref <file-input-ref> <file>`. When the app only
-creates the file input after a visible picker control is clicked, use
-`action upload --trigger-ref <picker-control-ref> <file>` so `realbrowser` arms
-and intercepts the file chooser before clicking. Plain `action click` also uses
-a short CDP file-chooser guard and reports `file_dialog_would_open` if the click
-would open a native picker.
-
-Screenshots are visual checkpoints, not page parsers. Use `action state
---screenshot --annotate-refs` for modals, editors, upload previews, covered
-buttons, disabled controls, canvas/media, and ambiguous active roots. When you
-request annotated refs, open/read the screenshot before relying on those refs for
-the next click/upload/submit. Skip screenshots for simple text/query/console/
-network reads unless visual state is the actual evidence. Checkpoint screenshots
-capture the visible viewport/root, not the full scroll height of a feed or page.
-Annotations mark the active root boundary plus visible refs, report skipped
-refs at `screenshot.annotation`, and can be bounded with `--max-labels <n>`.
-Default screenshot artifacts are normalized for agent use, matching OpenClaw's
-shape without adding image dependencies: JPEG quality 85, max side 2000px, max
-bytes 5mb, with a browser-canvas fallback when CDP's JPEG output is still too
-large. Use `--raw-size`, `--format png`, or an explicit `.png` path when exact
-browser pixels are required.
-
-Use `screenshot capture`, `screenshot area`, or `wait ready --screenshot` on
-signed-in/current profile tabs. `screenshot device` temporarily applies CDP
-viewport emulation; use it for responsive viewport evidence on anonymous or
-disposable tabs, or only on a live profile tab when the user explicitly asks for
-that target's responsive viewport output. Do not use `screenshot device` as a
-routine progress checkpoint while composing, posting, uploading, or reading a
-live signed-in tab. Use `screenshot area` or `screenshot full` when the large
-artifact itself is the requested output. Device screenshots use DPR 1 by
-default so `mobile:390x844` writes a `390x844` PNG, not a physical 2x Retina
-image. `screenshot full` first tries document full-page capture; when the
-document is fixed-height but a dominant visible scroll container exists, it
-stitches that container and preserves visible header/footer UI outside it, so
-app-shell pages do not produce a false one-viewport "full" artifact or drop a
-bottom composer. Pass `--selector <scroll-container>` when you already know the
-specific panel/list to stitch and want only that panel.
-
-Screenshots and PDF:
-
-```bash
-"$REALBROWSER" screenshot capture -t app --selector '[role=dialog]' tmp/dialog.png --annotate-refs
-"$REALBROWSER" screenshot capture -t app tmp/app.jpg --max-side 1600 --max-bytes 2mb
-"$REALBROWSER" screenshot full -t app --selector '[data-scroll-root]' tmp/panel-full.png
-"$REALBROWSER" screenshot device -t page --anonymous --session responsive --devices desktop:1440x900,tablet:768x1024,mobile:390x844 --visual-stable --settle-ms 300 tmp/page
-"$REALBROWSER" export pdf -t app tmp/app.pdf --print-background
-```
+Minimal skeletons live in `references/workflows.md` (form/upload,
+console/network, screenshots, PDF, anonymous, responsive, infinite feeds,
+stateful-SPA recovery). Open it when the task needs detail.
 
 ## References
 
-Open these only when the task needs detail:
-
-- `references/commands.md`: command tree, output, errors, and JSON contract.
-- `references/workflows.md`: profile, anonymous, feed, action, upload, network,
-  screenshot, download, and PDF workflows.
+- `references/commands.md`: command tree, output, errors, JSON contract,
+  POSIX↔PowerShell shell mapping.
+- `references/workflows.md`: Reader Cost Reference, Screenshot Decision Table,
+  Failure Recovery Matrix, Efficiency Patterns, profile/anonymous/feed/action/
+  upload/network/screenshot/download/PDF workflows.
 - `references/design-notes.md`: what was copied from chrome-cdp, gstack, and
   OpenClaw and the long-term daemon/API model.
 
 ## Safety Rules
 
-- `--background` means safe CDP/background creation. Use `--front` only for
-  explicit handoff or when hidden/unfocused interaction is impossible.
+- `--background` = safe CDP/background creation. `--front` only for explicit
+  handoff or when hidden/unfocused interaction is impossible.
 - Signed-in profile mutation requires a proven target label or handle.
-- Browser-scoped CDP is not treated as proof of existing-tab profile ownership.
-  Prefer labels/handles and verify URL/title before actions.
-- Uploads and final actions stay inside the active root. Do not use global
-  selectors for file upload or submit.
-- Screenshots are target-bound visual evidence. Use them early when visual state
-  affects action safety, but do not replace scoped DOM/query readers with
+- Browser-scoped CDP is not proof of existing-tab profile ownership. Prefer
+  labels/handles; verify URL/title before actions.
+- Uploads and final actions stay inside the active root. No global selectors
+  for file upload or submit.
+- Screenshots are target-bound visual evidence. Use early when visual state
+  affects action safety, but do NOT replace scoped DOM/query readers with
   screenshot parsing on huge pages.
-- Final actions enumerate button-like candidates inside the active root. Label
-  submits are exact-match by default; prefer a button ref when several controls
-  contain similar words. Click once, then verify passively.
-- Cookies/storage/headers are redacted unless `--values` is explicit.
+- Final actions enumerate button-like candidates inside the active root.
+  Label submits are exact-match; prefer a button ref when controls share
+  similar words. Click once, verify passively.
+- Cookies/storage/headers redacted unless `--values` explicit.
 - Large HTML, network bodies, HAR, console dumps, traces, screenshots, PDFs,
-  and downloads should go to `--out` or artifact paths, not stdout.
+  downloads go to `--out` or artifact paths — never stdout.

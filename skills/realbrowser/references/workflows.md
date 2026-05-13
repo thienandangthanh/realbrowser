@@ -1,12 +1,100 @@
 # Realbrowser Workflows
 
+## Contents
+
+- [Task Registry: One Tab Per Task Per Origin](#task-registry-one-tab-per-task-per-origin)
+- [Existing Tab In A Profile](#existing-tab-in-a-profile)
+- [Current State Versus Fresh Capture](#current-state-versus-fresh-capture)
+- [Anonymous Browse](#anonymous-browse)
+- [Repeated Content And Huge Pages](#repeated-content-and-huge-pages)
+- [ARIA Tree](#aria-tree-primary-interaction-reader)
+- [Scrolling](#scrolling)
+- [Form, Upload, Submit](#form-upload-submit)
+- [Console And Network](#console-and-network)
+- [Screenshots, Download, PDF](#screenshots-download-pdf)
+- [Failure Recovery Matrix](#failure-recovery-matrix)
+- [Efficiency Patterns](#efficiency-patterns)
+- [Shell Portability](#shell-portability-posix-vs-powershell)
+
+## Task Registry: One Tab Per Task Per Origin
+
+Each invocation has a *task* (derived from `REALBROWSER_TASK_ID`,
+`REALBROWSER_OWNER`, or the per-shell owner). Per task and per origin, the
+agent keeps at most one tab. This eliminates the "app2, app3, app4"
+failure mode where a confused agent invents new labels after a click error
+and ends up with several duplicate tabs on the same site.
+
+The state surface for the agent's own work:
+
+```bash
+realbrowser tab list --mine --profile chrome:Default       # only this task's tabs
+realbrowser tab list --profile chrome:Default              # everything, with mine/user/other-agent column
+```
+
+`tab ensure` is now origin-deduped:
+
+```bash
+realbrowser tab ensure https://www.example.com/ --label app --profile chrome:Default --background --best-effort-background
+# created app https://www.example.com/
+# task-tab origin=https://www.example.com label=app target=A0637EC0 status=active
+
+realbrowser tab ensure https://www.example.com/page --label app2 --profile chrome:Default --background
+# reused app2 https://www.example.com/page    (same target, alias added)
+# task-tab origin=https://www.example.com label=app2 target=A0637EC0 status=active
+
+realbrowser tab ensure https://www.example.com/ --label different --profile chrome:Default --background
+# WHEN label `different` already points elsewhere:
+# ERROR duplicate_task_origin: already have an agent tab for origin https://www.example.com in this task under label app
+# next:
+#   realbrowser action state -t app --root active --compact
+#   realbrowser tab navigate -t app https://www.example.com/
+#   realbrowser tab ensure https://www.example.com/ --label different --force-new
+```
+
+**On `duplicate_task_origin`: do not invent a new label.** Read the error.
+The `next:` lines tell you the exact recovery command verbatim. The most
+common cause is "I just lost track of my own tab"; the fix is to USE the
+existing handle, not to create more tabs.
+
+To retry a navigation that returned an error page or after a 404, use
+`tab navigate` on the existing handle — never `tab ensure` with a new label:
+
+```bash
+realbrowser tab navigate -t app https://www.example.com/path
+```
+
+`tab navigate` and `tab close` refuse user-owned tabs by default. To work on
+a user tab, claim it first:
+
+```bash
+realbrowser tab select <prefix> --take-lease --label userpage --profile chrome:Default
+realbrowser tab navigate -t userpage https://example.com
+```
+
+End-of-task cleanup options:
+
+```bash
+realbrowser tab done --profile chrome:Default               # mark complete, leave open
+realbrowser tab done --close --profile chrome:Default       # mark complete and close mine
+realbrowser tab close --mine --profile chrome:Default       # close all my task tabs
+realbrowser tab close -t app --profile chrome:Default       # close one specific labeled tab
+```
+
+`--mine` and `tab done` only ever touch tabs the registry says belong to this
+task. The user's tabs are never closed.
+
+When `tab ensure --background` returns `background_create_unavailable` (no
+proven `browserContextId` for the requested profile yet), retry exactly once
+with `--best-effort-background` — that bootstraps a proven tab via the OS
+profile launcher. Subsequent `--background` calls work without it.
+
 ## Existing Tab In A Profile
 
 ```bash
 realbrowser profile list --active
-realbrowser tab list "ninzap.dev" --profile chrome:Default
-realbrowser tab select "ninzap.dev" --profile chrome:Default --label ninzap
-realbrowser read observe -t ninzap --profile chrome:Default
+realbrowser tab list "app.example" --profile chrome:Default
+realbrowser tab select "app.example" --profile chrome:Default --label app
+realbrowser read observe -t app --profile chrome:Default
 ```
 
 Use `tab list` first when the user asks to inspect a current/open tab. Use
@@ -63,15 +151,15 @@ Default context can remove repeated flags after the profile choice is clear:
 
 ```bash
 realbrowser session use profile:chrome:Default
-realbrowser tab list "ninzap.dev"
-realbrowser read observe -t ninzap
+realbrowser tab list "app.example"
+realbrowser read observe -t app
 realbrowser session clear
 ```
 
 In multi-agent workflows, keep each project/session in its own owner namespace:
 
 ```bash
-export REALBROWSER_OWNER=ninzap
+export REALBROWSER_OWNER=project-a
 realbrowser session use profile:chrome:Default
 realbrowser tab ensure http://localhost:3000 --profile chrome:Default --label app --background
 ```
@@ -86,7 +174,7 @@ second session to take over the target.
 Use the live signed-in tab/profile for inboxes, social sites, admin dashboards,
 console logs, account pages, and any task that depends on cookies or the current
 UI. Start with `profile list --active`, `tab list <query>`, and `tab select`.
-If the user names a profile such as "Tuyen" or provides a display-name hint,
+If the user names a profile such as "Work" or provides a display-name hint,
 resolve it through `profile list` / `profile inspect` instead of assuming
 `chrome:Default`.
 
@@ -166,10 +254,49 @@ If the page offers a stable sort URL/filter that changes "most relevant" into a
 chronological/current order, apply that early and verify the heading once before
 spending tokens on deeper DOM exploration.
 
-## ARIA Tree (Compact Interaction Planning)
+## ARIA Tree (Primary Interaction Reader)
 
-`read tree` fetches Chrome's accessibility tree via CDP. It is 5-20x more compact
-than DOM-based snapshots and is the primary tool for interaction planning.
+`read tree` fetches Chrome's accessibility tree via CDP. It IS the "one big
+read" agents reach for full HTML or full screenshot to get — the entire
+interactive surface (buttons, links, inputs, tabs, dropdowns) with refs
+attached, 5–20× more compact than DOM snapshots.
+
+The canonical pattern:
+
+```bash
+realbrowser read tree -t app -i -c        # once per page state, ~300-2000 tokens
+realbrowser action click -t app b3
+realbrowser read tree -t app -i -c -D     # delta after action, ~0-200 tokens
+realbrowser action fill -t app e1 "value"
+realbrowser read tree -t app -i -c -D     # delta after action
+```
+
+Anti-patterns (strictly more expensive than `read tree`):
+
+- **`read html` / full HTML to find elements:** modern SPAs ship 100k–1M tokens
+  of HTML. `read html --out FILE` is for offline grep, not interaction.
+- **`screenshot full` + vision to read content:** vision tokens are 5–20× more
+  expensive per byte than text and misread small text. You still need refs to
+  click — `read tree` returns them for free.
+- **`read query` to find what `read tree` already showed:** the tree already
+  enumerates every interactive element. `read query` is for a known CSS
+  selector you've already seen verbatim.
+- **Multiple readers on the same page state:** one `read tree` is the snapshot.
+  Following with `read snapshot`, `read query`, or `read items` on unchanged
+  state is duplication.
+- **Re-reading the full tree after a small action:** use `-D` (diff). A click
+  that opens a dropdown adds 5 lines; full re-reads pay for the whole tree.
+
+Graduated reader hierarchy:
+1. `read tree -i -c` — buttons, links, inputs, tabs with refs (primary)
+2. `read tree -i -c -D` — verify after action, shows only changes
+3. `read tree -i -c --selector main` — scope to a landmark
+4. `read items`/`read item` — feeds, lists, repeated rows (when tree's flat list
+   isn't enough)
+5. `read query <css>` — only for a CSS selector you've already seen verbatim
+6. `read snapshot --selector <css>` — DOM structure when ARIA tree is inadequate
+7. `read text --out FILE` + file search (`grep`/`sls`) — bulk text extraction
+8. `read html --out FILE` — offline HTML search (zero model tokens)
 
 ```bash
 realbrowser read tree -t app -i -c
@@ -188,8 +315,12 @@ realbrowser read tree -t app -i -c -D
 ```
 
 The diff output shows only added/removed lines, saving tokens on verify steps.
+Use `read tree --diff` as the default verify-after-action step instead of
+screenshots. Reserve screenshots for visual-only state (image previews, layout
+shifts, canvas rendering).
+
 Refs from `read tree` (`b1`, `l1`, `e1`) work with all action commands (`action
-click`, `action fill`, `action type`, `action submit`).
+click`, `action fill`, `action type`, `action submit`, `action scroll`).
 
 For large pages, combine flags: `read tree -i -c -d 3 --selector main` gives
 the interactive elements in the main landmark, limited to depth 3. This is
@@ -204,6 +335,20 @@ realbrowser read is checked e5 -t app
 ```
 
 Each returns bare `true` or `false` (2 tokens).
+
+## Scrolling
+
+```bash
+realbrowser action scroll -t app down 500
+realbrowser action scroll -t app up 300
+realbrowser action scroll -t app --selector '[data-scroll-root]' down 800
+realbrowser action scroll -t app e1 down 400
+```
+
+Scroll the window or a specific element. Directions: `up`, `down`, `left`,
+`right`. Default: `down 500`. Use `--selector` or a ref to scroll a container
+instead of the page window. Verify scroll position with `read tree --diff` after
+scrolling.
 
 ## Form, Upload, Submit
 
@@ -309,8 +454,9 @@ Capture network before reload/action when response bodies matter.
 
 Use `daemon monitor --json` when debugging CDP health, stale daemons, or buffer
 growth. Use `network export --out` or `network body --out --full` when the
-response is too large for stdout and should be inspected with `jq`, `rg`, or an
-editor.
+response is too large for stdout and should be inspected with the search tool
+your shell provides (`grep`/`jq`/`rg` on POSIX shells, `Select-String` /
+`ConvertFrom-Json` on PowerShell, or `node -e` anywhere) or an editor.
 
 Use `network capture --include-body --out tmp/network.json` only for explicit
 debug sessions; body capture requires `--out` unless `--force` is explicit.
@@ -367,3 +513,384 @@ normal CLI token arrays, and `$group.url`, `$group.label`, `$media`, and
 `$index` are substituted per iteration. `chain` runs inside one browser
 context, so put `--profile`, `--anonymous --session`, or `--browser-url` on the
 chain command rather than switching profiles inside individual steps.
+
+## Stable-URL vs Stateful-SPA Entry Points
+
+Two entry-point classes — pick by URL stability, not by site domain.
+
+- **Stable-URL sites**: search engines, wikis, code hosts, news, docs,
+  blogs, static product pages. Deep-link FIRST.
+- **Stateful SPAs**: sites where URL is not the source of truth — content
+  is hydrated from session/cookie state, server-rendered after auth, or
+  driven by a form. Homepage + UI FIRST.
+
+### Deep-link probe (stable-URL sites only)
+
+```bash
+"$REALBROWSER" tab ensure "https://<site>/<path>?<your-query-params>" \
+  --profile chrome:Default --label search --background --best-effort-background
+"$REALBROWSER" wait ready -t search --visual-stable --timeout 8000
+"$REALBROWSER" read observe -t search   # if title looks wrong, abandon to UI immediately
+"$REALBROWSER" read text -t search --selector main --out tmp/results.txt
+grep -nE "<your-pattern>" tmp/results.txt | head -30
+```
+
+URL-shape candidates come from prior observation — a sample form
+submission (most sites preserve `?key=value` params in the result URL),
+the site's docs, or the site's public API. Do not invent param names.
+
+### Stateful-form UI flow (canonical shape)
+
+This pattern works for any form-driven site: search/results pages,
+filtered listings, multi-step checkout flows, internal dashboards with
+filters, configurators, registration forms. The mechanics are the same —
+pick form triggers, set values, submit, read results.
+
+1. `tab ensure <homepage> --profile <p> --label <L> --background --best-effort-background`
+2. `read tree -t <L> -i -c` — list every input, dropdown, and primary
+   action button. Look for a `# cursor-clickables` section listing
+   `c<n>` refs for non-ARIA widgets (recent-action chips, custom day
+   cells, custom range sliders).
+3. **Recent-action chip:** if the homepage shows a `c<n>` chip matching
+   the user's request (a saved/recent search, a quick-link tile, a
+   "frequently visited" entry), one click often pre-fills the entire
+   form. Click it before tapping individual triggers.
+4. Otherwise, set each form value:
+   - For ARIA dropdowns: `action click <button-ref>` to open, then
+     `action click <option-ref>` from the freshly-re-read tree.
+   - For portal-rendered popovers (the layer is in a different DOM
+     subtree): `read autocomplete -t <L> --near <button-ref>` enumerates
+     items as `o1, o2, ...` refs. Then `action click <o-ref>`.
+   - For text inputs: `action fill <ref> "<value>"`. Add
+     `--require-change` when you suspect a custom widget that may silently
+     reject programmatic fill.
+   - For custom widgets without ARIA roles (date cells, color pickers,
+     custom range UI): use the `c<n>` non-ARIA refs from the tree, or a
+     verified CSS selector seen in prior output.
+5. Submit by exact visible label `action submit -t <L> --text "<button-label>"`
+   or by ref. If the click reports `covered-by:<sel>`, retry once with
+   `--bypass-overlay`.
+6. `wait ready -t <L> --visual-stable --timeout 30000`. If a bot/anti-bot
+   challenge page replaces the result (typical signals: page title or h1
+   contains words like "interruption", "verify", "moment", "checking",
+   "captcha", or shows a Cloudflare/PerimeterX/Datadome banner), STOP and
+   ask the user before promoting the tab to foreground.
+7. `read text -t <L> --selector main --out tmp/results.txt` then grep for
+   the pattern that matches the data shape you need.
+
+If the form fills and submits but the result page fails (challenge,
+redirect, session expired), report what you have from the form view
+(values entered, any data already visible) — don't loop.
+
+### Multi-step results: advance via the visible forward control
+
+Some sites split the result across multiple panels and require a forward
+click between panels (e.g. "step 1 of 3"). One `read tree -i -c` per panel,
+advance by ref, verify with `read tree --diff`.
+
+When advancing requires picking a placeholder option to unlock the next
+step, **pick the first/most-suitable by ref and move on**. Selecting an
+option in a results or comparison page is read-only intent — the
+commit/buy/submit step is the final confirmation screen.
+
+1. First panel visible. If the panel requires picking an option (radio,
+   tile, dropdown) before "next" is enabled, click the option you want
+   (or the first/cheapest if the user didn't specify).
+2. Click the forward control. Match the visible label on the page —
+   "Continue", "Next", "Confirm", "Proceed", or the localized equivalent
+   the site happens to show. Do not hardcode label assumptions across
+   sites.
+3. If a non-committing modal appears between panels (recommendation,
+   upsell, "are you sure"), dismiss via a clearly-non-committing visible
+   label ("Skip", "No thanks", "Close", "Maybe later", or the localized
+   equivalent shown). Re-read tree.
+4. Repeat until the panel you need is visible. STOP before any panel
+   that requires payment, irreversible commit, or PII submission unless
+   the user explicitly asked for that.
+
+### Virtualized result lists
+
+Long result lists are often virtualized (only ~6-10 rows in DOM at a
+time). If the page advertises "Showing N items" but `read text` returns
+only the first batch:
+
+```bash
+"$REALBROWSER" action scroll -t <L> down 2000
+"$REALBROWSER" action scroll -t <L> down 2000
+"$REALBROWSER" read text -t <L> --selector main --out tmp/all.txt
+```
+
+Without scroll, items rendered last (often the cheapest, the newest, or
+otherwise sort-last) are invisible. Cap at 3 scrolls — if results are
+still incomplete after that, report what you have.
+
+## Reader Cost Reference
+
+Typical input tokens per reader on a generic web page. Pick the cheapest reader
+that returns refs (or text, when refs are not needed).
+
+| Reader | Tokens | Refs? | Use when |
+|---|---|---|---|
+| `read tree -i -c` | 300–2,000 | yes | **Default for interaction** |
+| `read tree -i -c -D` | 0–200 | yes (delta) | **Verify after action** |
+| `read tree -i -c --selector main` | 100–500 | yes | Scope to a landmark |
+| `read text --out FILE` then `grep`/`sls` | ~0 (file) | no | Bulk text extraction |
+| `read items / read item` | 200–2,000 | yes | Feeds, lists, repeated rows |
+| `read query <css>` | 50–500 | yes | One known CSS selector |
+| `read snapshot --selector <css>` | 5,000–50,000 | yes | Tree inadequate (rare) |
+| `read html --out FILE` | ~0 (file) | no | Offline HTML grep only |
+| `screenshot capture` | ~600 image tokens | no | Visual state decision |
+| `screenshot full` then vision | 2,000–4,000 image tokens | no | **Never for parsing** |
+
+`screenshot full` followed by vision parsing is 10–1000× more expensive than
+`read tree -i -c` and still produces no refs to act on. Use it only for
+visual-state decisions (modal opened, image rendered).
+
+## Screenshot Decision Table
+
+Screenshots are for visual-only decisions. Reading text from screenshots is
+banned — vision tokens are 5-20× more expensive per byte and misread small
+digits.
+
+| Goal | Tool |
+|---|---|
+| "What does the whole long page look like?" | `screenshot full` (one shot) |
+| "Did the modal open?" / "Is the spinner gone?" | `screenshot capture` (viewport) |
+| "What items / values are listed?" | `read text --selector main --out` + grep |
+| "What buttons exist on the long form?" | `read tree -i -c --out` + grep |
+| "Did my click change the DOM?" | `read tree -i -c --diff` (~50 tokens, no screenshot) |
+
+**Anti-patterns:**
+- `screenshot capture` after every click "to confirm it worked" — `read tree
+  --diff` is 12× cheaper and tells you exactly what changed.
+- `screenshot capture` + scroll + `screenshot capture` + scroll loop —
+  one `screenshot full` is cheaper and not fragmented.
+- Vision to read prices/dates/labels — use `read text --out` + grep.
+
+## Failure Recovery Matrix
+
+| Failure type | Max attempts | Then |
+|---|---|---|
+| Ref stale/covered/not topmost | 1 | Re-read tree for fresh refs |
+| Click error contains `covered-by:<sel>` | 1 | `action scroll down 400` then retry; if still covered, retry with `action click <ref> --bypass-overlay` (dispatches events directly, ignores hit-test) |
+| `action fill` reports `accepted: false` or silent no-op (custom widget, masked input) | 1 | Re-fill with `--require-change` to fail loudly; if it errors, switch to the widget UI (open popover/dropdown, click an option) |
+| Dropdown item not in tree | 1 | `read autocomplete -t <label>` then `action click <o-ref>` |
+| Dropdown item not clickable | 1 | Type into search input instead |
+| CSS selector guess (not from prior output) | 0 | Use refs — never guess selectors |
+| CSS selector from prior output, not found | 1 | Fall back to `read tree -i -c` + refs |
+| `tab navigate` shows `WARN: page title looks like an error page` | 1 | URL is wrong — go back / use UI path. Don't retry the same URL. |
+| URL navigation 404 | 1 | Go back, use the UI path |
+| Any single interaction | 3 total | Stop. Switch strategy entirely. |
+
+Three failed commands on the same interaction = wrong approach. Escalate in
+this order — all within the user's specified site:
+
+1. `read tree -t <target> -i -c` — fresh view, refs reset
+2. `action press Escape` then re-read tree — close blocking overlay/modal
+3. `action scroll` to bring the target into view, then re-read tree
+4. Keyboard navigation: `action press Tab`, then `action press Enter`
+5. A different UI path to the same goal **on the same site** (homepage menu
+   instead of a homepage hero button)
+6. `network list --filter "/api/"` — check if the data is available via XHR
+   you can read without further interaction
+7. Direct URL navigation **on the same site** if the site supports deep links
+
+If all seven fail, stop and report the blocker. Do not silently switch to a
+different site or service.
+
+## Efficiency Patterns
+
+Concrete examples backing the efficiency rules in `SKILL.md`. Read these
+once per session and apply the rule shape, not the literal commands.
+
+### Read before acting — interpret the tree
+
+`read tree -i -c` returns the interactive surface as text. Interpret it the
+way a user would — match the user's request to what's on the page, *before*
+clicking.
+
+1. **Find what the user named.** Search the tree text for the exact label
+   ("Sign in", "Submit", "Buy now") and use the matching ref. Don't click
+   the first interactive element by reflex.
+2. **Read state attributes.** `[disabled]` means precondition missing;
+   `[expanded=false]` means children may not be reachable; `[modal]` means
+   only that dialog's controls are valid; `[required]`, `[checked]`,
+   `[focused]`, `value="..."` all change what action is correct.
+3. **Disambiguate by ancestor.** Two buttons share a name? One in a
+   `dialog`, one in `main` — pick the one in the right context.
+4. **Recognize blocking state.** Modal/`alertdialog` covers the page;
+   `aria-busy` or zero interactives means mid-load — `wait ready
+   --visual-stable` first.
+5. **Plan the whole flow from one tree.** A form usually shows every input
+   + submit in one read. Plan all the fills, then act.
+6. **On failure: re-read, don't retry.** "Not topmost", "covered", "ref
+   stale" mean the page changed since the tree was captured. `read tree
+   -i -c -D` shows what's different.
+
+### If it's on disk, grep — don't ask the browser again
+
+Once any reader writes content to disk via `--out`, the next search MUST be
+on the file. After `read tree --out FILE` / `read text --out FILE`, run
+`grep -nE 'pat' FILE` (POSIX) or `sls -Pattern 'pat' FILE` (PowerShell)
+instead of another `read query --text-filter`.
+
+**Banned anti-pattern:** capture to disk → 3+ `read query --text-filter`
+calls hunting for a label that's in the file. After the first failed
+`read query` on captured content, switch to file search.
+
+### Data extraction — one read, never scroll+screenshot in a loop
+
+```bash
+# BAD: 13 commands, ~10 minutes — scroll-and-screenshot loop
+screenshot capture -> scroll -> screenshot -> scroll -> screenshot -> ...
+
+# GOOD: 2 commands, ~3 seconds — one bulk text capture, then local search
+"$REALBROWSER" read text -t app --selector main --out tmp/results.txt
+grep -nE "<your-pattern>" tmp/results.txt   # POSIX
+sls -Pattern "<your-pattern>" tmp/results.txt  # PowerShell
+```
+
+One `read tree -i -c` captures ALL interactive elements regardless of fold
+position (CDP reads the full DOM, not just the rendered viewport). Use
+`--out` for pages with 50+ elements.
+
+### After-submit — one wait, no stacked sleeps
+
+```bash
+"$REALBROWSER" action click <submit-ref>
+"$REALBROWSER" wait ready -t app --visual-stable --timeout 30000
+"$REALBROWSER" read tree -t app -i -c --diff   # verify new state
+```
+
+`wait ready --visual-stable` already waits for network + DOM stability. Do
+not chain `sleep N`, and do not chain `tab focus --front` "to make the page
+work" (background works fine).
+
+### One authoritative signal = answer
+
+When the page exposes one authoritative signal for the fact you need —
+selected option, `[checked]` state, success modal/toast, line item in
+cart, URL parameter, value attribute on an input — treat that as the
+answer unless another signal directly contradicts it. Don't re-verify
+through header badges or alternate surfaces.
+
+### Dropdowns, pickers, autocomplete — type-first
+
+When a click opens a dropdown with a search input, type immediately — the
+input is usually auto-focused: `action type "search text"`.
+
+If items don't show in `read tree` (custom autocomplete without
+`role=listbox/option`), run `read autocomplete -t <label>` — enumerates
+the floating layer as `o1, o2, …` refs.
+
+**Anchor with `--near <ref>` for click-then-popup widgets** — when the
+dropdown opens after clicking a button (not typing into an input), pass
+`read autocomplete -t <label> --near <button-ref>`. Without `--near`, the
+reader uses `document.activeElement`, which lies for custom popovers.
+
+If `read autocomplete` returns `(no eligible layer near anchor)`, the
+dropdown likely closed — re-click the field, retry with `--near`.
+
+**Silent fill no-ops on custom widgets.** Custom date inputs, masked
+inputs, and React/Vue controlled components often accept `el.value = "..."`
+programmatically but render the placeholder back. Pass
+`action fill <ref> "<value>" --require-change` to fail loudly when the
+visible value didn't change. Then pivot to the widget's own UI (open the
+popover, click an option).
+
+### Command-count checkpoints
+
+At command 5: "Am I making real progress?" If more than 1 command did
+not advance toward the goal, you're in a loop. Re-read tree, use refs.
+
+At command 10: if not nearly complete, you have taken a wrong approach.
+Do not continue — reassess fundamentally.
+
+### Refs first — CSS only when known
+
+After `read tree -i -c`, every interactive element has a ref (`b1`, `l1`,
+`e1`). Use refs: `action click b3`, `action fill e2 "value"`,
+`action type e1 "text"`.
+
+CSS selectors are allowed only when *known* — verbatim from prior output,
+app source you read, or a standard landmark (`main`, `nav`,
+`[role="dialog"]`).
+
+A selector is a *guess* (banned) if you used `[class*="..."]`, modified a
+seen selector (`.results-list` → `.results-item`), or copied from another
+site. The test: "Where did I see this selector?" — if you can't point to a
+prior output line, it's a guess.
+
+**Banned: iterative selector hunting.** After the first failed CSS result,
+switch to refs. Do not run a second `read query` with a different selector.
+
+### Lazy-loaded content (infinite scroll, virtualized lists)
+
+Most sites are NOT virtualized — try one tree read first. When the tree
+shows 5 results but the page advertises 30, or `read text` contains
+"Showing 1-5 of 30":
+
+- Issue 2-3 progressively-deeper scrolls (`action scroll down 2000`),
+  re-reading text or tree once after the last scroll — not after each.
+- Or, if the URL supports `?page=N` / `?limit=100`, prefer `tab navigate`
+  to a deeper page over scroll.
+- Cap at 3 scrolls. If results still incomplete, report what you have.
+
+### Talk to the user every 5+ tool calls
+
+If you've made 5 or more tool calls without emitting any text to the user,
+emit a one-sentence progress note. Silent runs ending in
+`[Request interrupted by user]` are failure modes the user pays for in
+real time.
+
+### Report partial success and stop
+
+When the user asks for multi-part data and you have already captured at
+least one part with confidence, **report what you have first**. Don't
+navigate away from a working results page to re-fetch the rest. SPA
+results pages frequently lose state on back/forward, direct nav, or full
+reload. A 6-minute happy path becomes a 12-minute timeout when you abandon
+a captured result to chase the next one.
+
+### Multi-step flows and stateful forms
+
+Any wizard, checkout, or **results page that shows one step at a time** is
+a multi-step flow. One `read tree -i -c` per page state, advance by the
+correct ref, verify with `read tree --diff` or `read observe`.
+
+When advancing requires picking a placeholder option (default, shipping,
+"any" choice) to unlock the next step, pick the first/most-suitable by
+ref and move on. Don't bail mid-flow; bail at the final commit.
+
+If a non-essential modal appears between steps (upsell, recommendation,
+"are you sure"), dismiss it via the visible non-committing label
+("Skip", "No thanks", "Close", "Maybe later", or the localized equivalent).
+Re-read tree.
+
+### Never truncate tree output
+
+Truncating with `| head` / `| tail` (POSIX) or `| Select-Object -First` /
+`gc -Head` (PowerShell) discards elements you need. If the output is too
+large for context, use `--out tmp/tree.txt` and read the file, or scope at
+the source with `--selector` / `--depth N` / `--limit N`.
+
+## Shell Portability (POSIX vs PowerShell)
+
+Examples elsewhere use POSIX shell syntax (`grep`, `sleep`, `head`, `wc`)
+which works on macOS, Linux, WSL, and Git Bash on Windows. Native Windows
+PowerShell substitutes:
+
+| POSIX | PowerShell | Notes |
+|---|---|---|
+| `grep -E "x" FILE` | `sls -Pattern "x" FILE` | `sls` = `Select-String` |
+| `grep -c "x" FILE` | `(sls "x" FILE).Count` | count matches |
+| `head -50 FILE` | `gc FILE -Head 50` | `gc` = `Get-Content` |
+| `wc -l FILE` | `(gc FILE).Count` | line count |
+| `sleep 1` | `Start-Sleep 1` | (but prefer `wait ready`) |
+| `cat FILE` | `gc FILE` |  |
+| `rg "x" FILE` | `sls -Pattern "x" FILE` | ripgrep is third-party |
+| `jq '.x' FILE.json` | `gc FILE.json \| ConvertFrom-Json \| % x` | jq is third-party |
+
+`node -e "<js>"` is a portable last resort — Node is required to run
+`realbrowser`, so it's available wherever the CLI runs. Use it for one-off
+parsing that exceeds shell ergonomics on any platform.

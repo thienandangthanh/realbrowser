@@ -20,8 +20,8 @@ import crypto from "node:crypto";
 const VERSION = "0.3.0";
 const STATE_SCHEMA_VERSION = "owner-lease-1";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
-const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
 const IS_WINDOWS = process.platform === "win32";
+const IS_MAC = process.platform === "darwin";
 const DEFAULT_TIMEOUT = 15_000;
 const START_TIMEOUT = IS_WINDOWS ? 15_000 : 8_000;
 const DAEMON_START_TIMEOUT = Number(process.env.REALBROWSER_DAEMON_START_TIMEOUT_MS || 45_000);
@@ -30,8 +30,8 @@ const MIN_TARGET_PREFIX_LEN = 8;
 const BUFFER_LIMIT = Number(process.env.REALBROWSER_BUFFER_LIMIT || 50_000);
 const FILE_CHOOSER_CLICK_GUARD_MS = Math.max(50, Math.min(2_000, Number(process.env.REALBROWSER_FILE_CHOOSER_CLICK_GUARD_MS || 350)));
 const FILE_CHOOSER_BACKGROUND_CLICK_GUARD_MS = Math.max(FILE_CHOOSER_CLICK_GUARD_MS, Math.min(2_000, Number(process.env.REALBROWSER_FILE_CHOOSER_BACKGROUND_CLICK_GUARD_MS || 2_000)));
-const DEFAULT_SCREENSHOT_MAX_SIDE = parseOptionalIntegerEnv("REALBROWSER_SCREENSHOT_MAX_SIDE", parseOptionalIntegerEnv("REALBROWSER_SCREENSHOT_MAX_SIDE", 2000));
-const DEFAULT_SCREENSHOT_MAX_BYTES = parseOptionalBytesEnv("REALBROWSER_SCREENSHOT_MAX_BYTES", parseOptionalBytesEnv("REALBROWSER_SCREENSHOT_MAX_BYTES", 5 * 1024 * 1024));
+const DEFAULT_SCREENSHOT_MAX_SIDE = parseOptionalIntegerEnv("REALBROWSER_SCREENSHOT_MAX_SIDE", 2000);
+const DEFAULT_SCREENSHOT_MAX_BYTES = parseOptionalBytesEnv("REALBROWSER_SCREENSHOT_MAX_BYTES", 5 * 1024 * 1024);
 const DEFAULT_SCREENSHOT_JPEG_QUALITY = parseOptionalIntegerEnv("REALBROWSER_SCREENSHOT_JPEG_QUALITY", 85);
 const SCREENSHOT_QUALITY_STEPS = [85, 75, 65, 55, 45, 35];
 const SCREENSHOT_SIDE_STEPS = [1800, 1600, 1400, 1200, 1000, 800];
@@ -46,8 +46,15 @@ const LABELS_FILE = path.join(STATE_DIR, "labels.json");
 const LABEL_META_FILE = path.join(STATE_DIR, "label-meta.json");
 const TARGET_META_FILE = path.join(STATE_DIR, "target-meta.json");
 const LEASES_FILE = path.join(STATE_DIR, "target-leases.json");
+const TASK_TABS_FILE = path.join(STATE_DIR, "task-tabs.json");
+// v0.3.0: session-scoped registry. Keyed by Chrome instance (DevTools browser
+// UUID from browserUrl, anonymous-dir for --anonymous, contextKey for fallback).
+// Shared across all tasks/owners that talk to the SAME Chrome — fixes the
+// "nested subagent each opens its own same-origin tab" failure mode.
+const SESSION_REGISTRY_FILE = path.join(STATE_DIR, "session-registry.json");
 const HANDLES_DIR = path.join(STATE_DIR, "handles");
 const DEFAULT_CONTEXT_FILE = path.join(STATE_DIR, "default-context.json");
+const DEFAULT_TASK_ID = "default";
 const OWNER_ENV_KEYS = [
   "REALBROWSER_OWNER",
   "CODEX_THREAD_ID",
@@ -65,11 +72,11 @@ const GROUPS = {
   profile: ["list", "inspect", "relaunch"],
   session: ["list", "use", "clear", "stop"],
   daemon: ["status", "doctor", "monitor", "restart", "stop"],
-  tab: ["list", "select", "ensure", "new", "navigate", "label", "focus", "close", "handoff", "resume"],
+  tab: ["list", "select", "ensure", "new", "navigate", "label", "focus", "close", "handoff", "resume", "done"],
   handle: ["create", "list", "release"],
-  read: ["observe", "size", "tree", "snapshot", "query", "query-selector", "items", "item", "text", "html", "links", "forms", "url", "is"],
+  read: ["observe", "size", "tree", "snapshot", "query", "query-selector", "items", "item", "text", "html", "links", "forms", "url", "is", "autocomplete", "overlay"],
   wait: ["ready", "selector", "text", "url", "load", "network"],
-  action: ["state", "root", "click", "fill", "type", "press", "key", "upload", "submit", "hover", "select"],
+  action: ["state", "root", "click", "fill", "type", "press", "key", "upload", "submit", "hover", "select", "scroll"],
   screenshot: ["capture", "full", "area", "device", "responsive"],
   console: ["list", "get", "clear", "capture"],
   network: ["list", "get", "body", "export", "clear", "capture"],
@@ -82,10 +89,37 @@ const GROUPS = {
   chain: ["run"],
 };
 
+// Role classification adopted from openclaw's snapshot-roles.ts so the two
+// drivers produce equivalent snapshots. Sets match openclaw verbatim — keep in
+// sync if we ever update.
+
+// Roles that represent user-interactive elements; always get a ref.
 const INTERACTIVE_ROLES = new Set([
-  "button", "link", "textbox", "checkbox", "radio", "combobox",
-  "listbox", "menuitem", "menuitemcheckbox", "menuitemradio",
-  "option", "searchbox", "slider", "spinbutton", "switch", "tab", "treeitem",
+  "button", "checkbox", "combobox", "link", "listbox", "menuitem",
+  "menuitemcheckbox", "menuitemradio", "option", "radio", "searchbox", "slider",
+  "spinbutton", "switch", "tab", "textbox", "treeitem",
+]);
+
+// Roles that carry meaningful content; get a ref when named. Render in compact
+// mode regardless of name (openclaw does the same).
+const CONTENT_ROLES = new Set([
+  "article", "cell", "columnheader", "gridcell", "heading", "listitem",
+  "main", "navigation", "region", "rowheader",
+]);
+
+// Structural/container roles — skipped in compact mode unless named.
+const STRUCTURAL_ROLES = new Set([
+  "application", "directory", "document", "generic", "grid", "group", "ignored",
+  "list", "menu", "menubar", "none", "presentation", "row", "rowgroup", "table",
+  "tablist", "toolbar", "tree", "treegrid",
+]);
+
+// Extra landmarks Chrome's AX tree emits that openclaw doesn't classify but
+// we want to preserve as hierarchy anchors when they scope interactive
+// descendants. These render even without a name.
+const ALWAYS_LANDMARK_ROLES = new Set([
+  "banner", "complementary", "contentinfo", "dialog", "alertdialog", "tabpanel",
+  "form", "search",
 ]);
 
 const TARGET_REQUIRED_GROUPS = new Set([
@@ -110,6 +144,8 @@ const VALUE_FLAGS = new Set([
   "--ready-text", "--min-cards", "--params", "--var", "--set", "--ref",
   "--foreach", "--reuse", "--wait", "--duration", "--har", "--settle-ms",
   "-d", "--depth", "--max-nodes", "--max-labels", "--max-stitch-captures",
+  "--near",
+  "--task",
 ]);
 
 const BOOLEAN_FLAGS = new Set([
@@ -125,8 +161,10 @@ const BOOLEAN_FLAGS = new Set([
   "--full-stdout", "--dry-run", "--dispatch-events", "--visual-stable",
   "--screenshot", "--annotate-refs", "--annotate", "--labels", "--mobile-emulation", "--mobile",
   "--no-skeletons", "--latest", "--active", "--stdin", "--final", "--cdp",
-  "--system", "--deep", "--allow-file-dialog", "--no-normalize", "--normalize",
+  "--system", "--deep", "--allow-file-dialog", "--no-normalize", "--normalize", "--bypass-overlay",
+  "--require-change",
   "--take-lease", "--all", "--global",
+  "--mine", "--owned", "--force-new", "--allow-user-tab-mutation", "--close",
 ]);
 
 class CliError extends Error {
@@ -362,15 +400,16 @@ function validateBeforeContext(parsed) {
 }
 
 function validateActionArgs(command, args = [], flags = {}) {
-  if (command === "submit" && !args[0] && !flags.text) throw new CliError("action submit requires <button-ref> or --text <exact label>", {
+  if (command === "submit" && !args[0] && !flags.text && !flags.ref) throw new CliError("action submit requires <button-ref> or --text <exact label>", {
     code: "final_action_requires_target",
     exitCode: 2,
     next: ["realbrowser action state -t <target> --root active --compact"],
   });
-  if ((command === "click" || command === "hover") && !(args[0] || flags.text)) throw usage(`action ${command} requires <ref|selector>`);
+  if ((command === "click" || command === "hover") && !(args[0] || flags.text || flags.ref)) throw usage(`action ${command} requires <ref|selector>`);
   if (command === "fill" || command === "select") {
-    const hasValue = args.length > 1 || flags.stdin || flags.valueFile;
-    if (!args[0] || !hasValue) throw usage(`action ${command} requires <ref|selector> <value>`);
+    const hasRef = args[0] || flags.ref;
+    const hasValue = (args[0] ? args.length > 1 : args.length >= 1) || flags.stdin || flags.valueFile;
+    if (!hasRef || !hasValue) throw usage(`action ${command} requires <ref|selector> <value>`);
   }
   if (command === "type" && !(args.length || flags.stdin || flags.valueFile)) throw usage("action type requires <text> or --stdin/--value-file");
   if ((command === "press" || command === "key") && !args.join(" ")) throw usage(`action ${command} requires <key>`);
@@ -512,6 +551,67 @@ function baseContextKeyFromScopedKey(key) {
 function ownerFromScopedContextKey(key) {
   const index = String(key || "").indexOf(OWNER_SCOPE_SEPARATOR);
   return index >= 0 ? String(key).slice(index + OWNER_SCOPE_SEPARATOR.length) : "";
+}
+
+function resolveTaskId(flags = {}) {
+  const candidates = [
+    flags.task,
+    process.env.REALBROWSER_TASK_ID,
+    flags.owner,
+    process.env.REALBROWSER_OWNER,
+  ];
+  for (const value of candidates) {
+    const normalized = normalizeOwner(value);
+    if (normalized) return normalized;
+  }
+  return DEFAULT_TASK_ID;
+}
+
+function canonicalOriginKey(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl || ""));
+  } catch {
+    return `url:${String(rawUrl || "").trim()}`;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    parsed.hash = "";
+    return `url:${parsed.href}`;
+  }
+  const defaultPort = parsed.protocol === "https:" ? "443" : "80";
+  const port = parsed.port && parsed.port !== defaultPort ? `:${parsed.port}` : "";
+  return `${parsed.protocol}//${parsed.hostname.toLowerCase()}${port}`;
+}
+
+function taskRegistryScopeKey(contextScopeKey, taskId) {
+  const safeTask = normalizeOwner(taskId) || DEFAULT_TASK_ID;
+  return `${contextScopeKey}@@task:${safeTask}`;
+}
+
+function taskTabRecordIsLive(record, liveById) {
+  return Boolean(record?.targetId && liveById && liveById.has(record.targetId));
+}
+
+function duplicateTaskOriginError({ origin, existing, requestedLabel, url }) {
+  const label = existing?.label || existing?.suggestedTarget || (existing?.targetId || "").slice(0, MIN_TARGET_PREFIX_LEN);
+  const requested = requestedLabel || "new-label";
+  return new CliError(`already have an agent tab for origin ${origin} in this task under label ${label}`, {
+    code: "duplicate_task_origin",
+    exitCode: 2,
+    existing: {
+      label,
+      target: existing?.targetId || "",
+      url: existing?.url || "",
+      origin,
+      owner: existing?.owner,
+      task: existing?.taskId,
+    },
+    next: [
+      `realbrowser action state -t ${label} --root active --compact`,
+      `realbrowser tab navigate -t ${label} ${url}`,
+      `realbrowser tab ensure ${url} --label ${requested} --force-new`,
+    ],
+  });
 }
 
 function anonymousContextKey(flags, session) {
@@ -712,15 +812,31 @@ function contextFlagsForKnownTarget(target, owner) {
   const raw = String(target || "").replace(/^label:/, "").trim();
   if (!raw || raw.startsWith("cdp:")) return {};
   const labels = readJson(LABELS_FILE) || {};
-  const matches = [];
+  // Two-tier resolution:
+  //   1. Owner-scoped first (preserves existing behavior for parallel/scoped
+  //      sessions where you don't want a stale-labeled tab from another agent
+  //      to hijack your --target).
+  //   2. Cross-owner fallback when no same-owner match exists. This is what
+  //      rescues the "label persisted in terminal pane A but pane B has a fresh
+  //      TERM_SESSION_ID-derived owner" case — the same base context (e.g.
+  //      profile:chrome:Default) is unambiguous even across owners, so we
+  //      apply it. The daemon-side label resolver does the same kind of
+  //      fallback so the label itself also resolves to the right targetId.
+  const sameOwner = [];
+  const otherOwner = [];
   for (const [contextKey, contextLabels] of Object.entries(labels)) {
     if (!contextLabels || typeof contextLabels !== "object") continue;
+    if (typeof contextLabels[raw] !== "string") continue;
     const scopedOwner = ownerFromScopedContextKey(contextKey);
-    if (scopedOwner && scopedOwner !== owner) continue;
-    if (contextLabels[raw]) matches.push(contextKey);
+    if (!scopedOwner || scopedOwner === owner) sameOwner.push(contextKey);
+    else otherOwner.push(contextKey);
   }
-  const unique = [...new Set(matches.map(baseContextKeyFromScopedKey))];
-  return unique.length === 1 ? contextFlagsFromString(unique[0]) : {};
+  const sameUnique = [...new Set(sameOwner.map(baseContextKeyFromScopedKey))];
+  if (sameUnique.length === 1) return contextFlagsFromString(sameUnique[0]);
+  if (sameUnique.length > 1) return {};
+  const otherUnique = [...new Set(otherOwner.map(baseContextKeyFromScopedKey))];
+  if (otherUnique.length === 1) return contextFlagsFromString(otherUnique[0]);
+  return {};
 }
 
 async function defaultContextFlags(owner) {
@@ -787,7 +903,11 @@ async function rpc(context, payload) {
       "content-length": Buffer.byteLength(body),
     },
     body,
-    timeoutMs: payload.flags?.timeout || DEFAULT_TIMEOUT + 5000,
+    // CLI->daemon RPC timeout. Cold-start tab ensure (chrome://version probe
+    // + named-profile launcher + slow SPA load + bot-challenge) can take
+    // 30-50s legitimately. The CLI is a thin client and should wait as long
+    // as the daemon is willing to process. Per-flag override still wins.
+    timeoutMs: payload.flags?.timeout || 60_000,
   });
   if (response.statusCode >= 400) {
     let parsed;
@@ -815,7 +935,7 @@ async function ensureDaemon(context) {
     await fsp.rm(stateFile, { force: true }).catch(() => {});
     const token = crypto.randomBytes(24).toString("hex");
     const contextPath = `${stateFile}.context.json`;
-    await writeJsonFile(contextPath, { context, token, stateFile, labelsFile: LABELS_FILE, labelMetaFile: LABEL_META_FILE, targetMetaFile: TARGET_META_FILE, leasesFile: LEASES_FILE, artifactDir: ARTIFACT_DIR });
+    await writeJsonFile(contextPath, { context, token, stateFile, labelsFile: LABELS_FILE, labelMetaFile: LABEL_META_FILE, targetMetaFile: TARGET_META_FILE, leasesFile: LEASES_FILE, taskTabsFile: TASK_TABS_FILE, sessionRegistryFile: SESSION_REGISTRY_FILE, artifactDir: ARTIFACT_DIR });
     const child = spawn(process.execPath, [SCRIPT_PATH, "__daemon", contextPath], {
       detached: true,
       stdio: "ignore",
@@ -978,6 +1098,29 @@ async function runDaemon(args) {
   }
 }
 
+// CLI command groups → BrowserDaemon method dispatcher. One entry per
+// top-level group; replaces a 16-line if/else-if chain that drifted as
+// new groups were added. To add a new group: register the handler here
+// and define the corresponding method on BrowserDaemon.
+const DAEMON_GROUP_HANDLERS = {
+  tab: (d, command, args, flags) => d.tab(command, args, flags),
+  handle: (d, command, args, flags) => d.handle(command, args, flags),
+  read: (d, command, args, flags) => d.read(command, args, flags),
+  wait: (d, command, args, flags) => d.wait(command, args, flags),
+  action: (d, command, args, flags) => d.action(command, args, flags),
+  screenshot: (d, command, args, flags) => d.screenshot(command, args, flags),
+  console: (d, command, args, flags) => d.console(command, args, flags),
+  network: (d, command, args, flags) => d.network(command, args, flags),
+  state: (d, command, args, flags) => d.state(command, args, flags),
+  dialog: (d, command, args, flags) => d.dialog(command, args, flags),
+  perf: (d, command, args, flags) => d.perf(command, args, flags),
+  download: (d, command, args, flags) => d.download(command, args, flags),
+  export: (d, command, args, flags) => d.export(command, args, flags),
+  devtools: (d, command, args, flags) => d.devtools(command, args, flags),
+  chain: (d, _command, args, flags) => d.chain(args, flags),
+  daemon: (d, command, args, flags) => d.daemon(command, args, flags),
+};
+
 class BrowserDaemon {
   constructor(boot) {
     this.boot = boot;
@@ -988,6 +1131,8 @@ class BrowserDaemon {
     this.labelMetaFile = boot.labelMetaFile || LABEL_META_FILE;
     this.targetMetaFile = boot.targetMetaFile || TARGET_META_FILE;
     this.leasesFile = boot.leasesFile || LEASES_FILE;
+    this.taskTabsFile = boot.taskTabsFile || TASK_TABS_FILE;
+    this.sessionRegistryFile = boot.sessionRegistryFile || SESSION_REGISTRY_FILE;
     this.artifactDir = boot.artifactDir || ARTIFACT_DIR;
     this.cdp = new CDP();
     this.browserUrl = "";
@@ -1004,6 +1149,8 @@ class BrowserDaemon {
     this.labelMeta = readJson(this.labelMetaFile) || {};
     this.targetMeta = readJson(this.targetMetaFile) || {};
     this.leases = readJson(this.leasesFile) || {};
+    this.taskTabs = readJson(this.taskTabsFile) || {};
+    this.sessionRegistry = readJson(this.sessionRegistryFile) || {};
     this.anonymousProcess = null;
     this.anonymousDir = null;
     this.server = null;
@@ -1084,6 +1231,7 @@ class BrowserDaemon {
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-background-networking",
+      "--window-size=1280,800",
       ...(this.context.incognito ? ["--incognito"] : []),
       ...(this.context.headless ? ["--headless=new", "--disable-gpu"] : []),
       "about:blank",
@@ -1147,10 +1295,25 @@ class BrowserDaemon {
   contextScopeKey() {
     return ownerScopedContextKey(this.context.key, this.owner());
   }
-  labelsForContext({ includeLegacy = true } = {}) {
+  labelsForContext({ includeLegacy = true, includeCrossOwner = false } = {}) {
     const scoped = this.labels[this.contextScopeKey()] || {};
-    if (!includeLegacy) return scoped;
-    return { ...(this.labels[this.context.key] || {}), ...scoped };
+    let merged = includeLegacy ? { ...(this.labels[this.context.key] || {}), ...scoped } : { ...scoped };
+    if (includeCrossOwner) {
+      // Fallback: include labels from OTHER owners under the same base context
+      // (e.g. profile:chrome:Default). Same-owner labels still win on conflict.
+      // Surfaces label-set-in-pane-A from pane-B when TERM_SESSION_ID changed.
+      const baseKey = this.context.key;
+      const crossOwner = {};
+      for (const [storedKey, storedLabels] of Object.entries(this.labels || {})) {
+        if (!storedLabels || typeof storedLabels !== "object") continue;
+        if (baseContextKeyFromScopedKey(storedKey) !== baseKey) continue;
+        for (const [label, targetId] of Object.entries(storedLabels)) {
+          if (typeof targetId === "string" && !(label in crossOwner)) crossOwner[label] = targetId;
+        }
+      }
+      merged = { ...crossOwner, ...merged };
+    }
+    return merged;
   }
   labelMetaForContext({ includeLegacy = true } = {}) {
     const scoped = this.labelMeta[this.contextScopeKey()] || {};
@@ -1192,17 +1355,23 @@ class BrowserDaemon {
     };
   }
   async healthPayload() {
-    const targets = await this.tabs().catch(() => []);
+    // v0.3.0 (codex P1 fix): report ok=false when the CDP WebSocket is no
+    // longer open. Previously tabs() failures were swallowed and the daemon
+    // returned ok=true even after Chrome crashed / the socket closed, causing
+    // stale daemons to coexist with live ones (and HTTP timeouts for callers).
+    const cdpReady = this.cdp?.ws?.readyState === 1; // WebSocket.OPEN
+    const targets = cdpReady ? await this.tabs().catch(() => null) : null;
     const bufferSizes = (map) => Object.fromEntries([...map.entries()].map(([targetId, buffer]) => [targetId.slice(0, MIN_TARGET_PREFIX_LEN), { size: buffer.size, totalAdded: buffer.totalAdded }]));
     return {
-      ok: true,
+      ok: cdpReady && targets !== null,
+      cdpReady,
       pid: process.pid,
       version: VERSION,
       runtimeSchema: STATE_SCHEMA_VERSION,
       context: this.publicContext(),
       browserUrl: this.browserUrl,
-      targets: targets.map((target) => ({ suggestedTarget: target.suggestedTarget, title: target.title, url: target.url })),
-      targetCount: targets.length,
+      targets: (targets || []).map((target) => ({ suggestedTarget: target.suggestedTarget, title: target.title, url: target.url })),
+      targetCount: targets?.length ?? 0,
       owner: this.owner(),
       buffers: {
         console: bufferSizes(this.consoleBuffers),
@@ -1219,6 +1388,7 @@ class BrowserDaemon {
         if (key.endsWith(`:${targetId}`)) store.stale = true;
       }
       this.releaseTargetLeaseEverywhere(targetId).catch(() => {});
+      this.removeTaskTab(targetId).catch(() => {});
     });
     await this.cdp.send("Target.setDiscoverTargets", { discover: true }).catch(() => {});
   }
@@ -1233,24 +1403,15 @@ class BrowserDaemon {
       this.labelMeta = readJson(this.labelMetaFile) || {};
       this.targetMeta = readJson(this.targetMetaFile) || {};
       this.leases = readJson(this.leasesFile) || {};
+      this.taskTabs = readJson(this.taskTabsFile) || {};
+      // v0.3.0 (codex P1 fix): hot-reload session registry too. Parallel
+      // daemons sharing the same Chrome instance write the same file, and
+      // the constructor-only load left this daemon with stale data.
+      this.sessionRegistry = readJson(this.sessionRegistryFile) || {};
       const { group, command, args = [], flags = {} } = payload;
-      if (group === "tab") return await this.tab(command, args, flags);
-      if (group === "handle") return await this.handle(command, args, flags);
-      if (group === "read") return await this.read(command, args, flags);
-      if (group === "wait") return await this.wait(command, args, flags);
-      if (group === "action") return await this.action(command, args, flags);
-      if (group === "screenshot") return await this.screenshot(command, args, flags);
-      if (group === "console") return await this.console(command, args, flags);
-      if (group === "network") return await this.network(command, args, flags);
-      if (group === "state") return await this.state(command, args, flags);
-      if (group === "dialog") return await this.dialog(command, args, flags);
-      if (group === "perf") return await this.perf(command, args, flags);
-      if (group === "download") return await this.download(command, args, flags);
-      if (group === "export") return await this.export(command, args, flags);
-      if (group === "devtools") return await this.devtools(command, args, flags);
-      if (group === "chain") return await this.chain(args, flags);
-      if (group === "daemon") return await this.daemon(command, args, flags);
-      throw usage(`unsupported daemon command: ${group} ${command}`);
+      const handler = DAEMON_GROUP_HANDLERS[group];
+      if (!handler) throw usage(`unsupported daemon command: ${group} ${command}`);
+      return await handler(this, command, args, flags);
     } finally {
       this.context = previousContext;
     }
@@ -1269,6 +1430,51 @@ class BrowserDaemon {
       next: ["run realbrowser daemon monitor --json and retry with the target context"],
     });
   }
+  async findActiveTabsByWindow(tabs) {
+    if (!tabs.length) return new Map();
+    const visibleByWindow = new Map();
+    const probe = async (tab) => {
+      let sessionId = this.sessions.get(tab.targetId);
+      let weAttached = false;
+      try {
+        if (!sessionId) {
+          const att = await this.cdp.send("Target.attachToTarget", { targetId: tab.targetId, flatten: true }, undefined, 3000);
+          sessionId = att.sessionId;
+          weAttached = true;
+        }
+        const visRes = await this.cdp.send("Runtime.evaluate", {
+          expression: "document.visibilityState",
+          returnByValue: true,
+        }, sessionId, 2000);
+        if (visRes.result?.value === "visible") {
+          const winRes = await this.cdp.send("Browser.getWindowForTarget", { targetId: tab.targetId }, undefined, 2000).catch(() => null);
+          const windowId = winRes?.windowId;
+          const key = windowId !== undefined ? windowId : "__no_window__";
+          if (!visibleByWindow.has(key)) visibleByWindow.set(key, tab.targetId);
+        }
+      } catch {}
+      if (weAttached && sessionId) {
+        await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => {});
+      }
+    };
+    await Promise.all(tabs.slice(0, 30).map(probe));
+    return visibleByWindow;
+  }
+  async findTabToRestore(visibleByWindow, newTabId) {
+    if (!visibleByWindow || !visibleByWindow.size) return null;
+    try {
+      const winRes = await this.cdp.send("Browser.getWindowForTarget", { targetId: newTabId }, undefined, 2000);
+      const windowId = winRes?.windowId;
+      if (windowId !== undefined) {
+        const candidate = visibleByWindow.get(windowId);
+        if (candidate && candidate !== newTabId) return candidate;
+      }
+    } catch {}
+    for (const targetId of visibleByWindow.values()) {
+      if (targetId !== newTabId) return targetId;
+    }
+    return null;
+  }
   async tabsRaw() {
     const { targetInfos } = await this.cdp.send("Target.getTargets", {}, undefined, DEFAULT_TIMEOUT);
     return targetInfos
@@ -1278,13 +1484,18 @@ class BrowserDaemon {
   }
   async tabs() {
     const raw = await this.tabsRaw();
-    const labelsForContext = this.labelsForContext();
+    // Display labels include cross-owner same-base-context entries so a label
+    // set in another terminal pane (different TERM_SESSION_ID) still surfaces in
+    // tab list. Mutations (setLabel) still write under the current owner, so
+    // session-local label registry behavior is preserved.
+    const labelsForContext = this.labelsForContext({ includeCrossOwner: true });
     const targetIds = raw.map((tab) => tab.targetId);
     const prefixLen = getDisplayPrefixLength(targetIds);
     return raw.map((tab) => {
       const label = Object.entries(labelsForContext).find(([, id]) => id === tab.targetId)?.[0];
       const lease = this.leaseForTarget(tab.targetId);
       const targetPrefix = tab.targetId.slice(0, prefixLen);
+      const targetMeta = this.targetMetaForTarget(tab.targetId);
       const base = {
         id: `cdp:${targetPrefix}`,
         targetId: tab.targetId,
@@ -1294,17 +1505,317 @@ class BrowserDaemon {
         suggestedTarget: label || targetPrefix,
         title: tab.title || "",
         url: tab.url || "",
+        requestedUrl: targetMeta?.requestedUrl || "",
         attached: Boolean(tab.attached),
         context: this.publicContext(),
       };
       const profileOwned = this.profileTargetProven(base);
+      const ownership = this.classifyTabOwnership(base, {});
+      const taskRecord = this.taskRecordForTarget(tab.targetId);
       return {
         ...base,
         profileOwned,
+        ownership,
+        taskId: taskRecord?.taskId || "",
+        origin: taskRecord?.origin || canonicalOriginKey(base.url || base.requestedUrl || ""),
         profileOwnership: this.isBrowserScopedProfileContext()
           ? (profileOwned ? "profile-open-proven" : "unproven-browser-scope")
           : "proven",
       };
+    });
+  }
+  taskRecordForTarget(targetId) {
+    if (!targetId) return null;
+    const baseScope = this.contextScopeKey();
+    for (const [scopeKey, origins] of Object.entries(this.taskTabs || {})) {
+      if (typeof scopeKey !== "string" || !scopeKey.startsWith(baseScope)) continue;
+      if (!origins || typeof origins !== "object") continue;
+      for (const record of Object.values(origins)) {
+        if (record?.targetId === targetId) return record;
+      }
+    }
+    return null;
+  }
+  taskId(flags = {}) {
+    return resolveTaskId({ ...flags, owner: flags.owner || this.owner() });
+  }
+  taskTabsScopeKey(flags = {}) {
+    return taskRegistryScopeKey(this.contextScopeKey(), this.taskId(flags));
+  }
+  taskTabsForScope(flags = {}) {
+    return this.taskTabs[this.taskTabsScopeKey(flags)] || {};
+  }
+  async reconcileTaskTabs(flags = {}) {
+    const scopeKey = this.taskTabsScopeKey(flags);
+    const raw = await this.tabsRaw().catch(() => []);
+    const liveById = new Map(raw.map((tab) => [tab.targetId, tab]));
+    let changed = false;
+    this.taskTabs = await updateJsonFile(this.taskTabsFile, {}, (current) => {
+      const data = current || {};
+      const scoped = data[scopeKey];
+      if (!scoped || typeof scoped !== "object") return data;
+      for (const [origin, record] of Object.entries(scoped)) {
+        if (!taskTabRecordIsLive(record, liveById)) {
+          delete scoped[origin];
+          changed = true;
+        }
+      }
+      if (Object.keys(scoped).length === 0) delete data[scopeKey];
+      return data;
+    });
+    return changed;
+  }
+  async findTaskTabForOrigin(url, flags = {}, tabs = null) {
+    await this.reconcileTaskTabs(flags);
+    this.taskTabs = readJson(this.taskTabsFile) || {};
+    const origin = canonicalOriginKey(url);
+    const scoped = this.taskTabsForScope(flags);
+    const record = scoped[origin];
+    if (!record?.targetId) return null;
+    const liveTabs = tabs || await this.tabs();
+    const tab = liveTabs.find((candidate) => candidate.targetId === record.targetId);
+    if (!tab) return null;
+    return {
+      origin,
+      record,
+      tab: {
+        ...tab,
+        label: record.label || tab.label,
+        suggestedTarget: record.label || tab.suggestedTarget,
+        ownership: "mine",
+        taskId: this.taskId(flags),
+      },
+    };
+  }
+  async recordTaskTab(tab, url, label, flags = {}, source = "ensure") {
+    if (!tab?.targetId) return null;
+    // v0.3.0: every taskTab write also writes a session-registry entry.
+    // Cheap, idempotent; gives cross-task/cross-owner reuse for free without
+    // any caller change.
+    await this.recordSessionTab(tab, url, label, flags, source).catch(() => {});
+    const origin = canonicalOriginKey(url || tab.url || tab.requestedUrl || "");
+    const scopeKey = this.taskTabsScopeKey(flags);
+    const now = new Date().toISOString();
+    const taskId = this.taskId(flags);
+    const owner = this.owner();
+    this.taskTabs = await updateJsonFile(this.taskTabsFile, {}, (current) => {
+      const data = current || {};
+      data[scopeKey] = data[scopeKey] || {};
+      const previous = data[scopeKey][origin] || {};
+      data[scopeKey][origin] = {
+        ...previous,
+        targetId: tab.targetId,
+        label: label || tab.label || previous.label || tab.suggestedTarget || "",
+        suggestedTarget: label || tab.suggestedTarget || previous.suggestedTarget || "",
+        owner,
+        taskId,
+        origin,
+        url: tab.url || url || previous.url || "",
+        requestedUrl: url || previous.requestedUrl || "",
+        contextKey: this.context.key,
+        contextScopeKey: this.contextScopeKey(),
+        source,
+        status: "active",
+        createdBy: "realbrowser",
+        createdAt: previous.createdAt || now,
+        updatedAt: now,
+        secondary: Boolean(flags.forceNew || flags.force_new),
+      };
+      return data;
+    });
+    return this.taskTabs[scopeKey]?.[origin] || null;
+  }
+  async removeTaskTab(targetId, flags = {}) {
+    if (!targetId) return;
+    this.taskTabs = await updateJsonFile(this.taskTabsFile, {}, (current) => {
+      const data = current || {};
+      for (const [scopeKey, scoped] of Object.entries(data)) {
+        if (!scoped || typeof scoped !== "object") continue;
+        for (const [origin, record] of Object.entries(scoped)) {
+          if (record?.targetId === targetId) delete scoped[origin];
+        }
+        if (Object.keys(scoped).length === 0) delete data[scopeKey];
+      }
+      return data;
+    });
+    await this.removeSessionTab(targetId).catch(() => {});
+  }
+  // v0.3.0: session identity is per Chrome instance — stable across nested
+  // subagent processes that share the same daemon/Chrome. browserUrl carries
+  // a DevTools-assigned UUID per Chrome process; anonymous mode uses the
+  // temp-dir path. Falls back to context.key if neither is available (e.g.
+  // self-test fakes), so callers always get SOMETHING stable.
+  canonicalSessionKey() {
+    if (this.context?.anonymous) {
+      const dir = this.anonymousDir || this.context?.flags?.anonymousDir;
+      if (dir) return `anon:${dir}`;
+    }
+    const m = String(this.browserUrl || "").match(/\/devtools\/browser\/([0-9a-f-]+)/i);
+    if (m) return `cdp:${m[1]}`;
+    if (this.browserUrl) return `cdp:${this.browserUrl}`;
+    return `ctx:${this.context?.key || "unknown"}`;
+  }
+  sessionRegistryBucket() {
+    const key = this.canonicalSessionKey();
+    return { key, bucket: this.sessionRegistry?.[key] || { tabs: {}, labels: {} } };
+  }
+  async reconcileSessionRegistry() {
+    const { key: sessionKey } = this.sessionRegistryBucket();
+    const raw = await this.tabsRaw().catch(() => []);
+    const liveById = new Map(raw.map((tab) => [tab.targetId, tab]));
+    this.sessionRegistry = await updateJsonFile(this.sessionRegistryFile, {}, (current) => {
+      const data = current || {};
+      const bucket = data[sessionKey];
+      if (!bucket || typeof bucket !== "object") return data;
+      const tabs = bucket.tabs || {};
+      for (const [origin, record] of Object.entries(tabs)) {
+        if (!record?.targetId || !liveById.has(record.targetId)) delete tabs[origin];
+      }
+      const labels = bucket.labels || {};
+      for (const [label, targetId] of Object.entries(labels)) {
+        if (!targetId || !liveById.has(targetId)) delete labels[label];
+      }
+      bucket.tabs = tabs;
+      bucket.labels = labels;
+      if (Object.keys(tabs).length === 0 && Object.keys(labels).length === 0) delete data[sessionKey];
+      return data;
+    });
+  }
+  // Codex review: reuse only realbrowser-owned tabs in the same session, not
+  // arbitrary user tabs. Same-origin match + non-user ownership + recorded in
+  // session registry = safe cross-task reuse. Returns null if not found OR if
+  // the recorded tab is no longer live.
+  async findSessionTabForOrigin(url, flags = {}, tabs = null) {
+    await this.reconcileSessionRegistry();
+    const { key: sessionKey } = this.sessionRegistryBucket();
+    const origin = canonicalOriginKey(url);
+    const bucket = this.sessionRegistry?.[sessionKey] || {};
+    const record = bucket.tabs?.[origin];
+    if (!record?.targetId) return null;
+    const liveTabs = tabs || await this.tabs();
+    const tab = liveTabs.find((c) => c.targetId === record.targetId);
+    if (!tab) return null;
+    return {
+      origin,
+      record,
+      tab: {
+        ...tab,
+        label: record.label || tab.label,
+        suggestedTarget: record.label || tab.suggestedTarget,
+        // v0.3.0 (codex P0 fix): accurate ownership for output. The
+        // immediately-following recordTaskTab in the reuse code path turns
+        // this into "mine" for the current task — but until that write
+        // lands, the tab still belongs to a sibling task. Report honestly.
+        ownership: "session-shareable",
+        taskId: record.taskId || this.taskId(flags),
+      },
+    };
+  }
+  async recordSessionTab(tab, url, label, flags = {}, source = "ensure") {
+    if (!tab?.targetId) return null;
+    const origin = canonicalOriginKey(url || tab.url || tab.requestedUrl || "");
+    const { key: sessionKey } = this.sessionRegistryBucket();
+    const now = new Date().toISOString();
+    const taskId = this.taskId(flags);
+    const owner = this.owner();
+    this.sessionRegistry = await updateJsonFile(this.sessionRegistryFile, {}, (current) => {
+      const data = current || {};
+      data[sessionKey] = data[sessionKey] || { tabs: {}, labels: {} };
+      const bucket = data[sessionKey];
+      bucket.tabs = bucket.tabs || {};
+      bucket.labels = bucket.labels || {};
+      const prev = bucket.tabs[origin] || {};
+      bucket.tabs[origin] = {
+        ...prev,
+        targetId: tab.targetId,
+        label: label || prev.label || "",
+        origin,
+        sessionKey,
+        contextScopeKey: this.contextScopeKey(),
+        contextKey: this.context.key,
+        owner,
+        taskId,
+        pid: process.pid,
+        url: tab.url || url || prev.url || "",
+        requestedUrl: url || prev.requestedUrl || "",
+        source,
+        status: "active",
+        createdAt: prev.createdAt || now,
+        updatedAt: now,
+      };
+      if (label) bucket.labels[label] = tab.targetId;
+      return data;
+    });
+    return this.sessionRegistry[sessionKey]?.tabs?.[origin] || null;
+  }
+  async removeSessionTab(targetId) {
+    if (!targetId) return;
+    this.sessionRegistry = await updateJsonFile(this.sessionRegistryFile, {}, (current) => {
+      const data = current || {};
+      for (const [sessionKey, bucket] of Object.entries(data)) {
+        if (!bucket || typeof bucket !== "object") continue;
+        const tabs = bucket.tabs || {};
+        for (const [origin, record] of Object.entries(tabs)) {
+          if (record?.targetId === targetId) delete tabs[origin];
+        }
+        const labels = bucket.labels || {};
+        for (const [label, tid] of Object.entries(labels)) {
+          if (tid === targetId) delete labels[label];
+        }
+        if (Object.keys(tabs).length === 0 && Object.keys(labels).length === 0) delete data[sessionKey];
+      }
+      return data;
+    });
+  }
+  // Session-wide label lookup. Returns targetId of the existing holder (if
+  // any), null otherwise. Used to detect cross-task `--label X` collisions
+  // BEFORE the script silently allows an `X2` invention from the caller.
+  sessionLabelHolder(label) {
+    if (!label) return null;
+    const { bucket } = this.sessionRegistryBucket();
+    return bucket?.labels?.[label] || null;
+  }
+  classifyTabOwnership(tab, flags = {}) {
+    if (!tab?.targetId) return "user";
+    const taskId = this.taskId(flags);
+    const baseScope = this.contextScopeKey();
+    for (const [scopeKey, origins] of Object.entries(this.taskTabs || {})) {
+      if (typeof scopeKey !== "string" || !scopeKey.startsWith(baseScope)) continue;
+      if (!origins || typeof origins !== "object") continue;
+      for (const record of Object.values(origins)) {
+        if (record?.targetId !== tab.targetId) continue;
+        if (record.owner === this.owner() && record.taskId === taskId) return "mine";
+        if (record.owner === this.owner()) return "my-other-task";
+        return "other-agent";
+      }
+    }
+    // v0.3.0 (codex P0 fix): session-registry hits are REUSABLE but NOT "mine".
+    // A sibling task's recorded tab can be reused via `tab ensure`, but
+    // `tab close --mine` / `tab done --close` MUST NOT close it — that's the
+    // sibling's tab to close. Return "session-shareable" so:
+    //  - reuse path (tab ensure) treats != "user" as eligible (existing logic)
+    //  - close-mine path filters strictly to ownership === "mine"
+    const { bucket } = this.sessionRegistryBucket();
+    for (const record of Object.values(bucket?.tabs || {})) {
+      if (record?.targetId === tab.targetId) return "session-shareable";
+    }
+    if (this.leaseForTarget?.(tab.targetId)?.owner) return "leased";
+    return "user";
+  }
+  async assertAgentOwnedForMutation(tab, flags = {}, operation = "mutation") {
+    const ownership = this.classifyTabOwnership(tab, flags);
+    if (ownership === "mine") return;
+    if (flags.takeLease || flags.force || flags.allowUserTabMutation) return;
+    const handle = tab.suggestedTarget || tab.label || (tab.targetId || "").slice(0, MIN_TARGET_PREFIX_LEN);
+    throw new CliError(`${operation} refused: tab ${handle} is not owned by this realbrowser task (ownership=${ownership})`, {
+      code: "user_tab_mutation_refused",
+      exitCode: 5,
+      ownership,
+      next: [
+        `realbrowser tab ensure ${tab.url || "<url>"} --label ${flags.label || "app"} --background`,
+        `realbrowser tab select ${handle} --take-lease --label ${flags.label || "app"}`,
+        `realbrowser tab list --mine`,
+      ],
     });
   }
   isBrowserScopedProfileContext() {
@@ -1313,6 +1824,103 @@ class BrowserDaemon {
   labelForTarget(tab) {
     const labelsForContext = this.labelsForContext();
     return Object.entries(labelsForContext).find(([, id]) => id === tab.targetId)?.[0] || "";
+  }
+  // Browser-scoped CDP serves multiple Chrome profiles through one endpoint.
+  // Without browserContextId, Target.createTarget opens the new tab in whichever
+  // profile is currently focused — which may not be the one the user requested
+  // via --profile. Find a live tab whose targetMeta we PROVED belongs to the
+  // requested profile (only source=profile-open or cdp-create-with-context are
+  // trustworthy: those came from Chrome's --profile-directory at OS level or
+  // from Target.createTarget called with a known-correct browserContextId) and
+  // reuse its browserContextId. Cross-owner same-base-context fallback rescues
+  // terminal-pane / multi-session use where TERM_SESSION_ID-derived owner has
+  // changed between calls.
+  //
+  // We deliberately do NOT trust user-set labels or older
+  // "browser-scope-cdp-create" entries here: under multi-profile Chrome, labels
+  // and pre-0.3.7 cdp-create entries can point to tabs in any profile (the
+  // user can label any tab they happen to select; pre-0.3.7 cdp-create lied
+  // about ownership). Using them as a context anchor would silently land new
+  // tabs in the wrong profile — exactly the bug 0.3.7 was meant to fix.
+  //
+  // Returns null when no live trusted tab matches — caller falls through to
+  // launchProfileTab (Chrome's --profile-directory at OS level), which
+  // bootstraps a proven tab whose browserContextId becomes available for all
+  // subsequent calls. OpenClaw's "managed" profiles sidestep this entirely by
+  // dedicating one Chrome process per profile; for attached-Chrome we can't.
+  async resolveBrowserContextIdForProfile(profileId) {
+    if (!profileId) return null;
+    // v0.3.0 (codex P0 fix): include the v0.3.0 chrome://version-verified
+    // sources so the trust chain extends to tabs we proved are in the right
+    // profile via that probe. Without this, verified tabs were dropped on
+    // the floor by resolveBrowserContextIdForProfile and setTargetMeta would
+    // not preserve their source through subsequent updates.
+    const TRUSTED_SOURCES = new Set([
+      "profile-open",
+      "profile-open-verified",
+      "cdp-create-with-context",
+      "cdp-create-verified-profile",
+    ]);
+    const raw = await this.tabsRaw().catch(() => []);
+    const liveById = new Map(raw.map((tab) => [tab.targetId, tab]));
+    const baseKey = this.context.key;
+    const sameOwnerKey = this.contextScopeKey();
+    // Iterate keys in priority order: same-owner first, then cross-owner under
+    // the same base context, then the legacy unscoped key (pre-owner-scoping).
+    const matched = Object.keys(this.targetMeta || {}).filter(
+      (k) => baseContextKeyFromScopedKey(k) === baseKey,
+    );
+    const orderedKeys = [
+      ...matched.filter((k) => k === sameOwnerKey),
+      ...matched.filter((k) => k !== sameOwnerKey && k !== baseKey),
+      ...matched.filter((k) => k === baseKey),
+    ];
+    for (const storedKey of orderedKeys) {
+      const store = this.targetMeta?.[storedKey];
+      if (!store || typeof store !== "object") continue;
+      for (const [targetId, meta] of Object.entries(store)) {
+        if (!meta || meta.profile !== profileId || meta.profileOwned !== true) continue;
+        if (!TRUSTED_SOURCES.has(meta.source || "")) continue;
+        const live = liveById.get(targetId);
+        if (live?.browserContextId) return live.browserContextId;
+      }
+    }
+    return null;
+  }
+  // Enumerate distinct live browser-context IDs visible to the current CDP
+  // endpoint. Browser-scoped CDP (one endpoint, multiple profiles) returns
+  // multiple distinct browserContextId values — one per profile. Profile-
+  // scoped CDP (the OpenClaw-managed shape) returns exactly one context.
+  //
+  // Returns a Set of strings. The "default" context can appear as an empty
+  // string for some Chrome builds; we filter those out so the size reflects
+  // distinct named contexts. Used by the tab-ensure profile branch to
+  // detect multi-profile ambiguity before falling back to default-context
+  // creation (which would land in the currently-active profile, not the
+  // requested one).
+  async enumerateLiveBrowserContexts() {
+    const contexts = new Set();
+    // Prefer Target.getBrowserContexts when available — explicit list of
+    // currently-allocated contexts, independent of whether any page targets
+    // exist in them yet.
+    try {
+      const result = await this.cdp.send("Target.getBrowserContexts", {}, undefined, 2000).catch(() => null);
+      if (result && Array.isArray(result.browserContextIds)) {
+        for (const id of result.browserContextIds) {
+          if (typeof id === "string" && id.length > 0) contexts.add(id);
+        }
+      }
+    } catch {}
+    // Always also union with browserContextIds visible on live page targets
+    // (Target.getTargets). Some Chrome versions omit the "default" context
+    // from Target.getBrowserContexts but it shows up here.
+    const raw = await this.tabsRaw().catch(() => []);
+    for (const tab of raw) {
+      if (typeof tab.browserContextId === "string" && tab.browserContextId.length > 0) {
+        contexts.add(tab.browserContextId);
+      }
+    }
+    return contexts;
   }
   profileTargetProven(tab) {
     if (!this.isBrowserScopedProfileContext()) return true;
@@ -1370,7 +1978,32 @@ class BrowserDaemon {
         if (!allowUnprovenProfileTarget && !this.profileTargetProven(tab)) throw this.unprovenProfileTargetError(tab, operation);
         return tab;
       }
+      // Same-owner label points to a dead/closed tab. Try cross-owner fallback
+      // before declaring stale — another pane may have an alive labeling.
+    }
+    // Cross-owner label fallback: same base context (e.g. profile:chrome:Default)
+    // but a different owner stored the label. Only used when the same-owner
+    // lookup did not return a live tab. Rescues terminal-pane / multi-session use.
+    const crossLabels = this.labelsForContext({ includeCrossOwner: true });
+    const crossLabelId = crossLabels[raw];
+    if (crossLabelId && crossLabelId !== labelId) {
+      const tab = tabs.find((candidate) => candidate.targetId === crossLabelId);
+      if (tab) {
+        if (!allowUnprovenProfileTarget && !this.profileTargetProven(tab)) throw this.unprovenProfileTargetError(tab, operation);
+        return tab;
+      }
+    }
+    if (labelId) {
       throw new CliError(`target label "${raw}" is stale`, { code: "target_stale", exitCode: 3, next: ["realbrowser tab list"] });
+    }
+    if (crossLabelId) {
+      // Cross-owner label exists but points to a dead tab — surface this
+      // explicitly rather than falling through to the generic not-found path.
+      throw new CliError(`target label "${raw}" is stale (resolved across owners; the underlying tab was closed)`, {
+        code: "target_stale",
+        exitCode: 3,
+        next: ["realbrowser tab list", `realbrowser tab ensure <url> --label ${raw}`],
+      });
     }
     const exact = tabs.find((tab) => tab.targetId === raw || tab.targetPrefix === raw || tab.id === ref || tab.suggestedTarget === raw);
     if (exact) {
@@ -1396,15 +2029,40 @@ class BrowserDaemon {
   async setTargetMeta(targetId, meta = {}) {
     if (!targetId) return;
     const scopeKey = this.contextScopeKey();
+    // v0.3.0 (codex P0 fix): include the v0.3.0 chrome://version-verified
+    // sources so the trust chain extends to tabs we proved are in the right
+    // profile via that probe. Without this, verified tabs were dropped on
+    // the floor by resolveBrowserContextIdForProfile and setTargetMeta would
+    // not preserve their source through subsequent updates.
+    const TRUSTED_SOURCES = new Set([
+      "profile-open",
+      "profile-open-verified",
+      "cdp-create-with-context",
+      "cdp-create-verified-profile",
+    ]);
     this.targetMeta = await updateJsonFile(this.targetMetaFile, {}, (current) => {
       current[scopeKey] ??= {};
       const previous = current[scopeKey][targetId] || {};
+      // Preserve trusted source so resolveBrowserContextIdForProfile keeps
+      // working after subsequent navigate/label/reuse calls. Only allow
+      // the source to be overwritten when the new source is itself trusted.
+      const incomingSource = meta.source || "";
+      const nextSource = TRUSTED_SOURCES.has(previous.source || "")
+        ? (TRUSTED_SOURCES.has(incomingSource) ? incomingSource : previous.source)
+        : (incomingSource || previous.source || "");
+      // v0.3.0: profileOwned is monotonic. A tab's profile is fixed by Chrome
+      // at create-time — once we verified ownership (chrome://version or
+      // launch-through-named-profile), that proof should not be downgraded by
+      // a subsequent navigate / reuse / label call whose profileTargetProven
+      // happens to return false due to label-cache miss or context shift.
+      const nextProfileOwned = previous.profileOwned === true ? true : Boolean(meta.profileOwned);
       current[scopeKey][targetId] = {
         ...previous,
         targetId,
-        profileOwned: Boolean(meta.profileOwned),
-        profile: meta.profile || this.context.profile?.id,
-        source: meta.source || previous.source || "",
+        profileOwned: nextProfileOwned,
+        profile: meta.profile || previous.profile || this.context.profile?.id,
+        source: nextSource,
+        requestedUrl: meta.requestedUrl !== undefined ? meta.requestedUrl : previous.requestedUrl,
         updatedAt: new Date().toISOString(),
       };
       return current;
@@ -1436,17 +2094,27 @@ class BrowserDaemon {
     });
     this.labelMeta = await updateJsonFile(this.labelMetaFile, {}, (current) => {
       current[scopeKey] ??= {};
+      const previous = current[scopeKey][label];
+      // v0.3.0: profileOwned is monotonic — same reasoning as setTargetMeta.
+      // Once a label was set on a verified target, navigate/reuse-cycle
+      // updates should not be able to flip it back to unproven.
+      const nextProfileOwned = previous?.profileOwned === true && previous?.targetId === targetId
+        ? true
+        : Boolean(meta.profileOwned);
       current[scopeKey][label] = {
         targetId,
-        profileOwned: Boolean(meta.profileOwned),
-        profile: meta.profile || this.context.profile?.id,
+        profileOwned: nextProfileOwned,
+        profile: meta.profile || previous?.profile || this.context.profile?.id,
         owner: this.owner(),
         source: meta.source || "",
         updatedAt: new Date().toISOString(),
       };
       return current;
     });
-    if (meta.profileOwned === true) await this.setTargetMeta(targetId, meta);
+    // setTargetMeta enforces monotonic profileOwned, so always propagating is
+    // safe: an existing `true` cannot be downgraded by a fresh setLabel with
+    // a transient `profileOwned: false`.
+    await this.setTargetMeta(targetId, meta);
     await this.claimTarget({ targetId, label, suggestedTarget: label, url: meta.url || "" }, meta, meta.source || "label");
   }
   leaseIsStale(lease) {
@@ -1556,6 +2224,15 @@ class BrowserDaemon {
       this.cdp.send("DOM.enable", {}, sessionId).catch(() => {}),
       this.cdp.send("Network.enable", {}, sessionId).catch(() => {}),
       this.cdp.send("Accessibility.enable", {}, sessionId).catch(() => {}),
+      // Auto-enable focus emulation so SPAs gating on document.hasFocus()
+      // fire their submit/click handlers correctly when the tab is in OS
+      // background — eliminates the need for `tab focus --front`, which
+      // would steal keyboard focus from the user's other apps. Common
+      // pattern: booking/checkout pages that defer form submission until
+      // the tab regains focus. Opt out: REALBROWSER_DISABLE_FOCUS_EMULATION=1.
+      process.env.REALBROWSER_DISABLE_FOCUS_EMULATION
+        ? Promise.resolve()
+        : this.cdp.send("Emulation.setFocusEmulationEnabled", { enabled: true }, sessionId).catch(() => {}),
     ]);
     this.cdp.on("Runtime.consoleAPICalled", (params, message) => {
       if (message.sessionId !== sessionId) return;
@@ -1616,6 +2293,91 @@ class BrowserDaemon {
     const sessionId = await this.attach(targetId);
     return await this.cdp.send(method, params, sessionId, timeoutMs);
   }
+  // v0.3.0: read chrome://version's "Profile Path:" to identify which Chrome
+  // profile a target actually lives in. Some Chrome/Chromium builds with
+  // multiple profiles and a browser-scoped CDP endpoint can ignore
+  // --profile-directory when the app is already running: new tabs route to the
+  // current browser context, not necessarily the one requested.
+  // chrome://version's Profile Path line is the definitive answer; no deps.
+  async readTargetProfileDir(targetId, timeoutMs = 8000) {
+    // v0.3.0 (codex P0 fix, take 2): chrome://version renders Profile Path as
+    // a two-line label/value pair (label "Profile Path" on one line, the
+    // actual path on the next), NOT as "Profile Path: <value>". Empirically
+    // confirmed via Runtime.evaluate(document.body.innerText) on the user's
+    // Chrome 148: the bytes between "Profile Path" and the path are "\n",
+    // not ": ". The original v0.3.0 regex `/Profile Path:\s*(\S+)/` required
+    // a colon AND a single non-space token — neither holds — so the verify
+    // helper has been returning null since v0.3.0 (silent no-op). New regex
+    // accepts either separator (colon or any whitespace including newline)
+    // and captures to end-of-line, which handles paths containing spaces
+    // like "Application Support".
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const value = await this.evaluate(targetId,
+          "(()=>{const b=document.body;if(!b)return null;const t=b.innerText||'';const m=t.match(/Profile Path[:\\s]+([^\\n\\r]+)/);return m?m[1].trim():null})()",
+          { timeoutMs: 2000 });
+        if (typeof value === "string" && value.length > 0) {
+          return path.basename(value);
+        }
+      } catch {}
+      await sleep(200);
+    }
+    return null;
+  }
+  async verifyTargetProfile(targetId, expectedDir, intendedUrl, options = {}) {
+    if (!expectedDir) return null;
+    const strict = Boolean(options.strict);
+    const profileId = options.profileId || `chrome:${expectedDir}`;
+    const failUnverified = async (reason) => {
+      await this.cdp.send("Target.closeTarget", { targetId }).catch(() => {});
+      throw new CliError(`could not verify profile routing for ${profileId}: ${reason}`, {
+        code: "profile_verification_unavailable",
+        exitCode: 4,
+        next: [
+          `closed the unverified tab before navigating to ${intendedUrl || "the requested URL"}`,
+          "profile verification requires reading chrome://version Profile Path; it was unavailable before timeout",
+          `realbrowser tab list --profile "${profileId}"`,
+          `realbrowser tab ensure ${intendedUrl || "<url>"} --profile "${profileId}" --label app --front`,
+        ],
+      });
+    };
+    const session = await this.attach(targetId).catch(() => null);
+    if (!session) {
+      if (strict) await failUnverified("could not attach to the created target");
+      return null;
+    }
+    // Navigate to chrome://version, read Profile Path, then navigate to intended URL.
+    const probeNavigated = await this.cdp.send("Page.navigate", { url: "chrome://version/" }, session).then(() => true).catch(() => false);
+    if (strict && !probeNavigated) {
+      await failUnverified("could not navigate the created target to chrome://version");
+    }
+    await waitForUrl(this, targetId, "chrome://version", 5000).catch(() => {});
+    await waitForReadyState(this, targetId, "interactive", 5000).catch(() => {});
+    const actualDir = await this.readTargetProfileDir(targetId, 6000);
+    if (actualDir && actualDir !== expectedDir) {
+      await this.cdp.send("Target.closeTarget", { targetId }).catch(() => {});
+      throw new CliError(`tab routing failed: requested chrome:${expectedDir} but tab landed in chrome:${actualDir}`, {
+        code: "profile_routing_failed",
+        exitCode: 4,
+        next: [
+          `Chrome routed the new tab away from --profile-directory=${expectedDir}.`,
+          `the wrong-profile tab was closed via CDP; no user tabs were touched`,
+          `bring a window for ${profileId} to the foreground first, then retry the same command`,
+          `OR list existing tabs in the target profile: realbrowser tab list --profile "${profileId}"`,
+          `if a tab in ${profileId} is already open, attach to it: realbrowser tab select <target> --profile "${profileId}" --label app`,
+        ],
+      });
+    }
+    if (!actualDir && strict) {
+      await failUnverified("chrome://version did not expose Profile Path before timeout");
+    }
+    // Profile matches, or non-strict callers accept an unproven legacy result.
+    if (intendedUrl) {
+      await this.cdp.send("Page.navigate", { url: intendedUrl }, session).catch(() => {});
+    }
+    return actualDir;
+  }
   async evaluate(targetId, expression, { awaitPromise = true, returnByValue = true, timeoutMs = DEFAULT_TIMEOUT } = {}) {
     const result = await this.sendToTarget(targetId, "Runtime.evaluate", {
       expression,
@@ -1670,7 +2432,15 @@ class BrowserDaemon {
     try { this.cdp.close(); } catch {}
     try { this.server?.close(); } catch {}
     if (this.anonymousProcess && this.context.kind === "anonymous") {
-      try { process.kill(-this.anonymousProcess.pid, "SIGTERM"); } catch {}
+      // v0.3.0 (codex P1 fix): Windows doesn't honor negative-PID group kill
+      // and Chrome detaches into its own process tree. Use taskkill /T (tree)
+      // to clean up child renderers/zygotes. On macOS/Linux keep the
+      // negative-PID SIGTERM which targets the detached process group.
+      if (IS_WINDOWS) {
+        await runProcess("taskkill", ["/PID", String(this.anonymousProcess.pid), "/T", "/F"], 5_000).catch(() => {});
+      } else {
+        try { process.kill(-this.anonymousProcess.pid, "SIGTERM"); } catch {}
+      }
     }
     if (this.anonymousDir && this.context.kind === "anonymous") {
       await fsp.rm(this.anonymousDir, { recursive: true, force: true }).catch(() => {});
@@ -1682,20 +2452,62 @@ class BrowserDaemon {
 
 BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
   if (command === "list") {
+    await this.reconcileTaskTabs(flags).catch(() => {});
     const query = args[0] || "";
     const tabs = await this.tabs();
-    const filtered = query
+    let filtered = query
       ? tabs.filter((tab) => `${tab.label || ""} ${tab.title || ""} ${tab.url || ""} ${tab.targetId}`.toLowerCase().includes(query.toLowerCase()))
       : tabs;
+    if (flags.mine || flags.owned) {
+      filtered = filtered.filter((tab) => this.classifyTabOwnership(tab, flags) === "mine");
+    }
     const warning = this.isBrowserScopedProfileContext()
       ? `browser-scoped CDP cannot prove these targets belong to ${this.context.profile.id}; use tab new/ensure through the profile for mutations`
       : undefined;
     return result({
       text: [warning ? `warning: ${warning}` : "", formatTabs(filtered)].filter(Boolean).join("\n"),
       targets: filtered,
+      taskId: this.taskId(flags),
       context: this.publicContext(),
       warning,
       suggestedNext: warning ? undefined : (filtered[0]?.suggestedTarget ? `realbrowser read observe -t ${filtered[0].suggestedTarget}` : undefined),
+    });
+  }
+  if (command === "done") {
+    await this.reconcileTaskTabs(flags);
+    const scopeKey = this.taskTabsScopeKey(flags);
+    const now = new Date().toISOString();
+    let count = 0;
+    this.taskTabs = await updateJsonFile(this.taskTabsFile, {}, (current) => {
+      const data = current || {};
+      const scoped = data[scopeKey] || {};
+      for (const record of Object.values(scoped)) {
+        if (!record || typeof record !== "object") continue;
+        record.status = "complete";
+        record.updatedAt = now;
+        count += 1;
+      }
+      return data;
+    });
+    if (flags.close) {
+      const tabs = await this.tabs();
+      const mine = tabs.filter((tab) => this.classifyTabOwnership(tab, flags) === "mine");
+      for (const tab of mine) {
+        await this.cdp.send("Target.closeTarget", { targetId: tab.targetId }).catch(() => {});
+        await this.releaseTargetLease(tab.targetId).catch(() => {});
+        await this.removeTaskTab(tab.targetId, flags);
+      }
+      return result({
+        text: `closed ${mine.length} agent-owned tab${mine.length === 1 ? "" : "s"} for task ${this.taskId(flags)}`,
+        closed: mine.length,
+        completed: count,
+        taskId: this.taskId(flags),
+      });
+    }
+    return result({
+      text: `marked ${count} agent tab${count === 1 ? "" : "s"} complete; kept open for inspection\ncleanup: realbrowser tab close --mine`,
+      completed: count,
+      taskId: this.taskId(flags),
     });
   }
   if (command === "select") {
@@ -1719,11 +2531,81 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
     const url = args[0];
     if (!url) throw usage(`tab ${command} requires <url>`);
     assertNavigationUrl(url, flags.force);
+    const forceNew = Boolean(flags.forceNew || flags.force_new || flags.forceNewTab);
     let existing = null;
     let existingFromLabel = false;
     const tabs = await this.tabs();
+    // Phase 2: task-origin dedup. If this task already has a tab for the
+    // same origin, alias the new label and reuse — or refuse with a
+    // teaching error so a confused agent stops creating duplicate tabs.
+    if (command === "ensure" && !forceNew && flags.reuse !== "none") {
+      const taskHit = await this.findTaskTabForOrigin(url, flags, tabs);
+      if (taskHit?.tab) {
+        const requestedLabel = flags.label;
+        const currentLabel = taskHit.record?.label || taskHit.tab.label || taskHit.tab.suggestedTarget;
+        if (requestedLabel) {
+          const labelTarget = this.labelsForContext()[requestedLabel];
+          if (labelTarget && labelTarget !== taskHit.tab.targetId) {
+            throw duplicateTaskOriginError({
+              origin: taskHit.origin,
+              existing: { ...taskHit.tab, ...taskHit.record, label: currentLabel },
+              requestedLabel,
+              url,
+            });
+          }
+          // setTargetMeta preserves trusted target-meta source (profile-open /
+          // cdp-create-with-context). setLabel still records the alias source
+          // in label-meta for diagnostics.
+          await this.setLabel(requestedLabel, taskHit.tab.targetId, {
+            profileOwned: this.profileTargetProven(taskHit.tab),
+            profile: this.context.profile?.id,
+            source: "task-origin-alias",
+            force: true,
+            takeLease: Boolean(flags.takeLease),
+            url: taskHit.tab.url,
+          });
+          await this.recordTaskTab(taskHit.tab, url, requestedLabel, flags, "ensure-reuse-origin");
+        } else {
+          await this.claimTarget(taskHit.tab, flags, "ensure-reuse-origin");
+          await this.recordTaskTab(taskHit.tab, url, currentLabel, flags, "ensure-reuse-origin");
+        }
+        await this.attach(taskHit.tab.targetId);
+        const label = requestedLabel || currentLabel || taskHit.tab.suggestedTarget;
+        const reused = {
+          ...taskHit.tab,
+          label,
+          suggestedTarget: label,
+          lease: this.leaseForTarget(taskHit.tab.targetId),
+        };
+        return result({
+          text: [
+            `reused ${label} ${reused.url}`,
+            `task-tab origin=${taskHit.origin} label=${label} target=${reused.targetPrefix} status=active`,
+            `next: retry on this tab with \`realbrowser action state -t ${label} --root active --compact\` or navigate it with \`realbrowser tab navigate -t ${label} <url>\``,
+          ].join("\n"),
+          target: reused,
+          reused: true,
+          taskTab: taskHit.record,
+          taskId: this.taskId(flags),
+          context: this.publicContext(),
+        });
+      }
+    }
+    // v0.3.0: session-scoped reuse. Before falling through to create, look for
+    // a same-origin tab anywhere in the SAME Chrome session that realbrowser
+    // recorded (any task / any owner). This prevents nested subagents from each
+    // opening their own same-origin tab. Only matches tabs
+    // we previously recorded — user tabs are still classified as "user" and
+    // skipped here.
+    if (command === "ensure" && !forceNew && !existing && flags.reuse !== "none") {
+      const sessionHit = await this.findSessionTabForOrigin(url, flags, tabs).catch(() => null);
+      if (sessionHit?.tab && this.classifyTabOwnership(sessionHit.tab, flags) !== "user") {
+        existing = sessionHit.tab;
+        existingFromLabel = false;
+      }
+    }
     if (command === "ensure") {
-      if (flags.label) {
+      if (!existing && flags.label) {
         const labelTarget = this.labelsForContext()[flags.label];
         existing = tabs.find((tab) => tab.targetId === labelTarget) || null;
         existingFromLabel = Boolean(existing);
@@ -1732,10 +2614,11 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
           existingFromLabel = false;
         }
       }
+      const urlMatches = (tab) => sameUrl(tab.url, url) || (tab.requestedUrl && sameUrl(tab.requestedUrl, url));
       if (!existing && flags.reuse !== "none" && !this.isBrowserScopedProfileContext()) {
-        existing = tabs.find((tab) => sameUrl(tab.url, url)) || null;
+        existing = tabs.find((tab) => urlMatches(tab) && this.classifyTabOwnership(tab, flags) !== "user") || null;
       } else if (!existing && flags.reuse !== "none" && this.isBrowserScopedProfileContext()) {
-        existing = tabs.find((tab) => sameUrl(tab.url, url) && this.profileTargetProven(tab)) || null;
+        existing = tabs.find((tab) => urlMatches(tab) && this.profileTargetProven(tab) && this.classifyTabOwnership(tab, flags) !== "user") || null;
       }
       if (existing && !existingFromLabel && this.targetLeaseWouldConflict(existing, flags)) {
         existing = null;
@@ -1745,12 +2628,14 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
       await this.assertTargetLease(existing, flags, `tab ${command}`);
       if (flags.label) await this.setLabel(flags.label, existing.targetId, { profileOwned: this.profileTargetProven(existing), source: "ensure-reuse", force: Boolean(flags.force), takeLease: Boolean(flags.takeLease), url: existing.url });
       else await this.claimTarget(existing, flags, "ensure-reuse");
+      await this.recordTaskTab(existing, url, flags.label || existing.label, flags, "ensure-reuse");
       const leased = { ...existing, lease: this.leaseForTarget(existing.targetId) };
       await this.attach(existing.targetId);
       return result({
         text: `reused ${flags.label || leased.suggestedTarget} ${leased.url}`,
         target: { ...leased, label: flags.label || leased.label, suggestedTarget: flags.label || leased.suggestedTarget },
         reused: true,
+        taskId: this.taskId(flags),
         context: this.publicContext(),
       });
     }
@@ -1761,8 +2646,35 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
         next: [`realbrowser tab label <target> ${flags.label} --force`],
       });
     }
+    // v0.3.0: session-wide label collision. The local label store is keyed by
+    // contextScopeKey (owner-aware), so nested subagent processes with
+    // different owners or task IDs share NOTHING — that's how a confused
+    // caller historically ended up inventing `app2`. Detect the collision
+    // at the session level (same Chrome) and refuse before a duplicate tab
+    // is created.
+    if (flags.label && !flags.force && !forceNew) {
+      const sessionHolder = this.sessionLabelHolder(flags.label);
+      if (sessionHolder) {
+        const holderTab = tabs.find((t) => t.targetId === sessionHolder);
+        if (holderTab) {
+          throw new CliError(`label already exists in this Chrome session: ${flags.label}`, {
+            code: "duplicate_session_label",
+            exitCode: 2,
+            existingTargetId: sessionHolder,
+            next: [
+              `another task in this Chrome session already owns label ${flags.label} at target ${sessionHolder.slice(0, MIN_TARGET_PREFIX_LEN)}`,
+              `reuse the existing tab: realbrowser tab select ${sessionHolder.slice(0, MIN_TARGET_PREFIX_LEN)} --label ${flags.label}`,
+              `or list session tabs: realbrowser tab list --mine`,
+              `or use a different label, or pass --force to override (will remap the label to a new target)`,
+              `or pass --force-new for a fresh same-origin tab without label conflict`,
+            ],
+          });
+        }
+      }
+    }
+    const visibleByWindow = !flags.front ? await this.findActiveTabsByWindow(tabs).catch(() => new Map()) : new Map();
     if (this.context.kind === "profile" && this.context.profile && this.context.endpointScope !== "profile") {
-      if (!flags.front && !flags.bestEffortBackground) {
+      if (!flags.front && !flags.bestEffortBackground && !flags.background) {
         throw new CliError(`cannot safely create a background tab in profile ${this.context.profile.id}`, {
           code: "profile_background_launch_guard",
           exitCode: 4,
@@ -1774,55 +2686,280 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
           ],
         });
       }
+      // Try CDP Target.createTarget first — no focus steal, true background.
+      // Fall back to launchProfileTab only if CDP creation fails or the
+      // browserContextId for this profile is not yet known.
+      if (!flags.front) {
+        // CDP create is always attempted before falling back to launchProfileTab.
+        // Two paths:
+        //   (a) trusted: a prior `profile-open` or `cdp-create-with-context`
+        //       record gives us this profile's browserContextId — use it.
+        //   (b) default-context: no proven id yet — call Target.createTarget
+        //       WITHOUT browserContextId, which lands the tab in Chrome's
+        //       currently-active browser context. For single-profile users
+        //       this is correct; for multi-profile setups it can land in
+        //       a different profile than `--profile` requested. We tag those
+        //       tabs as `cdp-create-default-context` (NOT trusted by
+        //       resolveBrowserContextIdForProfile) so a wrong-profile tab
+        //       can never poison future context resolution.
+        // Either path avoids the launchProfileTab subprocess and macOS focus
+        // flash. launchProfileTab below stays as the last-resort fallback
+        // when Target.createTarget itself throws.
+        let browserContextId = await this.resolveBrowserContextIdForProfile(this.context.profile.id).catch(() => null);
+        let bcidIsTrusted = Boolean(browserContextId);
+        // v0.3.0: when no TRUSTED bcid is known, pick the bcid with the most
+        // existing live tabs as a HEURISTIC for the user's main profile
+        // window. Chrome's Target.createTarget(browserContextId=X) appends
+        // the new tab to one of X's existing windows (rather than spawning a
+        // new browser instance, which CDP does when bcid is NULL — that's
+        // the "new window per tab" bug users see). If the heuristic picks
+        // the WRONG profile's bcid, the chrome://version readback below
+        // catches the mismatch, closes the tab, and throws
+        // profile_routing_failed; no orphan wrong-profile tabs.
+        //
+        // Heuristic: highest live tab count = most likely the user's primary
+        // profile. Anonymous/incognito contexts and devtools contexts are
+        // skipped. Heuristic-derived bcid is still subject to chrome://version
+        // verification (probeProfile stays true below).
+        if (!browserContextId && this.isBrowserScopedProfileContext()) {
+          try {
+            const rawTabs = await this.tabsRaw();
+            const counts = new Map();
+            for (const t of rawTabs) {
+              const bcid = t.browserContextId;
+              if (typeof bcid !== "string" || bcid.length === 0) continue;
+              const u = t.url || "";
+              if (u.startsWith("devtools://") || u.startsWith("chrome-extension://")) continue;
+              counts.set(bcid, (counts.get(bcid) || 0) + 1);
+            }
+            if (counts.size > 0) {
+              let bestBcid = null;
+              let bestCount = -1;
+              for (const [bcid, c] of counts.entries()) {
+                if (c > bestCount) { bestCount = c; bestBcid = bcid; }
+              }
+              if (bestBcid) browserContextId = bestBcid;
+            }
+          } catch {}
+        }
+        // v0.3.0: when we have no bcid AND --background --best-effort-background
+        // neither set AND browser-scoped multi-profile, refuse rather than
+        // silently route to wrong profile.
+        if (!browserContextId && !flags.front && !flags.bestEffortBackground && this.isBrowserScopedProfileContext()) {
+          const liveContexts = await this.enumerateLiveBrowserContexts().catch(() => new Set());
+          if (liveContexts.size > 1) {
+            throw new CliError(`cannot disambiguate background tab for profile ${this.context.profile.id} across ${liveContexts.size} live browser contexts`, {
+              code: "background_create_unavailable",
+              exitCode: 4,
+              next: [
+                `${liveContexts.size} distinct browserContextIds visible on the endpoint; default-context createTarget would land in the wrong profile`,
+                `realbrowser tab ensure ${url} --profile "${this.context.profile.id}" --label ${flags.label || "app"} --best-effort-background`,
+                `realbrowser tab ensure ${url} --profile "${this.context.profile.id}" --label ${flags.label || "app"} --front`,
+                "after a single bootstrap with --best-effort-background, subsequent --background calls resolve the correct context automatically",
+              ],
+            });
+          }
+        }
+        {
+          const cdpFocusRestore = await captureForegroundAppForBackgroundLaunch({ front: false }).catch(() => null);
+          try {
+            // v0.3.0: when no proven browserContextId, open chrome://version
+            // FIRST so we can read the actual profile path before committing.
+            // If chrome://version reveals a profile mismatch, the tab is closed
+            // and we throw profile_routing_failed — no orphan tabs in the wrong
+            // profile, ever. With a known browserContextId we skip the probe
+            // (Target.createTarget honors the context id deterministically).
+            // v0.3.0: probe when bcid is unTRUSTED (NULL bcid OR heuristic-
+            // derived bcid). Only skip the probe when bcid came from a prior
+            // proven tab (resolveBrowserContextIdForProfile returned non-null).
+            const probeProfile = !bcidIsTrusted && Boolean(this.context.profile?.profileDirName);
+            const initialUrl = probeProfile ? "chrome://version/" : url;
+            const createParams = { url: initialUrl, background: true, focus: false };
+            if (browserContextId) createParams.browserContextId = browserContextId;
+            const created = await this.cdp.send("Target.createTarget", createParams, undefined, flags.timeout || 30_000);
+            const targetId = created.targetId;
+            if (targetId) {
+              // Tab is created. Commit to it. Every metadata/label/attach step
+              // below is best-effort: if a downstream call throws, the tab is
+              // STILL real and we MUST NOT fall through to launchProfileTab
+              // (which would spawn Chrome and steal focus). Wrap every call
+              // in .catch and return success regardless.
+              await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
+              // v0.3.0: if we probed chrome://version, verify the actual
+              // profile path matches what was requested. Mismatch closes the
+              // tab and throws profile_routing_failed (propagates to the
+              // caller; nothing else needs cleanup). Match yields a proven
+              // tab AND navigates to the user's intended URL.
+              let verifiedProfileDir = null;
+              if (probeProfile) {
+                verifiedProfileDir = await this.verifyTargetProfile(targetId, this.context.profile.profileDirName, url, {
+                  strict: true,
+                  profileId: this.context.profile.id,
+                });
+              }
+              // profileOwned reflects whether we KNOW this tab is in the
+              // requested profile. Either:
+              //  - browserContextId was known (trusted source), OR
+              //  - chrome://version probe confirmed the profile dir matches.
+              // v0.3.0: profileProven requires TRUSTED bcid (from prior
+              // proof) OR fresh chrome://version verification — NOT just
+              // "we passed some bcid to createTarget", which may have been a
+              // heuristic pick that landed in the wrong profile.
+              const profileProven = bcidIsTrusted || Boolean(verifiedProfileDir);
+              const trustedSource = bcidIsTrusted
+                ? "cdp-create-with-context"
+                : (verifiedProfileDir ? "cdp-create-verified-profile" : "cdp-create-default-context");
+              await this.setTargetMeta(targetId, { profileOwned: profileProven, profile: this.context.profile.id, source: trustedSource, requestedUrl: url }).catch(() => {});
+              if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileProven, profile: this.context.profile.id, source: trustedSource, force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) }).catch(() => {});
+              else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, trustedSource).catch(() => {});
+              await this.recordTaskTab({ targetId, suggestedTarget: flags.label || targetId, label: flags.label || "", url }, url, flags.label, flags, trustedSource).catch(() => {});
+              await this.attach(targetId).catch(() => {});
+              await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
+              await waitForReadyState(this, targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
+              await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
+              const tab = await this.resolveTarget(flags.label || targetId, { operation: `tab ${command}` }).catch(() => ({ targetId, suggestedTarget: flags.label || targetId, targetPrefix: targetId.slice(0, 8), label: flags.label || "", url }));
+              return result({
+                text: [
+                  `created ${tab.suggestedTarget} ${url}`,
+                  `task-tab origin=${canonicalOriginKey(url)} label=${tab.suggestedTarget} target=${tab.targetPrefix} status=active`,
+                  `next: realbrowser read observe -t ${tab.suggestedTarget}`,
+                ].join("\n"),
+                target: tab,
+                created: true,
+                launch: bcidIsTrusted ? "cdp-background" : (verifiedProfileDir ? "cdp-verified-profile" : "cdp-default-context"),
+                taskId: this.taskId(flags),
+                context: this.publicContext(),
+              });
+            }
+          } catch (cdpErr) {
+            if (cdpErr instanceof CliError && ["profile_routing_failed", "profile_verification_unavailable"].includes(cdpErr.code)) {
+              throw cdpErr;
+            }
+            // CDP create itself failed (the Target.createTarget call threw).
+            // Record the error to /tmp so we can diagnose; fall through to
+            // launchProfileTab only if --best-effort-background was passed.
+            try {
+              const dbg = `[${new Date().toISOString()}] CDP create failed: ${cdpErr?.message || cdpErr} url=${url} bcid=${browserContextId || "(default)"}\n`;
+              fs.appendFileSync("/tmp/realbrowser-cdp-create-errors.log", dbg);
+            } catch {}
+          } finally {
+            await restoreForegroundAppAfterBackgroundLaunch(cdpFocusRestore, { delayMs: 50 }).catch(() => {});
+          }
+        }
+      }
+      // Phase 4: refuse the launchProfileTab fallback for default --background.
+      // launchProfileTab spawns Chrome via --profile-directory which can
+      // steal focus and add tabs the user did not ask for. Per Codex § 4
+      // we only allow this when --front (visible) or --best-effort-background
+      // (explicit acceptance of brief focus risk during bootstrap) is set.
+      if (!flags.front && !flags.bestEffortBackground) {
+        throw new CliError(`cannot create a non-disruptive background tab for profile ${this.context.profile.id} because no proven browserContextId is available`, {
+          code: "background_create_unavailable",
+          exitCode: 4,
+          next: [
+            "No Chrome launch was attempted.",
+            `realbrowser tab list --mine --profile "${this.context.profile.id}"`,
+            `realbrowser tab list --profile "${this.context.profile.id}"`,
+            `realbrowser tab ensure ${url} --profile "${this.context.profile.id}" --label ${flags.label || "app"} --best-effort-background`,
+            `realbrowser tab ensure ${url} --profile "${this.context.profile.id}" --label ${flags.label || "app"} --front`,
+            "if a tab in this profile is already open in Chrome, run any read command first to bootstrap a proven browserContextId, then retry --background",
+          ],
+        });
+      }
       const beforeIds = new Set(tabs.map((tab) => tab.targetId));
-      const launch = await this.launchProfileTab(url, { front: Boolean(flags.front) });
-      const tab = await waitForOpenedTab(this, url, beforeIds, flags.timeout || 30_000, { requireFresh: true });
+      // v0.3.0: open chrome://version via the Chrome subprocess so we can
+      // verify profile routing BEFORE committing to the user's URL. On macOS
+      // with multiple profiles, --profile-directory is unreliable when Chrome
+      // is already running; the subprocess command is routed to the frontmost
+      // window's profile. chrome://version is a free probe.
+      const launch = await this.launchProfileTab("chrome://version/", { front: Boolean(flags.front) });
+      const tab = await waitForOpenedTab(this, "chrome://version", beforeIds, flags.timeout || 30_000, { requireFresh: true });
+      if (flags.front) {
+        await this.cdp.send("Target.activateTarget", { targetId: tab.targetId }).catch(() => {});
+      }
+      // No --front: do NOT activateTarget on a "restore" tab. activateTarget
+      // brings Chrome.app to the macOS foreground; restoring user-visible focus
+      // is handled by restoreForegroundAppAfterBackgroundLaunch (osascript) which
+      // returns the previous foreground app or browser tab to
+      // its prior state without touching any Chrome tab.
       await restoreForegroundAppAfterBackgroundLaunch(launch?.focusRestore, { delayMs: 50 }).catch(() => {});
-      await this.setTargetMeta(tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open" });
-      if (flags.label) await this.setLabel(flags.label, tab.targetId, { profileOwned: true, profile: this.context.profile.id, source: "profile-open", force: Boolean(flags.force), takeLease: Boolean(flags.takeLease), url: tab.url });
-      else await this.claimTarget(tab, flags, "profile-open");
-      if (flags.front) await this.cdp.send("Target.activateTarget", { targetId: tab.targetId }).catch(() => {});
+      // v0.3.0+: verify chrome://version then navigate to the intended URL.
+      // Mismatches or unreadable Profile Path close the probe tab before the
+      // user's URL is loaded; correctness is preferred over a wrong-profile tab.
+      const verifiedProfileDir = await this.verifyTargetProfile(tab.targetId, this.context.profile.profileDirName, url, {
+        strict: true,
+        profileId: this.context.profile.id,
+      });
+      const profileOwnedAfterLaunch = Boolean(verifiedProfileDir);
+      await this.setTargetMeta(tab.targetId, { profileOwned: profileOwnedAfterLaunch, profile: this.context.profile.id, source: profileOwnedAfterLaunch ? "profile-open-verified" : "profile-open", requestedUrl: url });
+      const launchSource = profileOwnedAfterLaunch ? "profile-open-verified" : "profile-open";
+      if (flags.label) await this.setLabel(flags.label, tab.targetId, { profileOwned: profileOwnedAfterLaunch, profile: this.context.profile.id, source: launchSource, force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease), url: tab.url });
+      else await this.claimTarget(tab, flags, launchSource);
+      await this.recordTaskTab(tab, url, flags.label, flags, "profile-open");
       await this.attach(tab.targetId);
       await waitForReadyState(this, tab.targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
       const updated = await this.resolveTarget(flags.label || tab.targetId, { operation: `tab ${command}` });
       return result({
-        text: `created ${updated.suggestedTarget} ${url}`,
+        text: [
+          `created ${updated.suggestedTarget} ${url}`,
+          `task-tab origin=${canonicalOriginKey(url)} label=${updated.suggestedTarget} target=${updated.targetPrefix} status=active`,
+          `next: realbrowser read observe -t ${updated.suggestedTarget}`,
+        ].join("\n"),
         target: updated,
         created: true,
         launch: "profile-open",
+        taskId: this.taskId(flags),
         warning: this.context.endpointScope === "browser" ? "browser-scoped CDP cannot prove existing-tab profile ownership; new tab was opened through the named profile launcher" : undefined,
         context: this.publicContext(),
       });
     }
-    const created = await this.cdp.send("Target.createTarget", {
-      url,
-      background: !flags.front,
-    }, undefined, flags.timeout || 30_000);
-    const targetId = created.targetId;
-    if (!targetId) throw new Error("Target.createTarget returned no targetId");
-    const profileOwnedCreate = this.context.kind === "profile" && this.context.endpointScope === "profile";
-    if (profileOwnedCreate) await this.setTargetMeta(targetId, { profileOwned: true, profile: this.context.profile.id, source: "target-create" });
-    if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create", force: Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
-    else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "target-create");
-    if (flags.front) await this.cdp.send("Target.activateTarget", { targetId }).catch(() => {});
-    await this.attach(targetId);
-    await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
-    await waitForReadyState(this, targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
-    const tab = await this.resolveTarget(flags.label || targetId, { operation: `tab ${command}` });
-    return result({
-      text: `created ${tab.suggestedTarget} ${url}`,
-      target: tab,
-      created: true,
-      context: this.publicContext(),
-    });
+    const focusRestore = !flags.front ? await captureForegroundAppForBackgroundLaunch({ front: false }).catch(() => null) : null;
+    try {
+      const created = await this.cdp.send("Target.createTarget", {
+        url,
+        background: !flags.front,
+        focus: flags.front ? undefined : false,
+      }, undefined, flags.timeout || 30_000);
+      const targetId = created.targetId;
+      if (!targetId) throw new Error("Target.createTarget returned no targetId");
+      if (flags.front) {
+        await this.cdp.send("Target.activateTarget", { targetId }).catch(() => {});
+      }
+      // No --front: do NOT call activateTarget — see same-comment above. The
+      // background:true / focus:false flags on createTarget keep the new tab
+      // out of the visible viewport without our help.
+      const profileOwnedCreate = this.context.kind === "profile" && this.context.endpointScope === "profile";
+      await this.setTargetMeta(targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create", requestedUrl: url });
+      if (flags.label) await this.setLabel(flags.label, targetId, { profileOwned: profileOwnedCreate, profile: this.context.profile?.id, source: "target-create", force: command === "ensure" || Boolean(flags.force), takeLease: Boolean(flags.takeLease) });
+      else await this.claimTarget({ targetId, suggestedTarget: targetId }, flags, "target-create");
+      await this.recordTaskTab({ targetId, suggestedTarget: flags.label || targetId, label: flags.label || "", url }, url, flags.label, flags, "target-create");
+      await this.attach(targetId);
+      await waitForUrl(this, targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
+      await waitForReadyState(this, targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
+      const tab = await this.resolveTarget(flags.label || targetId, { operation: `tab ${command}` });
+      return result({
+        text: [
+          `created ${tab.suggestedTarget} ${url}`,
+          `task-tab origin=${canonicalOriginKey(url)} label=${tab.suggestedTarget} target=${tab.targetPrefix} status=active`,
+          `next: realbrowser read observe -t ${tab.suggestedTarget}`,
+        ].join("\n"),
+        target: tab,
+        created: true,
+        taskId: this.taskId(flags),
+        context: this.publicContext(),
+      });
+    } finally {
+      await restoreForegroundAppAfterBackgroundLaunch(focusRestore, { delayMs: 50 }).catch(() => {});
+    }
   }
   if (command === "navigate") {
-    const targetRef = args[0] || flags.target;
-    let url = args[1] || args[0];
-    if (!targetRef || !url || targetRef === url) throw usage("tab navigate requires <target> <url|link-ref>");
+    const targetRef = flags.target || args[0];
+    let url = flags.target ? args[0] : args[1];
+    if (!targetRef || !url) throw usage("tab navigate requires <target> <url|link-ref>");
     let resolvedFromRef = "";
     const tab = await this.resolveTargetForOperation(targetRef, flags, "tab navigate");
     await this.assertTargetLease(tab, flags, "tab navigate");
+    await this.assertAgentOwnedForMutation(tab, flags, "tab navigate");
     if (/^l\d+$/i.test(url)) {
       const ref = this.refMetadataFor(tab.targetId, url);
       if (!ref?.href) throw new CliError(`ref ${url} has no href`, { code: "ref_not_navigable", exitCode: 2 });
@@ -1831,10 +2968,28 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
     }
     assertNavigationUrl(url, flags.force);
     await this.sendToTarget(tab.targetId, "Page.navigate", { url }, flags.timeout || 30_000);
+    await this.setTargetMeta(tab.targetId, { profileOwned: this.profileTargetProven(tab), source: "navigate", requestedUrl: url });
     await waitForUrl(this, tab.targetId, url, Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
     await waitForReadyState(this, tab.targetId, "interactive", Math.min(flags.timeout || 10_000, 10_000)).catch(() => {});
     const updated = await this.resolveTargetForOperation(tab.suggestedTarget, flags, "tab navigate");
-    return result({ text: `navigated ${updated.suggestedTarget} to ${url}`, target: updated, resolvedFromRef: resolvedFromRef || undefined });
+    // Update task registry: if we owned this tab and origin changed, move
+    // the registry entry from the old origin to the new one.
+    if (this.classifyTabOwnership(updated, flags) === "mine") {
+      const oldOrigin = canonicalOriginKey(tab.url || "");
+      const newOrigin = canonicalOriginKey(url);
+      if (oldOrigin && oldOrigin !== newOrigin) {
+        await this.removeTaskTab(updated.targetId, flags).catch(() => {});
+      }
+      await this.recordTaskTab(updated, url, updated.label || tab.label || tab.suggestedTarget, flags, "navigate").catch(() => {});
+    }
+    const liveTitle = await this.callFunction(tab.targetId, () => ({ title: document.title || "" }), []).then((r) => r?.title || updated.title || "").catch(() => updated.title || "");
+    const errorPagePattern = /(?:^|[^a-z0-9])(?:404|500|503|not[\s-]?found|page[\s-]?not[\s-]?found|không[\s-]?tìm[\s-]?thấy|trang[\s-]?không[\s-]?tồn[\s-]?tại|seite[\s-]?nicht[\s-]?gefunden|p[áa]gina[\s-]?no[\s-]?encontrada)(?:[^a-z0-9]|$)/i;
+    const errorPageHint = errorPagePattern.test(liveTitle) ? liveTitle.slice(0, 120) : "";
+    const baseText = `navigated ${updated.suggestedTarget} to ${url}`;
+    const text = errorPageHint
+      ? `${baseText}\nWARN: page title looks like an error page (${errorPageHint}). The URL responded but the rendered page is an error/not-found template — verify with: read tree -t ${updated.suggestedTarget} -i -c`
+      : baseText;
+    return result({ text, target: updated, resolvedFromRef: resolvedFromRef || undefined, errorPageHint: errorPageHint || undefined, title: liveTitle || undefined });
   }
   if (command === "label") {
     const targetRef = args[0] || flags.target;
@@ -1856,10 +3011,27 @@ BrowserDaemon.prototype.tab = async function tab(command, args, flags) {
     return await this.read("observe", [], { ...flags, target: tab.suggestedTarget });
   }
   if (command === "close") {
+    if (flags.mine) {
+      await this.reconcileTaskTabs(flags);
+      const tabs = await this.tabs();
+      const mine = tabs.filter((tab) => this.classifyTabOwnership(tab, flags) === "mine");
+      for (const tab of mine) {
+        await this.cdp.send("Target.closeTarget", { targetId: tab.targetId }).catch(() => {});
+        await this.releaseTargetLease(tab.targetId).catch(() => {});
+        await this.removeTaskTab(tab.targetId, flags);
+      }
+      return result({
+        text: `closed ${mine.length} agent-owned tab${mine.length === 1 ? "" : "s"} for task ${this.taskId(flags)}`,
+        closed: mine.length,
+        taskId: this.taskId(flags),
+      });
+    }
     const tab = await this.resolveTargetForOperation(args[0] || flags.target, flags, "tab close");
     await this.assertTargetLease(tab, flags, "tab close");
+    await this.assertAgentOwnedForMutation(tab, flags, "tab close");
     await this.cdp.send("Target.closeTarget", { targetId: tab.targetId });
     await this.releaseTargetLease(tab.targetId);
+    await this.removeTaskTab(tab.targetId, flags);
     return result({ text: `closed ${tab.suggestedTarget}`, target: tab });
   }
   throw usage(`unknown tab command: ${command}`);
@@ -1894,7 +3066,7 @@ BrowserDaemon.prototype.read = async function read(command, args, flags) {
     const selector = args[0] || flags.selector;
     if (!selector) throw usage("read query requires <selector>");
     const opts = queryOptions(flags);
-    if (flags.root && /^[riefblc]\d+$/i.test(flags.root)) opts.rootSelector = this.selectorFor(tab.targetId, flags.root);
+    if (flags.root && /^[riefblco]\d+$/i.test(flags.root)) opts.rootSelector = this.selectorFor(tab.targetId, flags.root);
     const payload = await this.callFunction(tab.targetId, queryFunction, [selector, opts]);
     if (flags.fields) payload.matches = payload.matches.map((entry) => pickFields(entry, flags.fields));
     this.storeRefs(tab.targetId, payload.refs || {});
@@ -1902,21 +3074,21 @@ BrowserDaemon.prototype.read = async function read(command, args, flags) {
   }
   if (command === "items") {
     const opts = itemsOptions(args, flags);
-    if (flags.root && /^[riefblc]\d+$/i.test(flags.root)) opts.root = this.selectorFor(tab.targetId, flags.root);
+    if (flags.root && /^[riefblco]\d+$/i.test(flags.root)) opts.root = this.selectorFor(tab.targetId, flags.root);
     const payload = await this.callFunction(tab.targetId, itemsFunction, [opts]);
     this.storeRefs(tab.targetId, payload.refs || {});
     return await maybeWriteReadOut(result({ text: formatItems(payload), target: tab, ...payload }), flags, payload, "items", { omit: ["items", "refs"] });
   }
   if (command === "item") {
     const opts = itemsOptions(args, flags);
-    if (flags.root && /^[riefblc]\d+$/i.test(flags.root)) opts.root = this.selectorFor(tab.targetId, flags.root);
+    if (flags.root && /^[riefblco]\d+$/i.test(flags.root)) opts.root = this.selectorFor(tab.targetId, flags.root);
     const payload = await this.callFunction(tab.targetId, itemFunction, [opts]);
     this.storeRefs(tab.targetId, payload.refs || {});
     return await maybeWriteReadOut(result({ text: payload.found ? payload.text : `item ${payload.index} not found`, target: tab, ...payload }), flags, payload, "item", { omit: ["links", "media", "refs"] });
   }
   if (command === "snapshot") {
-    if (flags.selector && /^[riefblc]\d+$/i.test(flags.selector)) flags.selector = this.selectorFor(tab.targetId, flags.selector);
-    if (flags.root && /^[riefblc]\d+$/i.test(flags.root)) flags.root = `selector:${this.selectorFor(tab.targetId, flags.root)}`;
+    if (flags.selector && /^[riefblco]\d+$/i.test(flags.selector)) flags.selector = this.selectorFor(tab.targetId, flags.selector);
+    if (flags.root && /^[riefblco]\d+$/i.test(flags.root)) flags.root = `selector:${this.selectorFor(tab.targetId, flags.root)}`;
     const payload = await this.snapshot(tab.targetId, flags);
     return await maybeWriteReadOut(result({ text: payload.snapshot, target: tab, ...payload }), flags, payload.snapshot, "snapshot", { text: true, omit: ["snapshot", "refs"] });
   }
@@ -1938,7 +3110,7 @@ BrowserDaemon.prototype.read = async function read(command, args, flags) {
     return await maybeWriteReadOut(result({ text: formatValue(payload), target: tab, [command]: payload }), flags, payload, command, { omit: [command] });
   }
   if (command === "tree") {
-    if (flags.selector && /^[riefblc]\d+$/i.test(flags.selector)) flags.selector = this.selectorFor(tab.targetId, flags.selector);
+    if (flags.selector && /^[riefblco]\d+$/i.test(flags.selector)) flags.selector = this.selectorFor(tab.targetId, flags.selector);
     const payload = await this.ariaTree(tab.targetId, flags);
     return await maybeWriteReadOut(result({ text: payload.tree, target: tab, ...payload }), flags, payload.tree, "tree", { text: true, omit: ["tree", "refs"] });
   }
@@ -1948,14 +3120,36 @@ BrowserDaemon.prototype.read = async function read(command, args, flags) {
     const payload = await this.callFunction(tab.targetId, isFunction, [state, this.selectorFor(tab.targetId, ref)]);
     return await maybeWriteReadOut(result({ text: String(payload.ok), target: tab, ...payload }), flags, payload, "is");
   }
+  if (command === "autocomplete" || command === "overlay") {
+    const opts = { limit: Number(flags.limit || 30) };
+    if (flags.near) opts.anchorSelector = this.selectorFor(tab.targetId, flags.near);
+    const payload = await this.callFunction(tab.targetId, readOverlayFunction, [opts]);
+    if (!payload?.ok) {
+      const reasonLine = payload?.reason ? `(${payload.reason})` : "(no floating layer found)";
+      const hint = "if a dropdown should be open, focus the field first (action click <ref>), type to filter (action type <ref> \"<text>\"), then retry with --near <ref> to anchor at the field you clicked";
+      return result({ text: `${reasonLine}\n${hint}`, target: tab, ok: false, reason: payload?.reason });
+    }
+    this.storeRefs(tab.targetId, payload.refs || {}, { merge: true });
+    const layerHeader = `floating layer: ${payload.layer.tag}${payload.layer.role ? `[${payload.layer.role}]` : ""} z=${payload.layer.zIndex}${payload.layer.isListLike ? ` listItems=${payload.layer.listItems}` : ""}${payload.layer.isRoleLayer ? " role-layer" : ""}${typeof payload.layer.distance === "number" ? ` dist=${payload.layer.distance}` : ""} ${payload.layer.rect.width}x${payload.layer.rect.height}@${payload.layer.rect.x},${payload.layer.rect.y}`;
+    const headerParts = [layerHeader];
+    if (payload.anchor) {
+      const f = payload.anchor;
+      headerParts.push(`anchor (${f.source || "auto"}): ${f.tag}${f.role ? `[${f.role}]` : ""}${f.name ? ` "${f.name}"` : ""}${f.value ? ` value="${f.value}"` : ""}`);
+    }
+    if (payload.skippedLayers) headerParts.push(`(skipped ${payload.skippedLayers} ineligible layer${payload.skippedLayers === 1 ? "" : "s"})`);
+    const lines = payload.options.map((o) => `- ${o.ref} ${o.tag}${o.role ? `[${o.role}]` : ""} "${o.text}"`);
+    const truncatedNote = payload.truncated ? `\n(${payload.totalFound - payload.options.length} more; pass --limit N to expand)` : "";
+    const text = `${headerParts.join("\n")}\n${lines.join("\n")}${truncatedNote}`;
+    return await maybeWriteReadOut(result({ text, target: tab, ...payload }), flags, payload, "autocomplete", { text: true, omit: ["refs"] });
+  }
   throw usage(`unknown read command: ${command}`);
 };
 
-BrowserDaemon.prototype.storeRefs = function storeRefs(targetId, refs) {
+BrowserDaemon.prototype.storeRefs = function storeRefs(targetId, refs, opts = {}) {
   const key = this.refStoreKey(targetId);
   const store = this.refStores.get(key) || { generation: 0, refs: {}, snapshot: "", ariaSnapshot: "" };
   store.generation += 1;
-  store.refs = refs;
+  store.refs = opts.merge ? { ...store.refs, ...refs } : refs;
   store.stale = false;
   this.refStores.set(key, store);
 };
@@ -1966,10 +3160,22 @@ BrowserDaemon.prototype.refStoreKey = function refStoreKey(targetId) {
 
 BrowserDaemon.prototype.selectorFor = function selectorFor(targetId, refOrSelector) {
   const raw = String(refOrSelector || "");
-  if (/^[ebfrilc]\d+$/i.test(raw)) {
+  if (/^[ebfrilco]\d+$/i.test(raw)) {
     const store = this.refStores.get(this.refStoreKey(targetId));
     const ref = store?.refs?.[raw];
-    if (!ref) throw new CliError(`ref ${raw} is stale or unknown`, { code: "ref_stale", exitCode: 5, next: ["realbrowser action state -t <target> --root active"] });
+    if (!ref) {
+      const available = store?.refs ? Object.keys(store.refs).slice(0, 8).join(",") : "(none)";
+      throw new CliError(`ref ${raw} is stale or unknown`, {
+        code: "ref_stale",
+        exitCode: 5,
+        next: [
+          `refs from a tree-file (--out) become invalid after the next read tree on this target`,
+          `available refs: ${available}${store?.refs && Object.keys(store.refs).length > 8 ? "..." : ""}`,
+          `recovery: realbrowser read tree -t <target> -i -c   (without --out, then use refs from that output)`,
+          `or:        realbrowser action state -t <target> --root active --compact`,
+        ],
+      });
+    }
     return ref.selector;
   }
   if (raw.startsWith("selector:")) return raw.slice("selector:".length);
@@ -2017,45 +3223,109 @@ BrowserDaemon.prototype.ariaTree = async function ariaTree(targetId, flags) {
     limit: Number(flags.limit || flags.maxNodes || 800),
   });
   const previous = this.refStores.get(this.refStoreKey(targetId)) || { generation: 0, refs: {}, snapshot: "", ariaSnapshot: "" };
-  let output = formatted.text;
-  if (flags.diff) {
-    output = lineDiff(previous.ariaSnapshot || "", formatted.text);
-  }
   const refs = {};
   if (formatted.interactiveNodes.length > 0) {
     await this.assignAriaRefs(targetId, sessionId, formatted.interactiveNodes, refs);
   }
+  const cleanedText = stripUnstampedRefs(formatted.text, refs);
+  // Walk the visible DOM for non-ARIA clickable elements (cursor:pointer
+  // divs, tabindex containers, onclick wrappers, contenteditable blocks,
+  // aria-haspopup triggers) that the AX tree cannot see. These are
+  // common in React/Vue UIs (recent-search bubbles, custom date pickers,
+  // option chips). The cursor-clickables function stamps `c1, c2, ...`
+  // refs and skips anything already in the AX tree (via
+  // `[data-realbrowser-ref]` ancestor/self check).
+  let cursorPayload = { lines: [], refs: {}, count: 0 };
+  if (!flags.selector) {
+    cursorPayload = await this.callFunction(targetId, cursorClickablesFunction, [{ max: 100, startIndex: 0 }]).catch(() => cursorPayload);
+  }
+  let combined = cleanedText;
+  if (cursorPayload.lines && cursorPayload.lines.length) {
+    const recentSearchHint = detectRecentSearchHint(cursorPayload.lines);
+    const header = `\n# cursor-clickables (non-ARIA, DOM-detected; ${cursorPayload.count} item${cursorPayload.count === 1 ? "" : "s"})${recentSearchHint ? `\n${recentSearchHint}` : ""}`;
+    combined = `${cleanedText}\n${header}\n${cursorPayload.lines.join("\n")}`;
+    Object.assign(refs, cursorPayload.refs || {});
+  }
+  let output = combined;
+  if (flags.diff) {
+    output = lineDiff(previous.ariaSnapshot || "", combined);
+  }
   this.storeRefs(targetId, refs);
   const store = this.refStores.get(this.refStoreKey(targetId));
-  if (store) store.ariaSnapshot = formatted.text;
+  if (store) store.ariaSnapshot = combined;
+  const unstamped = formatted.interactiveNodes.filter((n) => n._stampFailed).length;
   return {
     tree: output,
     refs,
-    stats: { lines: formatted.lines, chars: output.length, refs: Object.keys(refs).length, nodes: axNodes.length, diff: Boolean(flags.diff), truncated: formatted.truncated },
+    stats: { lines: formatted.lines + (cursorPayload.lines?.length || 0), chars: output.length, refs: Object.keys(refs).length, unstamped, nodes: axNodes.length, diff: Boolean(flags.diff), truncated: formatted.truncated, cursorClickables: cursorPayload.count || 0 },
   };
 };
 
 BrowserDaemon.prototype.assignAriaRefs = async function assignAriaRefs(targetId, sessionId, interactiveNodes, refs) {
-  await this.cdp.send("Runtime.evaluate", { expression: 'document.querySelectorAll("[data-realbrowser-ref]").forEach(el => el.removeAttribute("data-realbrowser-ref"))' }, sessionId).catch(() => {});
-  const backendIds = interactiveNodes.map((n) => n.backendDOMNodeId).filter(Boolean);
-  if (backendIds.length === 0) return;
-  let nodeIds;
-  try {
-    const result = await this.cdp.send("DOM.getDocument", { depth: 0 }, sessionId);
-    const pushed = await this.cdp.send("DOM.pushNodesByBackendIds", { backendNodeIds: backendIds }, sessionId);
-    nodeIds = pushed.nodeIds;
-  } catch { return; }
-  for (let i = 0; i < interactiveNodes.length; i++) {
-    const node = interactiveNodes[i];
+  // Clear prior stamps everywhere (light DOM + shadow DOM).
+  await this.cdp.send("Runtime.evaluate", {
+    expression: `
+      (function clear(root) {
+        if (!root || !root.querySelectorAll) return;
+        for (const el of root.querySelectorAll("[data-realbrowser-ref]")) el.removeAttribute("data-realbrowser-ref");
+        for (const el of root.querySelectorAll("*")) { if (el.shadowRoot) clear(el.shadowRoot); }
+      })(document);
+    `,
+  }, sessionId).catch(() => {});
+  await this.cdp.send("DOM.enable", {}, sessionId).catch(() => {});
+
+  const targets = interactiveNodes.filter((n) => n.ref && n.backendDOMNodeId);
+  if (targets.length === 0) return;
+  const backendIds = targets.map((n) => Math.floor(n.backendDOMNodeId));
+
+  // Light-DOM path: batch backend->nodeId resolution. CDP method name is
+  // pushNodesByBackendIdsToFrontend (proven openclaw pattern).
+  const pushed = await this.cdp.send("DOM.pushNodesByBackendIdsToFrontend", { backendNodeIds: backendIds }, sessionId).catch(() => null);
+  const nodeIds = Array.isArray(pushed?.nodeIds) ? pushed.nodeIds : [];
+
+  // Stamp each node. nodeId > 0 → cheap setAttributeValue (no JS execution).
+  // nodeId 0 or batch failed → resolveNode + callFunctionOn pierces shadow DOM
+  // by operating on the element's JS reference directly.
+  await Promise.all(targets.map(async (node, i) => {
     const ref = node.ref;
-    if (!ref) continue;
-    const nodeId = nodeIds?.[backendIds.indexOf(node.backendDOMNodeId)];
-    if (!nodeId || nodeId === 0) continue;
-    try {
-      await this.cdp.send("DOM.setAttributeValue", { nodeId, name: "data-realbrowser-ref", value: ref }, sessionId);
-      refs[ref] = { ref, selector: `[data-realbrowser-ref="${ref}"]`, role: node.role, name: node.name || undefined };
-    } catch { /* skip unstampable nodes */ }
-  }
+    let stamped = false;
+    const nodeId = nodeIds[i];
+    if (nodeId && nodeId > 0) {
+      try {
+        await this.cdp.send("DOM.setAttributeValue", { nodeId, name: "data-realbrowser-ref", value: ref }, sessionId);
+        stamped = true;
+      } catch { /* fall through */ }
+    }
+    if (!stamped) {
+      try {
+        const resolved = await this.cdp.send("DOM.resolveNode", { backendNodeId: node.backendDOMNodeId }, sessionId);
+        const objectId = resolved?.object?.objectId;
+        if (objectId) {
+          try {
+            await this.cdp.send("Runtime.callFunctionOn", {
+              objectId,
+              functionDeclaration: 'function(value) { this.setAttribute && this.setAttribute("data-realbrowser-ref", value); }',
+              arguments: [{ value: ref }],
+            }, sessionId);
+            stamped = true;
+          } finally {
+            await this.cdp.send("Runtime.releaseObject", { objectId }, sessionId).catch(() => {});
+          }
+        }
+      } catch { /* mark below */ }
+    }
+    if (stamped) {
+      refs[ref] = {
+        ref,
+        selector: `[data-realbrowser-ref="${ref}"]`,
+        role: node.role,
+        name: node.name || undefined,
+        backendDOMNodeId: node.backendDOMNodeId,
+      };
+    } else {
+      node._stampFailed = true;
+    }
+  }));
 };
 
 BrowserDaemon.prototype.wait = async function wait(command, args, flags) {
@@ -2069,7 +3339,6 @@ BrowserDaemon.prototype.wait = async function wait(command, args, flags) {
       payload.screenshot = await captureCheckpointScreenshot(this, tab.targetId, flags, screenshotPath(this.artifactDir, "ready", tab, flags), {
         selector: flags.selector || flags.readySelector || "",
         root: flags.root,
-        clipToViewport: true,
         checkpoint: true,
       });
     }
@@ -2112,15 +3381,14 @@ BrowserDaemon.prototype.action = async function action(command, args, flags) {
   const preflight = await this.callFunction(tab.targetId, actionPreflightFunction, []);
   if (command === "state" || command === "root") {
     const opts = actionOptions(args, flags);
-    if (opts.rootSelector && /^[riefblc]\d+$/i.test(opts.rootSelector)) opts.rootSelector = this.selectorFor(tab.targetId, opts.rootSelector);
+    if (opts.rootSelector && /^[riefblco]\d+$/i.test(opts.rootSelector)) opts.rootSelector = this.selectorFor(tab.targetId, opts.rootSelector);
     const payload = await this.callFunction(tab.targetId, actionStateFunction, [opts]);
     this.storeRefs(tab.targetId, payload.refs || {});
     if (flags.screenshot) {
-      const selector = activeRootScreenshotSelector(payload);
-      payload.screenshot = await captureCheckpointScreenshot(this, tab.targetId, flags, screenshotPath(this.artifactDir, "action-state", tab, flags), {
-        selector,
+      const ssFlags = args[0] ? { ...flags, out: args[0] } : flags;
+      payload.screenshot = await captureCheckpointScreenshot(this, tab.targetId, flags, screenshotPath(this.artifactDir, "action-state", tab, ssFlags), {
+        selector: "",
         root: flags.root || "active",
-        clipToViewport: true,
         checkpoint: true,
       });
     }
@@ -2136,7 +3404,9 @@ BrowserDaemon.prototype.action = async function action(command, args, flags) {
         next: ["realbrowser action state -t <target> --root active --compact"],
       });
     }
-    const ref = command === "submit" ? (submitArgIsTarget ? submitArg : "final") : (args[0] || flags.text);
+    const ref = command === "submit"
+      ? (submitArgIsTarget ? submitArg : (looksLikeActionTargetToken(flags.ref || "") ? flags.ref : "final"))
+      : (args[0] || flags.ref || flags.text);
     if ((command === "click" || command === "hover") && !ref) throw usage(`action ${command} requires <ref|selector>`);
     const options = actionOptions(args, flags);
     options.final = command === "submit" || Boolean(flags.final);
@@ -2168,8 +3438,8 @@ BrowserDaemon.prototype.action = async function action(command, args, flags) {
     return result({ target: tab, preflight, postState, ...payload, elementText: payload.text, text: `${command === "submit" ? "submitted" : "clicked"} ${payload.ref || ref || payload.text || ""}`.trim() });
   }
   if (command === "fill" || command === "select") {
-    const ref = args[0];
-    const value = valueFromArgs(args.slice(1), flags);
+    const ref = args[0] || flags.ref;
+    const value = valueFromArgs(args.slice(args[0] ? 1 : 0), flags);
     if (!ref || value === undefined) throw usage(`action ${command} requires <ref|selector> <value>`);
     let payload;
     try {
@@ -2213,6 +3483,23 @@ BrowserDaemon.prototype.action = async function action(command, args, flags) {
     if (!key) throw usage(`action ${command} requires <key>`);
     await dispatchKey(this, tab.targetId, key);
     return result({ text: `pressed ${key}`, target: tab, preflight, key });
+  }
+  if (command === "scroll") {
+    const direction = (args[0] || "down").toLowerCase();
+    const amount = Number(args[1] || 500);
+    const scrollMap = { up: [0, -amount], down: [0, amount], left: [-amount, 0], right: [amount, 0] };
+    const [deltaX, deltaY] = scrollMap[direction] || scrollMap.down;
+    if (flags.selector || args[0] && /^[riefblco]\d+$/i.test(args[0])) {
+      const sel = flags.selector || this.selectorFor(tab.targetId, args[0]);
+      await this.callFunction(tab.targetId, (s, dx, dy) => {
+        const el = document.querySelector(s);
+        if (el) el.scrollBy(dx, dy);
+        else window.scrollBy(dx, dy);
+      }, [sel, deltaX, deltaY]);
+    } else {
+      await this.callFunction(tab.targetId, (dx, dy) => window.scrollBy(dx, dy), [deltaX, deltaY]);
+    }
+    return result({ text: `scrolled ${direction} ${amount}px`, target: tab, preflight, direction, amount, deltaX, deltaY });
   }
   if (command === "upload") {
     const { selector, triggerSelector, files } = uploadArgs(args, flags, tab.targetId, this);
@@ -2989,6 +4276,12 @@ async function stopDaemonState(state) {
   } catch {
     try { process.kill(state.pid, "SIGTERM"); } catch {}
   }
+  // Wait for graceful exit; if the daemon ignores stop+SIGTERM, SIGKILL it.
+  for (let i = 0; i < 15; i++) {
+    if (!processAlive(state.pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  try { process.kill(state.pid, "SIGKILL"); } catch {}
 }
 
 async function daemonHealth(state) {
@@ -3341,64 +4634,138 @@ async function findAnyDevtoolsEndpoint() {
   return null;
 }
 
+// Multi-OS browser executable resolver. Honors:
+//   - CHROME_PATH env var (ultimate override; checked first if set)
+//   - browser hint (chrome|brave|edge|vivaldi|arc|chromium); when set, only
+//     candidates matching that browser are returned.
+// Path priority is per-platform:
+//   - macOS: /Applications/<name>.app/Contents/MacOS/<exe>
+//   - Linux: /usr/bin/* then /snap/bin/* then PATH
+//   - Windows: %PROGRAMFILES%, %PROGRAMFILES(X86)%, %LOCALAPPDATA% under
+//     each vendor's Application directory.
+// Shape ported from openclaw's chrome.executables.ts but kept simple:
+// fs.existsSync only — no plist/registry/.desktop parsing.
 function findBrowserExecutable(browser = "") {
-  const candidates = [];
-  if (process.platform === "darwin") {
-    candidates.push(
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      "/Applications/Chromium.app/Contents/MacOS/Chromium",
-      "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-    );
-  } else if (IS_WINDOWS) {
-    const roots = [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA].filter(Boolean);
-    for (const root of roots) {
-      candidates.push(
-        path.join(root, "Google/Chrome/Application/chrome.exe"),
-        path.join(root, "Chromium/Application/chrome.exe"),
-        path.join(root, "BraveSoftware/Brave-Browser/Application/brave.exe"),
-        path.join(root, "Microsoft/Edge/Application/msedge.exe"),
-      );
-    }
-  } else {
-    candidates.push("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "brave-browser", "microsoft-edge");
+  const hint = String(browser || "").toLowerCase();
+  const override = process.env.CHROME_PATH;
+  // CHROME_PATH wins when no hint, or when it's plausibly the requested
+  // browser (filename contains the hint). When the hint disagrees with the
+  // override (CHROME_PATH=/...chrome but --browser=brave), respect the hint
+  // and fall through to vendor-specific candidates.
+  if (override && fs.existsSync(override)) {
+    if (!hint || override.toLowerCase().includes(hint)) return override;
   }
-  for (const candidate of candidates) {
-    if (candidate.includes("/") || candidate.includes("\\")) {
-      if ((!browser || candidate.toLowerCase().includes(browser)) && fs.existsSync(candidate)) return candidate;
-    } else if ((!browser || candidate.includes(browser)) && commandExists(candidate)) return candidate;
+  const candidates = browserExecutableCandidates();
+  for (const entry of candidates) {
+    if (hint && entry.kind !== hint) continue;
+    if (entry.path.includes("/") || entry.path.includes("\\")) {
+      if (fs.existsSync(entry.path)) return entry.path;
+    } else if (commandExists(entry.path)) {
+      return entry.path;
+    }
   }
   return null;
+}
+
+// Candidate list in priority order. Each entry is `{ kind, path }` where
+// `kind` is one of: chrome, chromium, brave, edge, vivaldi, arc.
+function browserExecutableCandidates() {
+  const out = [];
+  if (process.platform === "darwin") {
+    out.push(
+      { kind: "chrome", path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" },
+      { kind: "chrome", path: "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta" },
+      { kind: "chrome", path: "/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev" },
+      { kind: "chrome", path: "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary" },
+      { kind: "brave", path: "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" },
+      { kind: "brave", path: "/Applications/Brave Browser Beta.app/Contents/MacOS/Brave Browser Beta" },
+      { kind: "edge", path: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" },
+      { kind: "edge", path: "/Applications/Microsoft Edge Beta.app/Contents/MacOS/Microsoft Edge Beta" },
+      { kind: "vivaldi", path: "/Applications/Vivaldi.app/Contents/MacOS/Vivaldi" },
+      { kind: "arc", path: "/Applications/Arc.app/Contents/MacOS/Arc" },
+      { kind: "chromium", path: "/Applications/Chromium.app/Contents/MacOS/Chromium" },
+    );
+    return out;
+  }
+  if (IS_WINDOWS) {
+    const roots = [
+      process.env.PROGRAMFILES,
+      process.env["PROGRAMFILES(X86)"],
+      process.env.LOCALAPPDATA,
+    ].filter(Boolean);
+    for (const root of roots) {
+      out.push(
+        { kind: "chrome", path: path.join(root, "Google/Chrome/Application/chrome.exe") },
+        { kind: "chrome", path: path.join(root, "Google/Chrome Beta/Application/chrome.exe") },
+        { kind: "chrome", path: path.join(root, "Google/Chrome Dev/Application/chrome.exe") },
+        { kind: "chrome", path: path.join(root, "Google/Chrome SxS/Application/chrome.exe") },
+        { kind: "brave", path: path.join(root, "BraveSoftware/Brave-Browser/Application/brave.exe") },
+        { kind: "brave", path: path.join(root, "BraveSoftware/Brave-Browser-Beta/Application/brave.exe") },
+        { kind: "brave", path: path.join(root, "BraveSoftware/Brave-Browser-Nightly/Application/brave.exe") },
+        { kind: "edge", path: path.join(root, "Microsoft/Edge/Application/msedge.exe") },
+        { kind: "edge", path: path.join(root, "Microsoft/Edge Beta/Application/msedge.exe") },
+        { kind: "edge", path: path.join(root, "Microsoft/Edge Dev/Application/msedge.exe") },
+        { kind: "edge", path: path.join(root, "Microsoft/Edge SxS/Application/msedge.exe") },
+        { kind: "vivaldi", path: path.join(root, "Vivaldi/Application/vivaldi.exe") },
+        { kind: "chromium", path: path.join(root, "Chromium/Application/chrome.exe") },
+      );
+    }
+    return out;
+  }
+  // Linux: prefer absolute paths in /usr/bin then /snap/bin then Flatpak so the
+  // resolver gives a stable answer even when PATH is sparse (e.g. systemd units).
+  out.push(
+    { kind: "chrome", path: "/usr/bin/google-chrome" },
+    { kind: "chrome", path: "/usr/bin/google-chrome-stable" },
+    { kind: "chrome", path: "/usr/bin/google-chrome-beta" },
+    { kind: "chrome", path: "/usr/bin/google-chrome-unstable" },
+    { kind: "chrome", path: "/opt/google/chrome/google-chrome" },
+    { kind: "chrome", path: "/opt/google/chrome/chrome" },
+    { kind: "chromium", path: "/usr/bin/chromium" },
+    { kind: "chromium", path: "/usr/bin/chromium-browser" },
+    { kind: "chromium", path: "/snap/bin/chromium" },
+    { kind: "brave", path: "/usr/bin/brave-browser" },
+    { kind: "brave", path: "/usr/bin/brave-browser-stable" },
+    { kind: "brave", path: "/usr/bin/brave-browser-beta" },
+    { kind: "brave", path: "/usr/bin/brave-browser-nightly" },
+    { kind: "brave", path: "/opt/brave.com/brave/brave-browser" },
+    { kind: "edge", path: "/usr/bin/microsoft-edge" },
+    { kind: "edge", path: "/usr/bin/microsoft-edge-stable" },
+    { kind: "edge", path: "/usr/bin/microsoft-edge-beta" },
+    { kind: "edge", path: "/usr/bin/microsoft-edge-dev" },
+    { kind: "vivaldi", path: "/usr/bin/vivaldi" },
+    { kind: "vivaldi", path: "/usr/bin/vivaldi-stable" },
+  );
+  // Flatpak (system + per-user). Run via the wrapper script.
+  const flatpakExports = [
+    "/var/lib/flatpak/exports/bin",
+    path.join(process.env.HOME || "", ".local/share/flatpak/exports/bin"),
+  ];
+  for (const dir of flatpakExports) {
+    out.push(
+      { kind: "chrome", path: path.join(dir, "com.google.Chrome") },
+      { kind: "chromium", path: path.join(dir, "org.chromium.Chromium") },
+      { kind: "brave", path: path.join(dir, "com.brave.Browser") },
+      { kind: "edge", path: path.join(dir, "com.microsoft.Edge") },
+    );
+  }
+  // PATH fallback in case the binaries live somewhere unusual.
+  out.push(
+    { kind: "chrome", path: "google-chrome" },
+    { kind: "chrome", path: "google-chrome-stable" },
+    { kind: "chromium", path: "chromium" },
+    { kind: "chromium", path: "chromium-browser" },
+    { kind: "brave", path: "brave-browser" },
+    { kind: "edge", path: "microsoft-edge" },
+    { kind: "edge", path: "microsoft-edge-stable" },
+    { kind: "vivaldi", path: "vivaldi" },
+  );
+  return out;
 }
 
 function commandExists(cmd) {
   const dirs = String(process.env.PATH || "").split(path.delimiter);
   return dirs.some((dir) => fs.existsSync(path.join(dir, cmd)));
-}
-
-function activeRootElementSource() {
-  return `(() => {
-    const visible = (el) => {
-      if (!el) return false;
-      const r = el.getBoundingClientRect();
-      const s = getComputedStyle(el);
-      return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden";
-    };
-    const active = document.activeElement;
-    const roots = [
-      ...document.querySelectorAll('[aria-modal="true"],dialog[open],[role="dialog"]'),
-      active?.closest?.('form,[role="form"],[contenteditable="true"],[role="textbox"],main,[role="main"]'),
-      ...document.querySelectorAll('form,[role="form"],main,[role="main"]')
-    ].filter(Boolean).filter(visible);
-    roots.sort((a, b) => {
-      const score = (el) => (el.matches('[aria-modal="true"],dialog,[role="dialog"]') ? 1000 : 0) +
-        (el.contains(active) ? 500 : 0) +
-        (el.querySelector('input[type=file],textarea,input,[contenteditable="true"]') ? 100 : 0) +
-        (el.querySelector('button,[role=button],input[type=submit]') ? 50 : 0);
-      return score(b) - score(a);
-    });
-    return roots[0] || document.body || document.documentElement;
-  })()`;
 }
 
 function pageObserveFunction(maxChars = 1800) {
@@ -3484,13 +4851,27 @@ function viewportInfo(el) {
   const center = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   const centerInViewport = center.x >= 0 && center.x <= innerWidth && center.y >= 0 && center.y <= innerHeight;
   const hit = centerInViewport ? document.elementFromPoint(center.x, center.y) : null;
+  let topmost = Boolean(hit && (hit === el || el.contains(hit)));
+  if (!topmost && hit && hit.contains && hit.contains(el)) {
+    const floatingRoles = ["tooltip", "listbox", "menu", "menubar", "dialog", "alertdialog", "combobox", "tree"];
+    let ancestor = hit;
+    while (ancestor && ancestor !== document.body) {
+      const role = ancestor.getAttribute && ancestor.getAttribute("role");
+      const popover = ancestor.getAttribute && ancestor.getAttribute("popover");
+      const style = ancestor.nodeType === 1 ? getComputedStyle(ancestor) : null;
+      const isFloating = (role && floatingRoles.includes(role)) || popover != null ||
+        (style && (style.position === "fixed" || style.position === "absolute") && parseInt(style.zIndex, 10) > 0);
+      if (isFloating) { topmost = true; break; }
+      ancestor = ancestor.parentElement;
+    }
+  }
   return {
     inViewport: viewportArea > 0,
     centerInViewport,
     viewportArea,
     viewportRatio: viewportArea / elementArea,
     center,
-    topmost: Boolean(hit && (hit === el || el.contains(hit))),
+    topmost,
     hit,
   };
 }
@@ -3502,6 +4883,33 @@ function refKind(el) {
   if (tag === "input" && el.type === "file") return "f";
   if (tag === "button" || role === "button" || ["submit", "button"].includes(el.type)) return "b";
   return "e";
+}
+
+function pierceQuerySelector(root, selector) {
+  if (!root || !selector) return null;
+  const queue = [root];
+  while (queue.length) {
+    const node = queue.shift();
+    if (!node || !node.querySelector) continue;
+    const found = node.querySelector(selector);
+    if (found) return found;
+    const hosts = node.querySelectorAll ? node.querySelectorAll("*") : [];
+    for (const el of hosts) { if (el.shadowRoot) queue.push(el.shadowRoot); }
+  }
+  return null;
+}
+
+function pierceQuerySelectorAll(root, selector) {
+  const out = [];
+  if (!root || !selector) return out;
+  const queue = [root];
+  while (queue.length) {
+    const node = queue.shift();
+    if (!node || !node.querySelectorAll) continue;
+    for (const el of node.querySelectorAll(selector)) out.push(el);
+    for (const el of node.querySelectorAll("*")) { if (el.shadowRoot) queue.push(el.shadowRoot); }
+  }
+  return out;
 }
 
 function markRef(el, counters, refs) {
@@ -3546,6 +4954,21 @@ function queryFunction(selector, opts = {}) {
     const style = getComputedStyle(el);
     const center = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
     const top = document.elementFromPoint(center.x, center.y);
+    let isTopmost = top === el || el.contains(top);
+    if (!isTopmost && top && top.contains && top.contains(el)) {
+      const floatingRoles = ["tooltip", "listbox", "menu", "menubar", "dialog", "alertdialog", "combobox", "tree"];
+      let anc = top;
+      while (anc && anc !== document.body) {
+        const aRole = anc.getAttribute && anc.getAttribute("role");
+        const aPop = anc.getAttribute && anc.getAttribute("popover");
+        const aStyle = anc.nodeType === 1 ? getComputedStyle(anc) : null;
+        if ((aRole && floatingRoles.includes(aRole)) || aPop != null ||
+          (aStyle && (aStyle.position === "fixed" || aStyle.position === "absolute") && parseInt(aStyle.zIndex, 10) > 0)) {
+          isTopmost = true; break;
+        }
+        anc = anc.parentElement;
+      }
+    }
     const text = (el.innerText || el.textContent || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
     const entry = {
       tag: el.tagName.toLowerCase(),
@@ -3556,7 +4979,7 @@ function queryFunction(selector, opts = {}) {
       visible: isVisibleInPage(el),
       enabled: !(el.disabled || el.getAttribute("aria-disabled") === "true"),
       pointerEnabled: style.pointerEvents !== "none",
-      topmost: top === el || el.contains(top),
+      topmost: isTopmost,
       rect: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) },
       htmlPreview: opts.maxHtmlChars ? el.outerHTML.slice(0, opts.maxHtmlChars) : undefined,
     };
@@ -3845,6 +5268,389 @@ function isFunction(state, selector) {
   return { ok: Boolean(value), state, selector };
 }
 
+function readOverlayFunction(opts = {}) {
+  const all = document.querySelectorAll("*");
+  const layers = [];
+  // ARIA roles that signal "this element IS an overlay/popup" regardless of CSS
+  // position. Many sites style autocomplete tooltips as position:relative
+  // inside an absolute parent — they look like dropdowns visually but were
+  // filtered out of pure-CSS-position scans. We accept these by role.
+  const ROLE_LAYER_CONTAINERS = new Set([
+    "tooltip", "listbox", "combobox", "menu", "menubar", "dialog", "alertdialog",
+    "tree", "grid", "treegrid",
+  ]);
+  for (const el of all) {
+    const cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 40 || r.height < 20) continue;
+    if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) continue;
+    const role = el.getAttribute("role") || "";
+    const isPositioned = cs.position === "fixed" || cs.position === "absolute";
+    const isRoleLayer = ROLE_LAYER_CONTAINERS.has(role);
+    if (!isPositioned && !isRoleLayer) continue;
+    const z = cs.zIndex === "auto" ? 0 : (parseInt(cs.zIndex, 10) || 0);
+    // Role-based layers bypass z-index requirement: a tooltip with role and
+    // visible content is an overlay we want to surface even if the author
+    // didn't bother setting z-index.
+    if (!isRoleLayer) {
+      if (cs.zIndex === "auto" && z === 0 && cs.position === "absolute") {
+        let p = el.parentElement;
+        let inheritedZ = 0;
+        while (p && inheritedZ === 0) {
+          const ps = getComputedStyle(p);
+          const pz = ps.zIndex === "auto" ? 0 : (parseInt(ps.zIndex, 10) || 0);
+          if (pz > 0) { inheritedZ = pz; break; }
+          p = p.parentElement;
+        }
+        if (inheritedZ === 0) continue;
+      } else if (z < 1) {
+        continue;
+      }
+    }
+    layers.push({ el, rect: r, zIndex: z, role, isRoleLayer });
+  }
+  if (!layers.length) return { ok: false, reason: "no floating layer found (no fixed/absolute element with z-index >= 1)" };
+  const LIST_ITEM_SELECTOR = 'li,[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="row"],[role="listitem"],[role="treeitem"],[role="combobox"] [role="option"]';
+  const listLikeCount = (el) => {
+    let n = el.querySelectorAll(LIST_ITEM_SELECTOR).length;
+    if (n >= 3) return n;
+    const directChildLeaves = [...el.children].filter((c) => {
+      const t = (c.innerText || c.textContent || "").trim();
+      return t.length > 0 && t.length < 200 && c.children.length <= 4;
+    });
+    return Math.max(n, directChildLeaves.length);
+  };
+  for (const layer of layers) {
+    layer.listItems = listLikeCount(layer.el);
+    layer.isListLike = layer.listItems >= 3;
+    layer.area = layer.rect.width * layer.rect.height;
+    layer.bigEnough = layer.rect.width >= 150 && layer.rect.height >= 80;
+  }
+  // Eligibility: a layer counts if any of:
+  //   - large enough to be a real overlay (>= 150x80)
+  //   - contains 3+ list-like items (real autocomplete/menu/list)
+  //   - has an explicit role that says "I'm an overlay" (tooltip, listbox, ...)
+  const eligible = layers.filter((l) => l.bigEnough || l.isListLike || l.isRoleLayer);
+  if (!eligible.length) {
+    const summary = layers.slice(0, 3).map((l) => `${l.el.tagName.toLowerCase()}${l.role ? `[${l.role}]` : ""} z=${l.zIndex} ${Math.round(l.rect.width)}x${Math.round(l.rect.height)} listItems=${l.listItems}`).join("; ");
+    return { ok: false, reason: `no eligible layer (all candidates are tiny popovers without list items): ${summary}` };
+  }
+  let anchor = null;
+  let anchorSource = "";
+  if (opts.anchorSelector) {
+    anchor = document.querySelector(opts.anchorSelector)
+      || (typeof pierceQuerySelector === "function" ? pierceQuerySelector(document, opts.anchorSelector) : null);
+    anchorSource = anchor ? "near-arg" : "";
+  }
+  if (!anchor) {
+    const ae = document.activeElement;
+    if (ae && ae !== document.body && ae !== document.documentElement
+      && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) {
+      anchor = ae;
+      anchorSource = "active-input";
+    }
+  }
+  let chosen;
+  if (anchor) {
+    const ar = anchor.getBoundingClientRect();
+    const ax = ar.left + ar.width / 2;
+    const ay = ar.bottom;
+    // Tightened proximity: drop the +150 horizontal slack to +50, keep
+    // generous vertical bound (autocompletes can be tall). Compute a
+    // Manhattan distance from the anchor's bottom-center to the layer's
+    // top-center as the primary tie-break: real autocomplete dropdowns hug
+    // the input from below, while corner popups (Login pill, chat widgets)
+    // are far in distance even if they technically overlap horizontally.
+    //
+    // Role-layers (tooltip/listbox/menu/dialog/combobox/grid/...) render
+    // through portals (React's createPortal, Vue Teleport, Svelte target)
+    // and frequently appear far from the anchor horizontally — booking
+    // forms commonly mount the airport picker in the document body root,
+    // not as a sibling of the trigger button. For those, skip the
+    // horizontal-overlap gate and rely on Manhattan distance + role to
+    // pick the right layer.
+    const nearAnchor = eligible.filter(({ rect, isRoleLayer }) => {
+      const horizontalOverlap = rect.left < ar.right + 50 && rect.right > ar.left - 50;
+      const verticallyBelow = rect.top >= ar.bottom - 50 && rect.top < ar.bottom + 700;
+      const verticallyOverlap = rect.top < ar.bottom && rect.bottom > ar.top;
+      const verticallyAbove = rect.bottom > ar.top - 700 && rect.bottom <= ar.top + 50;
+      const verticallyClose = verticallyBelow || verticallyOverlap || verticallyAbove;
+      if (isRoleLayer) {
+        // Role-layers (tooltip/listbox/menu/dialog/combobox/grid/...) often
+        // render through portals far from their trigger horizontally.
+        // Accept any role-layer that is reasonably close vertically; the
+        // role+distance tie-break later picks the right one.
+        return verticallyClose;
+      }
+      return horizontalOverlap && verticallyClose;
+    });
+    for (const layer of nearAnchor) {
+      const lx = layer.rect.left + layer.rect.width / 2;
+      const ly = layer.rect.top;
+      layer.distance = Math.abs(lx - ax) + Math.abs(ly - ay);
+    }
+    if (nearAnchor.length) {
+      nearAnchor.sort((a, b) =>
+        (b.isRoleLayer - a.isRoleLayer)
+        || (b.isListLike - a.isListLike)
+        || (a.distance - b.distance)
+        || (b.zIndex - a.zIndex)
+        || (b.area - a.area));
+      chosen = nearAnchor[0];
+    } else {
+      const summary = eligible.slice(0, 3).map((l) => `${l.el.tagName.toLowerCase()}${l.role ? `[${l.role}]` : ""} z=${l.zIndex} ${Math.round(l.rect.width)}x${Math.round(l.rect.height)}@${Math.round(l.rect.x)},${Math.round(l.rect.y)} listItems=${l.listItems}`).join("; ");
+      return { ok: false, reason: `no eligible layer near anchor (${anchor.tagName.toLowerCase()}${anchor.id ? "#" + anchor.id : ""} at ${Math.round(ar.x)},${Math.round(ar.y)}); the dropdown may have closed or render elsewhere. Eligible layers: ${summary || "(none)"}. Try clicking the field again, or pass --near <ref> to anchor the search.` };
+    }
+  } else {
+    const ranked = [...eligible];
+    ranked.sort((a, b) =>
+      (b.isRoleLayer - a.isRoleLayer)
+      || (b.isListLike - a.isListLike)
+      || (b.zIndex - a.zIndex)
+      || (b.area - a.area));
+    chosen = ranked[0];
+  }
+  const layer = chosen.el;
+  const interactiveTags = new Set(["button", "a", "option"]);
+  const interactiveRoles = new Set(["button", "option", "menuitem", "menuitemradio", "menuitemcheckbox", "tab", "link", "radio", "checkbox", "treeitem", "row"]);
+  const isInteractive = (el) => {
+    const tag = el.tagName.toLowerCase();
+    if (interactiveTags.has(tag)) return true;
+    if (tag === "input" && el.type !== "hidden") return true;
+    if (tag === "li" && el.closest('[role="listbox"],[role="menu"],ul[role],ol[role]')) return true;
+    const role = el.getAttribute("role");
+    if (role && interactiveRoles.has(role)) return true;
+    if (el.hasAttribute("data-value") || el.hasAttribute("data-option-value")) return true;
+    if (el.onclick || el.getAttribute("onclick")) return true;
+    const ti = el.getAttribute("tabindex");
+    if (ti !== null && ti !== "-1") return true;
+    const ce = el.getAttribute("contenteditable");
+    if (ce === "" || ce === "true") return true;
+    return false;
+  };
+  // Pointer-region: a non-interactive element that *looks* clickable
+  // (cursor:pointer) where the parent's cursor differs. Captures
+  // React-delegated handlers on Ant/MUI/custom <div> rows that have no
+  // role / aria-* / tabindex / native onclick. Mirrors the openclaw
+  // cursor predicate (cdp.ts:622-674) with a parent-collapse rule so
+  // nested chains (every level inherits cursor:pointer) collapse to the
+  // highest pointer-cursor element — that's the one with the React
+  // handler. Layer-boundary stops the walk so the layer's first-level
+  // pointer-cursor child still qualifies even if the layer wrapper itself
+  // is cursor:pointer.
+  const isPointerRegion = (el) => {
+    const cs = getComputedStyle(el);
+    if (cs.cursor !== "pointer") return false;
+    const parent = el.parentElement;
+    if (!parent || parent === layer) return true;
+    return getComputedStyle(parent).cursor !== "pointer";
+  };
+  const candidates = [];
+  const seenEls = new Set();
+  for (const el of layer.querySelectorAll("*")) {
+    if (seenEls.has(el)) continue;
+    const cs2 = getComputedStyle(el);
+    if (cs2.display === "none" || cs2.visibility === "hidden") continue;
+    const r2 = el.getBoundingClientRect();
+    if (r2.width < 4 || r2.height < 4) continue;
+    const text = (el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("alt") || el.value || "").replace(/\s+/g, " ").trim();
+    if (!text || text.length > 240) continue;
+    const isLeaf = el.children.length === 0
+      || ![...el.children].some((c) => (c.innerText || c.textContent || "").trim().length > 0);
+    const interactive = isInteractive(el);
+    const pointerRegion = !interactive && isPointerRegion(el);
+    if (interactive || pointerRegion || (isLeaf && cs2.pointerEvents !== "none")) {
+      seenEls.add(el);
+      candidates.push({ el, text: text.slice(0, 120), rect: r2, interactive, pointerRegion });
+    }
+  }
+  candidates.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  const dedup = [];
+  const seenKey = new Set();
+  for (const item of candidates) {
+    // Drop a descendant when an ancestor is already kept and any of:
+    //   (a) ancestor's text matches (legacy aggregator behaviour),
+    //   (b) ancestor is interactive (button / role=button / tabindex /
+    //       contenteditable / [data-value] / [onclick] / native input),
+    //   (c) ancestor is a pointer-region (cursor:pointer with non-pointer
+    //       parent) — covers React-delegated handlers with no other signal.
+    // Together (b)+(c) guarantee the ref points at the element that owns
+    // the click handler — not a styling fragment whose own click would
+    // land on the wrong React event.target. Listbox / menu / tree
+    // containers are deliberately NOT in interactiveRoles, so options /
+    // menuitems inside them are still emitted as siblings rather than
+    // swallowed by the parent.
+    const ancestorAlready = dedup.some((kept) => kept.el.contains(item.el) && (kept.text === item.text || kept.interactive || kept.pointerRegion));
+    if (ancestorAlready) continue;
+    const key = `${item.text}|${Math.round(item.rect.left)}|${Math.round(item.rect.top)}`;
+    if (seenKey.has(key)) continue;
+    seenKey.add(key);
+    dedup.push(item);
+  }
+  const limit = Number(opts.limit || 30);
+  const refs = {};
+  const options = dedup.slice(0, limit).map((item, i) => {
+    const ref = `o${i + 1}`;
+    item.el.setAttribute("data-realbrowser-ref", ref);
+    const tag = item.el.tagName.toLowerCase();
+    refs[ref] = {
+      ref,
+      selector: `[data-realbrowser-ref="${ref}"]`,
+      tag,
+      text: item.text,
+      role: item.el.getAttribute("role") || undefined,
+      interactive: item.interactive,
+      pointerRegion: item.pointerRegion || undefined,
+    };
+    return refs[ref];
+  });
+  const layerRect = chosen.rect;
+  const anchorDesc = anchor ? {
+    tag: anchor.tagName.toLowerCase(),
+    role: anchor.getAttribute("role") || undefined,
+    name: (anchor.getAttribute("aria-label") || anchor.placeholder || anchor.name || (anchor.innerText || "").trim().slice(0, 80) || "").slice(0, 80) || undefined,
+    value: typeof anchor.value === "string" ? anchor.value.slice(0, 80) : undefined,
+    source: anchorSource,
+  } : null;
+  return {
+    ok: true,
+    layer: {
+      tag: layer.tagName.toLowerCase(),
+      role: layer.getAttribute("role") || undefined,
+      zIndex: chosen.zIndex,
+      listItems: chosen.listItems,
+      isListLike: chosen.isListLike,
+      isRoleLayer: chosen.isRoleLayer,
+      distance: typeof chosen.distance === "number" ? Math.round(chosen.distance) : undefined,
+      rect: { x: Math.round(layerRect.x), y: Math.round(layerRect.y), width: Math.round(layerRect.width), height: Math.round(layerRect.height) },
+    },
+    focused: anchorDesc,
+    anchor: anchorDesc,
+    options,
+    refs,
+    truncated: dedup.length > limit,
+    totalFound: dedup.length,
+    skippedLayers: layers.length - eligible.length,
+  };
+}
+
+// Walk the visible DOM and surface elements that LOOK clickable but have
+// no ARIA role / accessible name — so they're invisible to
+// Accessibility.getFullAXTree. Modern React/Vue UIs render menus, recent-
+// action chips, calendar day cells, custom selects, tile pickers, etc. as
+// `<div cursor:pointer onclick>` with no role. After the AX tree is
+// stamped, we scan for these and mint `c1, c2, ...` refs so the tree
+// line view shows them and `action click <c-ref>` works through the
+// standard CDP path.
+//
+// Predicates (any one suffices):
+//   - cursor:pointer AND parent's cursor isn't also pointer (parent-collapse,
+//     mirrors openclaw cdp.ts:649-652).
+//   - tabindex >= 0 (keyboard-reachable custom widget).
+//   - el.onclick set or [onclick] attr.
+//   - contenteditable set.
+//   - aria-haspopup set (custom dropdown trigger w/o role=button).
+//
+// Excluded:
+//   - elements with data-realbrowser-ref already set (in AX tree).
+//   - elements containing a stamped descendant (the descendant is the
+//     real action target).
+//   - elements with a stamped/accepted ancestor (parent-collapse for
+//     nested cursor:pointer chains).
+//   - rect smaller than 8x8 px (decorations).
+//   - empty innerText (no semantic value).
+//   - <html>, <body>, <svg>, <path>, <input>, <textarea>, <select>,
+//     <button>, <a> (these are AX-tree natives or already covered by
+//     the regular tree).
+function cursorClickablesFunction(opts = {}) {
+  const max = Number(opts.max || 100);
+  const startIdx = Number(opts.startIndex || 0);
+  const SKIP_TAGS = new Set(["html", "body", "svg", "path", "input", "textarea", "select", "button", "a", "script", "style", "noscript", "head", "meta", "link", "br", "hr", "img"]);
+  const refs = {};
+  const lines = [];
+  const accepted = [];
+  const docOrder = [];
+  const all = document.querySelectorAll("*");
+  for (let i = 0; i < all.length; i++) docOrder.push(all[i]);
+  const isVisibleSimple = (el) => {
+    const r = el.getBoundingClientRect?.();
+    const s = el ? getComputedStyle(el) : null;
+    return Boolean(r && r.width >= 8 && r.height >= 8 && s.display !== "none" && s.visibility !== "hidden" && s.opacity !== "0");
+  };
+  const trim = (s) => String(s || "").replace(/\s+/g, " ").trim();
+  for (const el of docOrder) {
+    if (lines.length >= max) break;
+    if (!el || el.nodeType !== 1) continue;
+    const tag = el.tagName?.toLowerCase?.() || "";
+    if (!tag || SKIP_TAGS.has(tag)) continue;
+    if (el.hasAttribute("data-realbrowser-ref")) continue;
+    if (el.querySelector && el.querySelector("[data-realbrowser-ref]")) continue;
+    if (!isVisibleSimple(el)) continue;
+    let cs;
+    try { cs = getComputedStyle(el); } catch { continue; }
+    if (cs.pointerEvents === "none") continue;
+    const role = el.getAttribute("role");
+    // Skip elements that already have an interactive role (those would
+    // appear in the AX tree under the role-based interactive set).
+    if (role && /^(button|link|menuitem|menuitemcheckbox|menuitemradio|tab|option|checkbox|radio|switch|treeitem|combobox|searchbox|textbox|slider|spinbutton)$/.test(role)) continue;
+    const cursorPointer = cs.cursor === "pointer";
+    const tabindex = el.getAttribute("tabindex");
+    const hasTabindex = tabindex !== null && tabindex !== "" && Number(tabindex) >= 0;
+    const hasOnclickProp = typeof el.onclick === "function";
+    const hasOnclickAttr = el.hasAttribute("onclick");
+    const ce = el.getAttribute("contenteditable");
+    const hasCe = ce === "" || ce === "true" || ce === "plaintext-only";
+    const hasHasPopup = el.hasAttribute("aria-haspopup");
+    if (!cursorPointer && !hasTabindex && !hasOnclickProp && !hasOnclickAttr && !hasCe && !hasHasPopup) continue;
+    // Parent-cursor collapse for cursor:pointer chains. A cursor:pointer
+    // child of a cursor:pointer parent is usually a styling fragment —
+    // the parent owns the React handler. Exception: if the parent
+    // doesn't qualify by ANY of our other predicates, this leaf's other
+    // signals (tabindex/onclick/etc.) win.
+    if (cursorPointer && !hasTabindex && !hasOnclickProp && !hasOnclickAttr && !hasCe && !hasHasPopup) {
+      const parent = el.parentElement;
+      if (parent) {
+        try {
+          const ps = getComputedStyle(parent);
+          if (ps.cursor === "pointer") continue;
+        } catch { /* ignore */ }
+      }
+    }
+    // Skip if any already-accepted ancestor is in our list — collapses
+    // nested chains we just emitted.
+    let ancestorAccepted = false;
+    for (const acc of accepted) {
+      if (acc.contains(el)) { ancestorAccepted = true; break; }
+    }
+    if (ancestorAccepted) continue;
+    const text = trim(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("alt") || el.getAttribute("placeholder") || "");
+    if (!text) continue;
+    if (text.length > 4000) continue; // skip giant containers
+    const idx = startIdx + lines.length + 1;
+    const ref = `c${idx}`;
+    el.setAttribute("data-realbrowser-ref", ref);
+    accepted.push(el);
+    const truncated = text.slice(0, 120);
+    const flags = [];
+    if (cursorPointer) flags.push("cursor:pointer");
+    if (hasTabindex) flags.push(`tabindex=${tabindex}`);
+    if (hasOnclickProp || hasOnclickAttr) flags.push("onclick");
+    if (hasCe) flags.push("contenteditable");
+    if (hasHasPopup) flags.push("haspopup");
+    const flagStr = flags.length ? ` [${flags.join(",")}]` : "";
+    refs[ref] = {
+      ref,
+      selector: `[data-realbrowser-ref="${ref}"]`,
+      tag,
+      role: role || undefined,
+      name: truncated,
+    };
+    lines.push(`- ${ref} ${tag} "${truncated}"${flagStr}`);
+  }
+  return { lines, refs, count: lines.length, scanned: docOrder.length };
+}
+
 function actionStateFunction(opts = {}) {
   document.querySelectorAll("[data-realbrowser-ref],[data-realbrowser-root]").forEach((el) => {
     el.removeAttribute("data-realbrowser-ref");
@@ -3935,14 +5741,15 @@ function clickFunction(selector, opts = {}) {
       entry.enabled ? "" : "disabled",
       entry.pointerEnabled ? "" : "no-pointer",
       entry.inViewport ? "" : "out-viewport",
-      entry.topmost ? "" : "covered",
+      entry.topmost ? "" : (entry.coveredBy ? `covered-by:${entry.coveredBy}` : "covered"),
     ].filter(Boolean);
     return `${entry.ref || entry.tag}${entry.text ? `:${entry.text}` : ""}${flags.length ? ` (${flags.join(",")})` : ""}`;
   }).join("; ");
   let candidates;
   const root = opts.activeRoot || opts.root === "active" ? activeRootElementSourceEval() : document;
   if (selector) {
-    candidates = [root.querySelector(selector)];
+    const direct = root.querySelector(selector);
+    candidates = [direct || pierceQuerySelector(root, selector) || pierceQuerySelector(document, selector)];
   } else if (opts.final) {
     const all = [...root.querySelectorAll("button,[role=button],input[type=submit],input[type=button],a[href]")];
     if (opts.text) {
@@ -3963,22 +5770,256 @@ function clickFunction(selector, opts = {}) {
   const checked = checkedPairs.map((pair) => pair.entry);
   const visiblePairs = checkedPairs.filter((pair) => pair.entry.visible && pair.entry.enabled && pair.entry.pointerEnabled && pair.entry.inViewport && pair.entry.topmost);
   if (opts.final && visiblePairs.length !== 1) throw new Error(`Final action requires exactly one visible enabled topmost candidate; found ${visiblePairs.length}${checked.length ? `; candidates: ${formatCandidates(checked)}` : ""}`);
-  if (visiblePairs.length < 1) throw new Error(`No visible enabled topmost click candidate${checked.length ? `; candidates: ${formatCandidates(checked)}` : ""}`);
-  if (visiblePairs.length > 1 && opts.text) throw new Error(`Ambiguous click candidate; found ${visiblePairs.length}`);
-  const chosen = visiblePairs[0];
+  let chosen;
+  if (visiblePairs.length < 1) {
+    const interactablePairs = checkedPairs.filter((pair) => pair.entry.visible && pair.entry.enabled && pair.entry.pointerEnabled && pair.entry.inViewport);
+    const bypassPair = opts.bypassOverlay
+      ? checkedPairs.find((pair) => pair.entry.visible && pair.entry.enabled && pair.entry.inViewport && pair.entry.rect.width > 0 && pair.entry.rect.height > 0)
+      : null;
+    if (interactablePairs.length >= 1) {
+      chosen = interactablePairs[0];
+      chosen.el.click();
+      chosen.entry.clickMethod = "synthetic";
+      chosen.entry.warning = `topmost check failed (${chosen.entry.coveredBy || "covered"}); used synthetic el.click()`;
+    } else if (bypassPair) {
+      chosen = bypassPair;
+      const r = chosen.el.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      const init = { bubbles: true, cancelable: true, composed: true, view: window, clientX: cx, clientY: cy, screenX: cx, screenY: cy, button: 0, buttons: 1 };
+      try { chosen.el.dispatchEvent(new PointerEvent("pointerdown", { ...init, pointerType: "mouse", isPrimary: true })); } catch (_) {}
+      chosen.el.dispatchEvent(new MouseEvent("mousedown", init));
+      try { chosen.el.dispatchEvent(new PointerEvent("pointerup", { ...init, pointerType: "mouse", isPrimary: true })); } catch (_) {}
+      chosen.el.dispatchEvent(new MouseEvent("mouseup", init));
+      chosen.el.dispatchEvent(new MouseEvent("click", init));
+      chosen.entry.clickMethod = "synthetic";
+      chosen.entry.warning = `bypass-overlay (${chosen.entry.coveredBy || (chosen.entry.pointerEnabled ? "covered" : "no-pointer")}); dispatched events directly to element`;
+    } else {
+      const overlayHint = checked.some((entry) => entry.coveredBy || !entry.pointerEnabled) ? "; if covered-by overlay is the only blocker, retry with --bypass-overlay" : "";
+      throw new Error(`No visible enabled click candidate${checked.length ? `; candidates: ${formatCandidates(checked)}` : ""}${overlayHint}`);
+    }
+  } else {
+    if (visiblePairs.length > 1 && opts.text) throw new Error(`Ambiguous click candidate; found ${visiblePairs.length}`);
+    chosen = visiblePairs[0];
+  }
   const fileDialogReason = fileDialogTriggerReason(chosen.el);
   if (fileDialogReason && !opts.allowFileDialog) {
     throw new Error(`Ref ${chosen.entry.ref || chosen.entry.text || chosen.entry.tag} targets a file input path (${fileDialogReason}); use action upload --trigger-ref <ref> <file> or pass --allow-file-dialog`);
   }
+  // Default clickMethod when CDP will follow up (caller dispatches mouse events).
+  if (!chosen.entry.clickMethod) chosen.entry.clickMethod = "cdp";
+  // Floating-layer detection: AntD/Material/Radix popovers, listboxes, menus,
+  // tooltips, dialog grids, and date-picker rows often mount in a portal
+  // outside the form. CDP Input.dispatchMouseEvent against these elements
+  // can register at the document layer (the dispatch returns success and the
+  // page sees the click), but React's delegated onClick on a row inside the
+  // popover doesn't fire because the floating layer's pointerdown handler
+  // already swallowed the event for the outside-click detector. Mark the
+  // payload so the caller can opportunistically re-dispatch synthetically
+  // if the page state did not change post-click.
+  chosen.entry.inFloatingLayer = elementInFloatingLayer(chosen.el);
+  // Capture a cheap pre-click signature so the caller can detect "click
+  // landed but page didn't change" without round-tripping through the full
+  // tree-read pipeline. Hash a short slice of body text + counts of common
+  // floating-layer roles + the activeElement tag.
+  chosen.entry.preClickSignature = pageStateSignature();
   return chosen.entry;
 }
 
+// Cheap page-state fingerprint. Used by the click auto-fallback path to
+// detect "click registered but page state unchanged" — the symptom that
+// portal popovers AND plain SPA route-swap buttons exhibit when CDP
+// Input.dispatchMouseEvent fires but React's delegated handler never runs
+// (React 18 concurrent rendering can detach the listener between dispatch
+// and microtask flush). Signature includes URL, layer count, activeElement,
+// body text head+tail, scroll height (panel swaps), and resource-entry
+// count (handlers that kick off a fetch flip this before any DOM mutation).
+function pageStateSignature() {
+  const layers = document.querySelectorAll(
+    '[role="dialog"],[role="tooltip"],[role="listbox"],[role="menu"],[role="combobox"],[role="grid"],[aria-modal="true"]'
+  ).length;
+  const active = document.activeElement;
+  const activeTag = active ? `${active.tagName.toLowerCase()}#${active.id || ""}.${(typeof active.className === "string" ? active.className : "").slice(0, 60)}` : "";
+  // Sample text from start AND end of body so changes below the fold
+  // (a result list updating, an item appended) still flip the hash.
+  const bodyTextFull = (document.body && document.body.innerText) || "";
+  const bodyText = bodyTextFull.length > 1000
+    ? `${bodyTextFull.slice(0, 500)}|||${bodyTextFull.slice(-500)}`
+    : bodyTextFull.slice(0, 1000);
+  const scrollHeight = (document.documentElement && document.documentElement.scrollHeight) || 0;
+  // User-initiated network counter — count only fetch/XHR entries so
+  // passive background loads (analytics polls, prefetch <link>, image
+  // lazy-loads) don't flip the signal. A submit handler that fires one
+  // XHR is the canonical "click happened, page still rendering" case.
+  let xhrCount = 0;
+  try {
+    const entries = performance.getEntriesByType("resource");
+    for (let i = 0; i < entries.length; i += 1) {
+      const t = entries[i].initiatorType;
+      if (t === "fetch" || t === "xmlhttprequest") xhrCount += 1;
+    }
+  } catch (_) { /* sandboxed iframes */ }
+  // 32-bit FNV-1a over a deterministic concatenation of features.
+  let h = 0x811c9dc5;
+  const seed = `L:${layers}|A:${activeTag}|U:${location.href}|N:${bodyTextFull.length}|S:${scrollHeight}|X:${xhrCount}|B:${bodyText}`;
+  for (let i = 0; i < seed.length; i += 1) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return { layers, hash: h.toString(16), activeTag, url: location.href, length: bodyTextFull.length, scrollHeight, xhrCount };
+}
+
+// Returns true if the element (or any ancestor) is rendered inside a
+// floating-layer container — Radix/AntD/Material/HeadlessUI portals,
+// tooltips, popovers, listboxes, dialog grids, etc. Auto-fallback only
+// fires when both this is true AND the page-state signature did not
+// change after the CDP click.
+function elementInFloatingLayer(el) {
+  if (!el) return false;
+  let node = el;
+  let depth = 0;
+  while (node && node !== document.body && depth < 30) {
+    if (node.nodeType !== 1) { node = node.parentNode; depth += 1; continue; }
+    const role = node.getAttribute && node.getAttribute("role");
+    if (role && /^(dialog|tooltip|listbox|menu|combobox|grid|menuitem|option|row|gridcell)$/.test(role)) return true;
+    if (node.getAttribute && node.getAttribute("aria-modal") === "true") return true;
+    const cls = (typeof node.className === "string") ? node.className : (node.className && node.className.baseVal) || "";
+    if (cls && /(?:^|\s)(?:ant-popover|ant-popover-inner|ant-select-dropdown|ant-picker-dropdown|ant-dropdown|ant-modal|ant-tooltip|MuiPopover|MuiMenu|MuiTooltip|MuiPaper-root|popover|popover-body|dropdown-menu|tippy-box|chakra-popover__popper|radix-popper|combobox-popover)(?:\s|$|-)/i.test(cls)) return true;
+    // Fixed/absolute positioned containers with a high z-index are commonly
+    // floating layers — check style only after cheaper class/role checks.
+    try {
+      const style = (node.ownerDocument && node.ownerDocument.defaultView)
+        ? node.ownerDocument.defaultView.getComputedStyle(node)
+        : getComputedStyle(node);
+      const z = Number(style.zIndex);
+      if ((style.position === "fixed" || style.position === "absolute") && z >= 1000) return true;
+    } catch (_) { /* cross-origin shadow root etc — skip */ }
+    node = node.parentNode;
+    depth += 1;
+  }
+  return false;
+}
+
+// Probe + synthetic-click fallback. Called after the CDP click path when
+// the original payload reported `inFloatingLayer=true` and `clickMethod="cdp"`.
+// If the page-state signature is unchanged (the click registered but
+// React's delegated handler never fired), dispatches a synthetic event
+// sequence (pointerdown → mousedown → pointerup → mouseup → click) on the
+// resolved element. AntD's outside-click detector listens on pointerdown,
+// so the PointerEvent is essential — a plain MouseEvent is not enough.
+function postClickFallbackFunction(selector, preSignature) {
+  // Re-resolve the element. After a CDP click some AntD popovers re-render
+  // their rows, so the ORIGINAL selector (data-realbrowser-ref) is the
+  // most reliable lookup. If the ref was on a re-rendered node, the CSS
+  // attribute selector still finds the new node.
+  const root = document;
+  let el = null;
+  try {
+    el = root.querySelector(selector);
+  } catch (_) { /* malformed selector */ }
+  const after = (function captureAfter() {
+    const layers = document.querySelectorAll(
+      '[role="dialog"],[role="tooltip"],[role="listbox"],[role="menu"],[role="combobox"],[role="grid"],[aria-modal="true"]'
+    ).length;
+    const active = document.activeElement;
+    const activeTag = active ? `${active.tagName.toLowerCase()}#${active.id || ""}.${(typeof active.className === "string" ? active.className : "").slice(0, 60)}` : "";
+    const bodyTextFull = (document.body && document.body.innerText) || "";
+    const bodyText = bodyTextFull.length > 1000
+      ? `${bodyTextFull.slice(0, 500)}|||${bodyTextFull.slice(-500)}`
+      : bodyTextFull.slice(0, 1000);
+    const scrollHeight = (document.documentElement && document.documentElement.scrollHeight) || 0;
+    let xhrCount = 0;
+    try {
+      const entries = performance.getEntriesByType("resource");
+      for (let i = 0; i < entries.length; i += 1) {
+        const t = entries[i].initiatorType;
+        if (t === "fetch" || t === "xmlhttprequest") xhrCount += 1;
+      }
+    } catch (_) { /* sandboxed iframes */ }
+    let h = 0x811c9dc5;
+    const seed = `L:${layers}|A:${activeTag}|U:${location.href}|N:${bodyTextFull.length}|S:${scrollHeight}|X:${xhrCount}|B:${bodyText}`;
+    for (let i = 0; i < seed.length; i += 1) {
+      h ^= seed.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return { layers, hash: h.toString(16), activeTag, url: location.href, length: bodyTextFull.length, scrollHeight, xhrCount };
+  })();
+  // Decide "changed". Any structural diff (url/layers/hash/scrollHeight)
+  // is definitive. XHR jump >= 1 is the additional gate: we filter to
+  // fetch/XHR only (passive polls excluded by initiatorType) so a
+  // single user-initiated request after the click counts as "click did
+  // something". This biases toward "changed" — false negatives (we say
+  // "unchanged" when click did fire) cost one wasted retry; false
+  // positives (we say "changed" when click failed) leave the agent to
+  // catch the no-op via verify, but never double-submit.
+  const xhrJump = preSignature && typeof preSignature.xhrCount === "number" ? (after.xhrCount - preSignature.xhrCount) : 0;
+  const changed = !preSignature
+    || preSignature.url !== after.url
+    || preSignature.layers !== after.layers
+    || preSignature.hash !== after.hash
+    || preSignature.scrollHeight !== after.scrollHeight
+    || xhrJump >= 1;
+  if (changed) {
+    return { changed: true, dispatched: false, after };
+  }
+  if (!el) return { changed: false, dispatched: false, after, reason: "element-not-found" };
+  // Safety: classify whether the element is form-submit-like. Real form
+  // submits can use sendBeacon / WebSocket / classic navigation, none of
+  // which flip the XHR counter within our 120ms window. Re-dispatching
+  // would risk double-submit. For these elements we REPORT the
+  // suspected no-advance instead of dispatching — the agent surfaces
+  // `autoFallbackSkipped` and can re-issue manually after verification.
+  let isSubmitLike = false;
+  try {
+    const tag = (el.tagName || "").toLowerCase();
+    const typeAttr = (el.getAttribute && el.getAttribute("type") || "").toLowerCase();
+    // <input type=submit|image> always submits.
+    if (tag === "input" && (typeAttr === "submit" || typeAttr === "image")) isSubmitLike = true;
+    // <button>: type=submit explicit, OR no type (defaults to submit) when
+    // the button is associated with a form (DOM ancestor <form>, or
+    // explicit form="id" attribute). type="button"/"reset" are NOT submits.
+    else if (tag === "button") {
+      const associatedWithForm = !!(el.closest && el.closest("form")) || !!(el.getAttribute && el.getAttribute("form"));
+      if (typeAttr === "submit") isSubmitLike = true;
+      else if (typeAttr === "" && associatedWithForm) isSubmitLike = true;
+    }
+  } catch (_) { /* detached element */ }
+  if (isSubmitLike) {
+    return { changed: false, dispatched: false, after, reason: "submit-class-no-advance" };
+  }
+  // Synthetic dispatch — same shape as the existing --bypass-overlay path.
+  const r = el.getBoundingClientRect();
+  if (!(r.width > 0 && r.height > 0)) return { changed: false, dispatched: false, after, reason: "zero-rect" };
+  const cx = r.left + r.width / 2;
+  const cy = r.top + r.height / 2;
+  const init = { bubbles: true, cancelable: true, composed: true, view: window, clientX: cx, clientY: cy, screenX: cx, screenY: cy, button: 0, buttons: 1 };
+  try { el.dispatchEvent(new PointerEvent("pointerdown", { ...init, pointerType: "mouse", isPrimary: true })); } catch (_) {}
+  el.dispatchEvent(new MouseEvent("mousedown", init));
+  try { el.dispatchEvent(new PointerEvent("pointerup", { ...init, pointerType: "mouse", isPrimary: true })); } catch (_) {}
+  el.dispatchEvent(new MouseEvent("mouseup", init));
+  el.dispatchEvent(new MouseEvent("click", init));
+  return { changed: false, dispatched: true, after };
+}
+
 function preflightElement(el, opts = {}) {
-  if (opts.scroll !== false) el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+  if (opts.scroll !== false) {
+    const pre = el.getBoundingClientRect();
+    const cx = pre.left + pre.width / 2;
+    const cy = pre.top + pre.height / 2;
+    const alreadyInView = pre.width > 0 && pre.height > 0 && cx >= 0 && cx <= innerWidth && cy >= 0 && cy <= innerHeight;
+    if (!alreadyInView) el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+  }
   const r = el.getBoundingClientRect();
   const viewport = viewportInfo(el);
   const style = getComputedStyle(el);
   const text = (el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().slice(0, 160);
+  const hitDesc = (!viewport.topmost && viewport.hit) ? (() => {
+    const h = viewport.hit;
+    const hTag = h.tagName ? h.tagName.toLowerCase() : "?";
+    const hRole = h.getAttribute ? (h.getAttribute("role") || "") : "";
+    const hClass = h.className ? String(h.className).split(/\s+/).slice(0, 2).join(".") : "";
+    return `${hTag}${hRole ? `[role=${hRole}]` : ""}${hClass ? `.${hClass}` : ""}`;
+  })() : undefined;
   return {
     ref: el.getAttribute("data-realbrowser-ref") || undefined,
     tag: el.tagName.toLowerCase(),
@@ -3990,6 +6031,7 @@ function preflightElement(el, opts = {}) {
     pointerEnabled: style.pointerEvents !== "none",
     inViewport: viewport.inViewport,
     topmost: viewport.topmost,
+    coveredBy: hitDesc,
   };
 }
 
@@ -4009,10 +6051,17 @@ function fileDialogTriggerReason(el) {
 
 function fillFunction(selector, value, selectMode = false, opts = {}) {
   const root = opts.activeRoot || opts.root === "active" ? activeRootElementSourceEval() : document;
-  const el = root.querySelector(selector);
+  const el = root.querySelector(selector) || pierceQuerySelector(root, selector) || pierceQuerySelector(document, selector);
   if (!el) throw new Error("selector not found: " + selector);
   el.scrollIntoView({ block: "center", behavior: "instant" });
   el.focus();
+  // Snapshot the prior visible value so callers can detect silent no-ops:
+  // some custom datepickers / masked inputs accept the value via .value but
+  // their UI state (the value users see) doesn't actually change. Custom
+  // pickers often strip our text and re-render the placeholder.
+  const priorVisibleValue = el.isContentEditable || el.getAttribute("role") === "textbox"
+    ? (el.innerText || el.textContent || "").trim()
+    : (typeof el.value === "string" ? el.value : "");
   if (el instanceof HTMLSelectElement || selectMode) {
     const option = [...el.options].find((entry) => entry.value === value || entry.label === value || entry.textContent.trim() === value);
     if (!option) throw new Error("option not found: " + value);
@@ -4040,7 +6089,27 @@ function fillFunction(selector, value, selectMode = false, opts = {}) {
   }
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
-  return { filled: true, selector, tag: el.tagName.toLowerCase(), value: el.type === "password" ? "[redacted]" : value };
+  // Verify the field actually accepted the value. Custom datepickers often
+  // strip text input — they render today's date back. requireChange surfaces
+  // this as an error so the agent pivots instead of silently submitting.
+  const afterVisibleValue = el.isContentEditable || el.getAttribute("role") === "textbox"
+    ? (el.innerText || el.textContent || "").trim()
+    : (typeof el.value === "string" ? el.value : "");
+  const expected = String(value || "").trim();
+  const accepted = afterVisibleValue === expected
+    || (afterVisibleValue && expected && afterVisibleValue.includes(expected));
+  if (opts.requireChange && !accepted && priorVisibleValue === afterVisibleValue) {
+    throw new Error(`fill no-op: input value did not change after typing "${expected}" (current value: "${afterVisibleValue.slice(0, 80)}"); the field may be a custom widget that rejects synthetic input — try the picker UI (calendar, dropdown, datepicker) instead`);
+  }
+  return {
+    filled: true,
+    selector,
+    tag: el.tagName.toLowerCase(),
+    value: el.type === "password" ? "[redacted]" : value,
+    accepted,
+    priorValue: el.type === "password" ? "[redacted]" : priorVisibleValue.slice(0, 120),
+    afterValue: el.type === "password" ? "[redacted]" : afterVisibleValue.slice(0, 120),
+  };
 }
 
 function uploadEventsFunction(selector) {
@@ -4393,12 +6462,18 @@ function screenshotMetadataFunction() {
   };
 }
 
+function pageSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const PAGE_HELPERS = [
   isVisibleInPage,
   viewportInfo,
   pageSizeFunction,
   refKind,
   markRef,
+  pierceQuerySelector,
+  pierceQuerySelectorAll,
   activeRootElementSourceEval,
   resolveCollectionRoot,
   collectionChildren,
@@ -4407,6 +6482,9 @@ const PAGE_HELPERS = [
   preflightElement,
   fileDialogTriggerReason,
   clearAnnotationsFunction,
+  elementInFloatingLayer,
+  pageStateSignature,
+  pageSleep,
 ].map((fn) => fn.toString()).join("\n");
 
 async function waitForReadyState(daemon, targetId, wanted = "interactive", timeout = DEFAULT_TIMEOUT) {
@@ -4447,7 +6525,6 @@ async function waitForOpenedTab(daemon, wantedUrl, beforeIds, timeout = DEFAULT_
 }
 
 function waitReadyFunction(opts = {}) {
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   return (async () => {
     const deadline = Date.now() + (opts.timeout || 15000);
     let reason = "";
@@ -4461,7 +6538,7 @@ function waitReadyFunction(opts = {}) {
       let stableOk = true;
       if (opts.visualStable) {
         const before = `${document.body?.innerText?.length || 0}:${document.documentElement.scrollHeight}`;
-        await sleep(Number(opts.settleMs || 250));
+        await pageSleep(Number(opts.settleMs || 250));
         const after = `${document.body?.innerText?.length || 0}:${document.documentElement.scrollHeight}`;
         stableOk = before === after;
       }
@@ -4469,55 +6546,51 @@ function waitReadyFunction(opts = {}) {
         reason = [ready ? "readyState" : "", selectorOk && opts.selector ? "selector" : "", textOk && opts.text ? "text" : "", minOk && opts.minItems ? "items" : "", visibleText ? "visible-text" : "", skeletonOk && opts.noSkeletons ? "no-skeletons" : "", stableOk && opts.visualStable ? "visual-stable" : ""].filter(Boolean).join(",");
         return { ok: true, reason, url: location.href, title: document.title, readyState: document.readyState };
       }
-      await sleep(150);
+      await pageSleep(150);
     }
     throw new Error("timed out waiting for ready content");
   })();
 }
 
 function waitSelectorFunction(selector, timeout = 15000, visibleOnly = false) {
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   return (async () => {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
       const el = document.querySelector(selector);
       if (el && (!visibleOnly || isVisibleInPage(el))) return { ok: true, selector, visible: isVisibleInPage(el) };
-      await sleep(100);
+      await pageSleep(100);
     }
     throw new Error("timed out waiting for selector: " + selector);
   })();
 }
 
 function waitTextFunction(text, timeout = 15000, visibleOnly = false) {
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   return (async () => {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
       const haystack = visibleOnly ? (document.body?.innerText || "") : (document.documentElement?.textContent || "");
       if (haystack.includes(text)) return { ok: true, text };
-      await sleep(100);
+      await pageSleep(100);
     }
     throw new Error("timed out waiting for text: " + text);
   })();
 }
 
 function waitUrlFunction(contains, timeout = 15000) {
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   return (async () => {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
       if (location.href.includes(contains)) return { ok: true, url: location.href };
-      await sleep(100);
+      await pageSleep(100);
     }
     throw new Error("timed out waiting for URL containing: " + contains);
   })();
 }
 
 function waitNetworkIdleFunction(timeout = 5000) {
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   return (async () => {
     const start = performance.getEntriesByType("resource").length;
-    await sleep(timeout);
+    await pageSleep(timeout);
     const end = performance.getEntriesByType("resource").length;
     return { ok: true, startResources: start, endResources: end, idleMs: timeout };
   })();
@@ -4721,19 +6794,46 @@ async function captureScreenshotToFile(daemon, targetId, filePath, opts = {}) {
     clipInfo = box;
     captureBeyondViewport = !opts.clipToViewport;
   }
+  let viewportExpanded = false;
+  let savedViewport;
   if (opts.fullPage && !clip) {
     const metrics = await daemon.sendToTarget(targetId, "Page.getLayoutMetrics", {});
     const size = metrics.cssContentSize || metrics.contentSize;
-    if (size?.width && size?.height) clip = { x: 0, y: 0, width: Math.ceil(size.width), height: Math.ceil(size.height), scale: 1 };
-    captureBeyondViewport = Boolean(clip);
+    if (size?.width && size?.height) {
+      const vp = await daemon.callFunction(targetId, () => ({ w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio, sw: screen.width, sh: screen.height }), []).catch(() => null);
+      savedViewport = vp;
+      const expandW = Math.ceil(Math.max(vp?.w || size.width, size.width));
+      const expandH = Math.ceil(Math.max(vp?.h || size.height, size.height));
+      await daemon.sendToTarget(targetId, "Emulation.setDeviceMetricsOverride", {
+        width: expandW, height: expandH,
+        deviceScaleFactor: vp?.dpr || 1, mobile: false,
+        screenWidth: vp?.sw || expandW, screenHeight: vp?.sh || expandH,
+      }).catch(() => {});
+      viewportExpanded = true;
+      captureBeyondViewport = true;
+    }
   }
-  const captureParams = { format, fromSurface: true };
+  const captureParams = { format };
   if (quality !== undefined) captureParams.quality = quality;
   if (clip) {
     captureParams.clip = clip;
     if (captureBeyondViewport) captureParams.captureBeyondViewport = true;
   }
+  if (viewportExpanded) captureParams.captureBeyondViewport = true;
   const shot = await daemon.sendToTarget(targetId, "Page.captureScreenshot", captureParams, 60_000);
+  if (viewportExpanded) {
+    await daemon.sendToTarget(targetId, "Emulation.clearDeviceMetricsOverride").catch(() => {});
+    if (savedViewport) {
+      const restored = await daemon.callFunction(targetId, () => ({ w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio }), []).catch(() => null);
+      if (restored && (restored.w !== savedViewport.w || restored.h !== savedViewport.h || restored.dpr !== savedViewport.dpr)) {
+        await daemon.sendToTarget(targetId, "Emulation.setDeviceMetricsOverride", {
+          width: savedViewport.w, height: savedViewport.h,
+          deviceScaleFactor: savedViewport.dpr || 1, mobile: false,
+          screenWidth: savedViewport.sw || savedViewport.w, screenHeight: savedViewport.sh || savedViewport.h,
+        }).catch(() => {});
+      }
+    }
+  }
   let buffer = Buffer.from(shot.data || "", "base64");
   const originalBytes = buffer.byteLength;
   const originalDimensions = imageDimensionsFromBuffer(buffer);
@@ -4901,7 +7001,7 @@ async function captureStitchedScrollContainerToFile(daemon, targetId, out, forma
 }
 
 async function captureViewportPngSegment(daemon, targetId) {
-  const shot = await daemon.sendToTarget(targetId, "Page.captureScreenshot", { format: "png", fromSurface: true }, 60_000);
+  const shot = await daemon.sendToTarget(targetId, "Page.captureScreenshot", { format: "png" }, 60_000);
   const buffer = Buffer.from(shot.data || "", "base64");
   if (!buffer.byteLength) throw new Error("CDP screenshot did not return image data");
   const dimensions = imageDimensionsFromBuffer(buffer) || {};
@@ -5005,7 +7105,7 @@ function screenshotCanvasTranscodeFunction(base64, mimeType, maxSide, quality) {
   return (async () => {
     const bytes = decode(base64);
     const bitmap = await createImageBitmap(new Blob([bytes], { type: mimeType || "image/png" }));
-    const scale = Math.min(1, Math.max(1, Number(maxSide || 0)) / Math.max(bitmap.width, bitmap.height, 1));
+    const scale = Math.min(1, Number(maxSide || 0) / Math.max(bitmap.width, bitmap.height, 1));
     const width = Math.max(1, Math.round(bitmap.width * scale));
     const height = Math.max(1, Math.round(bitmap.height * scale));
     const canvas = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(width, height) : document.createElement("canvas");
@@ -5043,7 +7143,8 @@ async function dispatchMouseClick(daemon, targetId, x, y) {
 async function callAndDispatchMouseClickWithFileChooserGuard(daemon, targetId, selector, options = {}, opts = {}) {
   if (opts.allowFileDialog) {
     const payload = await daemon.callFunction(targetId, clickFunction, [selector, { ...options, allowFileDialog: true }], { timeoutMs: opts.timeoutMs || DEFAULT_TIMEOUT });
-    await dispatchMouseClick(daemon, targetId, payload.center.x, payload.center.y);
+    if (payload.clickMethod !== "synthetic") await dispatchMouseClick(daemon, targetId, payload.center.x, payload.center.y);
+    await maybeRunClickAutoFallback(daemon, targetId, selector, payload, options, opts);
     return payload;
   }
   const sessionId = await daemon.attach(targetId);
@@ -5062,7 +7163,7 @@ async function callAndDispatchMouseClickWithFileChooserGuard(daemon, targetId, s
       selector,
       { ...options, allowFileDialog: true, fileDialogIntent: true },
     ], { timeoutMs: opts.timeoutMs || DEFAULT_TIMEOUT });
-    await dispatchMouseClick(daemon, targetId, payload.center.x, payload.center.y);
+    if (payload.clickMethod !== "synthetic") await dispatchMouseClick(daemon, targetId, payload.center.x, payload.center.y);
     const chooser = await chooserPromise.catch(() => null);
     if (chooser?.params) {
       const target = payload.ref || opts.ref || payload.text || payload.tag || "target";
@@ -5076,11 +7177,58 @@ async function callAndDispatchMouseClickWithFileChooserGuard(daemon, targetId, s
         ],
       });
     }
+    await maybeRunClickAutoFallback(daemon, targetId, selector, payload, options, opts);
     return payload;
   } finally {
     if (interceptEnabled) {
       await daemon.cdp.send("Page.setInterceptFileChooserDialog", { enabled: false }, sessionId, 2_000).catch(() => {});
     }
+  }
+}
+
+// Auto-fallback for clicks whose CDP dispatch "registers" but doesn't
+// trigger the SPA's delegated handler. Runs once per click, only when the
+// original payload reported `clickMethod="cdp"` (synthetic/bypass paths
+// already dispatched events directly). The probe checks page-state
+// signature 120ms post-click; if URL/layers/hash/network all sit still,
+// dispatches synthetic pointerdown+up+click on the resolved element.
+//
+// Generic across UI kits: floating-layer rows (AntD/Material/Radix
+// portals), cursor-clickables (non-ARIA DOM clickables), AND plain
+// buttons whose React handlers got detached between CDP dispatch and
+// microtask flush. Caps at one synthetic retry — if state still doesn't
+// move, returns with `autoFallbackSkipped` so the agent can verify.
+async function maybeRunClickAutoFallback(daemon, targetId, selector, payload, options = {}, opts = {}) {
+  if (!payload || payload.clickMethod !== "cdp") return;
+  if (options && options.bypassOverlay) return; // user already requested forced bypass
+  if (opts && opts.skipAutoFallback) return;
+  if (opts && opts.command === "hover") return;
+  // Tag whether the chosen element was in a portal/popover or a c-ref —
+  // diagnostic only, no longer a gate.
+  const isCRef = typeof selector === "string" && /\[data-realbrowser-ref="c\d+"\]/.test(selector);
+  payload.autoFallbackEligibility = isCRef ? "c-ref" : (payload.inFloatingLayer ? "floating-layer" : "default");
+  // Wait briefly so any same-tick layout/state changes settle. AntD
+  // closes its popover synchronously when the click handler does fire,
+  // so 100ms is plenty without bloating the click latency budget.
+  await sleep(120);
+  let probe;
+  try {
+    probe = await daemon.callFunction(
+      targetId,
+      postClickFallbackFunction,
+      [selector, payload.preClickSignature || null],
+      { timeoutMs: 2_000 },
+    );
+  } catch (_) {
+    return;
+  }
+  if (!probe) return;
+  if (probe.changed) return; // page state moved — original CDP click worked.
+  if (probe.dispatched) {
+    payload.clickMethod = "cdp+synthetic-fallback";
+    payload.autoFallbackReason = `${payload.autoFallbackEligibility} click did not change page state (${probe.reason || "no signature change"}); dispatched synthetic events`;
+  } else if (probe.reason) {
+    payload.autoFallbackSkipped = probe.reason;
   }
 }
 
@@ -5159,6 +7307,8 @@ function actionOptions(args, flags) {
     limit: Number(flags.limit || 30),
     text: flags.text,
     allowFileDialog: Boolean(flags.allowFileDialog),
+    bypassOverlay: Boolean(flags.bypassOverlay),
+    requireChange: Boolean(flags.requireChange),
   };
 }
 
@@ -5185,7 +7335,7 @@ function valueFromArgs(args, flags) {
 
 function looksLikeActionTargetToken(value) {
   const raw = String(value || "");
-  return /^[ebfrilc]\d+$/i.test(raw) || raw.startsWith("selector:") || /^[#.[>]/.test(raw);
+  return /^[ebfrilco]\d+$/i.test(raw) || raw.startsWith("selector:") || /^[#.[>]/.test(raw);
 }
 
 function uploadArgs(args, flags, targetId, daemon) {
@@ -5271,7 +7421,7 @@ function canUseScreenshotQuality(format) {
 function screenshotNormalizationEnabled(flags = {}) {
   if (flags.rawSize || flags.noNormalize) return false;
   if (flags.normalize) return true;
-  const raw = String(process.env.REALBROWSER_SCREENSHOT_NORMALIZE ?? process.env.REALBROWSER_SCREENSHOT_NORMALIZE ?? "1").toLowerCase();
+  const raw = String(process.env.REALBROWSER_SCREENSHOT_NORMALIZE ?? "1").toLowerCase();
   return !["0", "false", "no", "off"].includes(raw);
 }
 
@@ -5465,13 +7615,15 @@ function headersArray(headers = {}) {
 
 function formatTabs(tabs) {
   if (!tabs.length) return "(no targets)";
-  const showOwnership = tabs.some((tab) => tab.profileOwnership && tab.profileOwnership !== "proven");
+  const showOwnership = tabs.some((tab) => tab.ownership || (tab.profileOwnership && tab.profileOwnership !== "proven"));
   const showLease = tabs.some((tab) => tab.lease?.owner);
   return tabs.map((tab) => {
-    const ownership = tab.profileOwnership === "unproven-browser-scope" ? "unproven"
+    const ownership = tab.ownership || (
+      tab.profileOwnership === "unproven-browser-scope" ? "unproven"
       : tab.profileOwnership === "profile-open-proven" ? "profile"
-      : "";
-    const ownershipColumn = showOwnership ? ` ${ownership.padEnd(9)}` : "";
+      : ""
+    );
+    const ownershipColumn = showOwnership ? ` ${String(ownership).slice(0, 13).padEnd(13)}` : "";
     const leaseColumn = showLease ? ` ${(tab.lease?.owner || "").slice(0, 18).padEnd(18)}` : "";
     return `${String(tab.suggestedTarget).padEnd(12)} ${tab.targetPrefix}${ownershipColumn}${leaseColumn} ${tab.title.slice(0, 40).padEnd(40)} ${tab.url}`;
   }).join("\n");
@@ -5541,6 +7693,19 @@ function normalizeExceptionEvent(params) {
 
 async function resolveEndpoint(endpointOrUrl) {
   const endpoint = normalizeEndpoint(endpointOrUrl);
+  // When both URLs are known, prefer a fresh HTTP /json/version discovery
+  // (Playwright's connectOverCDP shape). Reasons:
+  //   1. The cached wsUrl from a stale DevToolsActivePort may point to a
+  //      browser instance the WS subsystem can no longer service.
+  //   2. HTTP discovery fails fast (~ms) on a wedged endpoint; WS upgrade
+  //      sits on the full timeout before timing out.
+  //   3. /json/version returns the *current* webSocketDebuggerUrl, which
+  //      survives Chrome's per-launch UUID rotation.
+  // Fall back to the cached wsUrl if HTTP discovery doesn't respond.
+  if (endpoint.httpUrl) {
+    const fresh = await discoverBrowserWs(endpoint.httpUrl, 1500).catch(() => "");
+    if (fresh) return { ...endpoint, wsUrl: fresh };
+  }
   if (endpoint.wsUrl) return endpoint;
   if (!endpoint.httpUrl) throw new Error("browser URL is required");
   return { ...endpoint, wsUrl: await discoverBrowserWs(endpoint.httpUrl) };
@@ -6212,14 +8377,53 @@ function formatAxTreeV2(nodes, opts = {}) {
   const SKIP_ROLES = new Set(["none", "generic", "presentation", "InlineTextBox", "LineBreak"]);
   function getProp(node, name) { return node.properties?.find((p) => p.name === name)?.value?.value; }
   function isInteractive(role) { return INTERACTIVE_ROLES.has(role); }
+  function isContent(role) { return CONTENT_ROLES.has(role); }
+  function isStructural(role) { return STRUCTURAL_ROLES.has(role); }
+  function isLandmark(role) { return ALWAYS_LANDMARK_ROLES.has(role); }
+  // Pre-pass: mark each node with whether it has an interactive descendant.
+  // This lets landmark/content roles render in --interactive mode only when
+  // they scope something interactive — preserving "where am I" hierarchy
+  // without cluttering empty containers (matches openclaw's compactTree
+  // post-pass which drops parents whose subtree has no [ref=] descendants).
+  function markDescendants(node) {
+    if (node._descendantMarked) return Boolean(node._hasInteractiveDescendant);
+    node._descendantMarked = true;
+    let has = false;
+    for (const child of node._children || []) {
+      const childRole = child.role?.value || "";
+      if (isInteractive(childRole)) has = true;
+      if (markDescendants(child)) has = true;
+    }
+    node._hasInteractiveDescendant = has;
+    return has;
+  }
+  for (const root of roots) markDescendants(root);
   function shouldShow(node) {
     if (node.ignored) return false;
     const role = node.role?.value || "";
     if (!role || SKIP_ROLES.has(role)) return false;
-    if (opts.interactive && !isInteractive(role)) return false;
     const name = node.name?.value || "";
     const value = node.value?.value;
-    if (opts.compact && !isInteractive(role) && !name && value == null) return false;
+    if (opts.interactive) {
+      // Always show interactive elements.
+      if (isInteractive(role)) return true;
+      // Hierarchy preservation (deviates from openclaw's flat interactive mode):
+      // keep landmark + named content roles when they scope at least one
+      // interactive node. Empty/unnamed structural containers are still hidden.
+      if (!node._hasInteractiveDescendant) return false;
+      if (isLandmark(role)) return true;
+      if (isContent(role)) {
+        // Named content (region "Search", heading "Title") always shown;
+        // unnamed `main`/`navigation`/`heading` shown as primary landmarks.
+        if (name) return true;
+        if (role === "main" || role === "navigation" || role === "heading") return true;
+      }
+      return false;
+    }
+    // Non-interactive modes follow openclaw's processLine semantics:
+    // - compact: skip unnamed structural roles (group/list/table/tablist/...)
+    // - default: render everything except SKIP_ROLES
+    if (opts.compact && isStructural(role) && !name && value == null) return false;
     return true;
   }
   function stateAttrs(node) {
@@ -6285,6 +8489,51 @@ function finalizeAriaRefs(lines, interactiveNodes) {
     return line.replace(`REF${match[2]} `, `${ref} `);
   }).join("\n");
   return text;
+}
+
+// detectRecentSearchHint scans cursor-clickable lines for booking-style
+// "saved/recent search" bubbles — items whose label looks like a saved
+// search row (city codes + dates). When 2+ near-duplicate bubbles match,
+// return a short HINT line that tells agents these are click-once
+// shortcuts that pre-fill the form (skipping airport/date pickers).
+// Generic — matches 3-letter code pairs + date tokens. False-positive
+// cost is one extra HINT line. Pattern intentionally broad: any "FOO BAR
+// <date>" string (codes + date) signals a recent-action chip on
+// homepage. Localized date words (en/vi/de/fr/es month names) handled
+// by the date regex.
+function detectRecentSearchHint(lines) {
+  if (!Array.isArray(lines) || lines.length < 2) return "";
+  const matches = [];
+  // Heuristic: line text matches CODE-CODE + date pattern, or repeats a
+  // 3-letter code twice with a date-ish token between/after.
+  // Examples that should match:
+  //   - "ABC XYZ 10 month-name 2026 12 month-name 2026"
+  //   - "From CityName to CityName Mar 5"
+  //   - "ABC -> XYZ 2026-05-10"
+  // Examples that should NOT match: navigation links, single buttons.
+  const cityPair = /\b[A-Z]{3}\b[^A-Za-z]+\b[A-Z]{3}\b/;
+  const dateLike = /\b(\d{1,2})\b.{0,4}\b(thg|th|month|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december|\d{4})\b/i;
+  const isoDate = /\b\d{4}-\d{2}-\d{2}\b/;
+  for (const line of lines) {
+    const text = line.replace(/^[-\s]*c\d+\s+\S+\s+"/, "").replace(/"\s*\[[^\]]+\]\s*$/, "");
+    if (!text || text.length < 8) continue;
+    if (cityPair.test(text) && (dateLike.test(text) || isoDate.test(text))) matches.push(line);
+  }
+  if (matches.length < 2) return "";
+  const refs = matches.slice(0, 5).map((l) => (l.match(/\b(c\d+)\b/) || [])[1]).filter(Boolean);
+  if (refs.length < 2) return "";
+  return `# HINT: ${refs.length} recent-action chips detected (${refs.slice(0, 3).join(", ")}${refs.length > 3 ? ", ..." : ""}). On form-driven SPAs, one click on the matching chip pre-fills the form and skips the picker UI entirely. Match by the user's intent (codes + dates) in the label.`;
+}
+
+function stripUnstampedRefs(text, refs) {
+  const stamped = new Set(Object.keys(refs));
+  return text.split("\n").map((line) => {
+    const m = line.match(/^(\s*- )([blec])(\d+) /);
+    if (!m) return line;
+    const refName = `${m[2]}${m[3]}`;
+    if (stamped.has(refName)) return line;
+    return line.replace(/^(\s*- )([blec])\d+ /, "$1");
+  }).join("\n");
 }
 
 function lineDiff(before, after, contextLines = 2) {
@@ -6390,7 +8639,7 @@ Target-first model:
 
 Common:
   realbrowser profile list --active
-  realbrowser tab list ninzap.dev --profile chrome:Default
+  realbrowser tab list app.example --profile chrome:Default
   realbrowser tab ensure https://example.com --profile chrome:Default --label app --background
   realbrowser tab ensure https://example.com --anonymous --session check --label page
   realbrowser tab ensure https://example.com --anonymous --session private --label page --front --incognito
@@ -6445,16 +8694,22 @@ wait for the same starting daemon instead of spawning another controller.
   tab: `
 realbrowser tab
 
-  tab list [query] [--profile P|--anonymous --session S|--browser-url URL]
+  tab list [query] [--mine] [--profile P|--anonymous --session S|--browser-url URL]
   tab select <query|target> [--label L] [--front]
-  tab ensure <url> --label L [--background|--front|--best-effort-background] [--incognito]
+  tab ensure <url> --label L [--background|--front|--best-effort-background] [--incognito] [--force-new]
   tab new <url> [--label L]
-  tab navigate <target> <url|link-ref>
+  tab navigate <target> <url|link-ref> [--allow-user-tab-mutation]
   tab label <target> <label>
-  tab focus|close|handoff|resume <target>
+  tab focus|handoff|resume <target>
+  tab close <target> [--mine]
+  tab done [--task ID] [--close]
 
-Labels are owner-scoped. Mutating commands claim a target lease and reject fresh
-leases owned by another owner unless --take-lease or --force is explicit.
+Labels are owner-scoped. Each invocation has a task; the per-task tab registry
+prevents duplicate same-origin tabs. tab list --mine shows only this task's
+agent-owned tabs. Mutating commands (navigate, close) refuse user-owned tabs
+unless --take-lease, --force, or --allow-user-tab-mutation is explicit.
+If tab ensure errors with duplicate_task_origin, USE the existing handle —
+the error gives you the exact next command verbatim.
 `,
   "tab ensure": `
 realbrowser tab ensure <url>
@@ -6513,11 +8768,27 @@ All read commands require -t/--target or --handle.
   read query -t app "button,input" --limit 100 --out tmp/controls.json
   read text -t app --max-chars 50000 --out tmp/page-text.txt
   read text|html|links|forms|url|is -t app ...
+  read autocomplete -t app                  (after typing into a focused input;
+                                             enumerates the floating layer's
+                                             items as o1, o2, ... refs)
+  read autocomplete -t app --near b21       (anchor at the button you just
+                                             clicked; preferred for
+                                             click-then-popup widgets where
+                                             activeElement is unreliable)
 
 read query expects CSS selectors, not literal text. For text checks, use
 wait text, read text --out plus rg, or read query '<css>' --text-filter '<text>'.
 Use --out for large/debug reads. Text-like reads write plain text; structured
 reads write JSON for jq/rg/editor inspection.
+
+read autocomplete (alias: read overlay) finds the floating layer near the
+input or button you specify (--near <ref>) or near document.activeElement
+and emits o1, o2, ... refs for its visible items. Eligibility rules: layer
+must be >= 150x80 OR contain >= 3 list-like items (li, [role=option],
+[role=menuitem], etc.). Use after action type or after a click that opens a
+custom dropdown. Then action click <ref> works without selector hunting.
+If the result reports "no eligible layer near anchor", the dropdown likely
+closed — re-click the field, then retry with --near <field-ref>.
 `,
   wait: `
 realbrowser wait
@@ -6552,6 +8823,14 @@ All actions require -t/--target or --handle.
   Plain click blocks actual file inputs/labels and protocol-detected file chooser
   openings. Use upload --trigger-ref for visible picker buttons, or pass
   --allow-file-dialog when a native picker is intentional.
+
+  action scroll -t app down 500
+  action scroll -t app up 300
+  action scroll -t app --selector '[data-scroll-root]' down 800
+  action scroll -t app e1 down 400
+
+  Scroll scrolls the window or a specific element. Directions: up/down/left/right.
+  Default: down 500. Use --selector or a ref to scroll a container.
 
   action state --screenshot captures the visible active root/viewport. Use
   screenshot area/full only when a tall artifact is explicitly needed.
@@ -6848,6 +9127,26 @@ async function runSelfTest() {
   assert(tree.interactiveNodes.length === 2, "formatAxTreeV2 interactive nodes");
   const treeI = formatAxTreeV2(mockNodes, { interactive: true, compact: false });
   assert(!treeI.text.includes("document") && treeI.text.includes("button"), "formatAxTreeV2 interactive filter");
+  // 0.3.4: context roles preserved with interactive descendants
+  const hierMockNodes = [
+    { nodeId: "1", role: { value: "WebArea" }, name: { value: "Page" }, childIds: ["2", "9"], properties: [] },
+    { nodeId: "2", parentId: "1", role: { value: "main" }, name: { value: "" }, childIds: ["3", "5"], properties: [] },
+    { nodeId: "3", parentId: "2", role: { value: "region" }, name: { value: "Search" }, childIds: ["4"], properties: [] },
+    { nodeId: "4", parentId: "3", role: { value: "button" }, name: { value: "Find" }, childIds: [], backendDOMNodeId: 100, properties: [{ name: "focusable", value: { value: true } }] },
+    { nodeId: "5", parentId: "2", role: { value: "tabpanel" }, name: { value: "Departures" }, childIds: ["6"], properties: [] },
+    { nodeId: "6", parentId: "5", role: { value: "button" }, name: { value: "Origin" }, childIds: [], backendDOMNodeId: 101, properties: [{ name: "focusable", value: { value: true } }] },
+    { nodeId: "9", parentId: "1", role: { value: "region" }, name: { value: "Empty" }, childIds: [], properties: [] },
+  ];
+  const hier = formatAxTreeV2(hierMockNodes, { interactive: true, compact: true });
+  assert(hier.text.includes("main") && hier.text.includes("Search"), "formatAxTreeV2 keeps named main+region in interactive mode");
+  assert(hier.text.includes("tabpanel") && hier.text.includes("Departures"), "formatAxTreeV2 keeps tabpanel in interactive mode");
+  assert(hier.text.includes("Origin") && hier.text.includes("Find"), "formatAxTreeV2 keeps interactive buttons");
+  assert(!hier.text.includes("Empty"), "formatAxTreeV2 skips context role with no interactive descendants");
+  // Indentation: button under main->region nests deeper than direct button under main
+  const lineFind = hier.text.split("\n").find((l) => l.includes("Find"));
+  const lineOrigin = hier.text.split("\n").find((l) => l.includes("Origin"));
+  const indent = (line) => line ? line.match(/^\s*/)[0].length : 0;
+  assert(indent(lineFind) > 0 && indent(lineOrigin) > 0, "formatAxTreeV2 indents interactive elements under context");
   // read tree parser
   const readTree = parseCli(["read", "tree", "-t", "app", "-i", "-c", "-D", "-d", "4"]);
   assert(readTree.group === "read" && readTree.command === "tree", "read tree parser group/command");
@@ -6858,6 +9157,342 @@ async function runSelfTest() {
   assert(actionOptions([], { root: "e5" }).rootSelector === "e5", "actionOptions ref root passes rootSelector");
   const wopts = waitReadyOptions(["/tmp/ready.png"], { screenshot: true }, 10000);
   assert(wopts.selector === "", "waitReadyOptions does not use positional arg as selector");
+  // 0.3.2 features
+  assert(actionOptions([], { bypassOverlay: true }).bypassOverlay === true, "actionOptions surfaces bypassOverlay");
+  const bypassParsed = parseCli(["action", "click", "-t", "app", "b3", "--bypass-overlay"]);
+  assert(bypassParsed.flags.bypassOverlay === true, "--bypass-overlay parsed as boolean flag");
+  const autoParsed = parseCli(["read", "autocomplete", "-t", "app"]);
+  assert(autoParsed.group === "read" && autoParsed.command === "autocomplete", "read autocomplete parser");
+  const overlayParsed = parseCli(["read", "overlay", "-t", "app", "--limit", "10"]);
+  assert(overlayParsed.command === "overlay" && overlayParsed.flags.limit === "10", "read overlay parser");
+  const oRefParsed = parseCli(["action", "click", "-t", "app", "o4"]);
+  assert(oRefParsed.args[0] === "o4", "o-ref accepted as click target");
+  // o-ref recognized by selectorFor regex (validated indirectly: ref should match the same shape as b/e/l)
+  assert(/^[ebfrilco]\d+$/i.test("o7") && /^[ebfrilco]\d+$/i.test("b1"), "ref pattern accepts o-prefix");
+  // 0.3.3: --near anchor flag for read autocomplete
+  const nearParsed = parseCli(["read", "autocomplete", "-t", "app", "--near", "b21"]);
+  assert(nearParsed.command === "autocomplete" && nearParsed.flags.near === "b21", "read autocomplete --near parser");
+  const nearShortRef = parseCli(["read", "overlay", "-t", "app", "--near", "e9", "--limit", "20"]);
+  assert(nearShortRef.flags.near === "e9" && nearShortRef.flags.limit === "20", "read overlay --near + --limit parser");
+  // 0.3.6: --require-change flag for action fill (silent no-op detection)
+  const reqChange = parseCli(["action", "fill", "-t", "app", "e3", "09/05/2026", "--require-change"]);
+  assert(reqChange.flags.requireChange === true, "--require-change parsed as boolean flag");
+  const aoptsChange = actionOptions([], { requireChange: true });
+  assert(aoptsChange.requireChange === true, "actionOptions surfaces requireChange");
+  // 0.3.11: click auto-fallback. We can't run the in-page functions here,
+  // but we verify their shape and that the wiring functions exist so a
+  // refactor that drops the auto-fallback breaks the self-test.
+  assert(typeof postClickFallbackFunction === "function" && postClickFallbackFunction.length === 2,
+    "postClickFallbackFunction takes (selector, preSignature)");
+  assert(typeof maybeRunClickAutoFallback === "function",
+    "maybeRunClickAutoFallback wired into click pipeline");
+  assert(typeof elementInFloatingLayer === "function" && typeof pageStateSignature === "function",
+    "floating-layer detection helpers exist");
+  // The synthetic dispatch sequence in postClickFallbackFunction must include
+  // a PointerEvent for AntD's outside-click detector. Hard-fail if we
+  // accidentally drop the pointerdown step in a future refactor.
+  const fallbackSrc = postClickFallbackFunction.toString();
+  assert(fallbackSrc.includes("PointerEvent") && fallbackSrc.includes("pointerdown"),
+    "postClickFallbackFunction dispatches PointerEvent('pointerdown') (required for AntD popovers)");
+  assert(fallbackSrc.includes("mousedown") && fallbackSrc.includes("mouseup") && fallbackSrc.includes("click"),
+    "postClickFallbackFunction dispatches full mouse sequence");
+  // clickFunction must annotate payload with `inFloatingLayer` and
+  // `preClickSignature` so the caller can run the auto-fallback.
+  const clickSrc = clickFunction.toString();
+  assert(clickSrc.includes("inFloatingLayer") && clickSrc.includes("preClickSignature"),
+    "clickFunction surfaces inFloatingLayer + preClickSignature on payload");
+  assert(clickSrc.includes("clickMethod = \"cdp\""),
+    "clickFunction defaults clickMethod to 'cdp' for the CDP-dispatch path");
+  // 0.3.12: cursor-clickables (non-ARIA DOM clickables surfaced in read tree).
+  // Verify the function exists, accepts opts, and contains the expected
+  // predicates so a refactor that drops a predicate fails the self-test.
+  assert(typeof cursorClickablesFunction === "function",
+    "cursorClickablesFunction defined — wired into ariaTree");
+  const ccSrc = cursorClickablesFunction.toString();
+  assert(ccSrc.includes('cursor === "pointer"'), "cursorClickablesFunction checks cursor:pointer");
+  assert(ccSrc.includes('tabindex'), "cursorClickablesFunction checks tabindex");
+  assert(ccSrc.includes('onclick'), "cursorClickablesFunction checks onclick");
+  assert(ccSrc.includes('contenteditable'), "cursorClickablesFunction checks contenteditable");
+  assert(ccSrc.includes('aria-haspopup'), "cursorClickablesFunction checks aria-haspopup");
+  assert(ccSrc.includes('data-realbrowser-ref'), "cursorClickablesFunction de-dups against AX-stamped refs");
+  assert(ccSrc.includes('parentElement') && ccSrc.includes('cursor === "pointer"'),
+    "cursorClickablesFunction parent-collapse rule preserved");
+  // The c-ref namespace must round-trip through selectorFor's regex —
+  // refs come back as e.g. "c5", and the regex must accept them.
+  assert(/^[ebfrilco]\d+$/i.test("c1") && /^[ebfrilco]\d+$/i.test("c99"),
+    "c-ref pattern accepted by selectorFor (cursor-clickables clickable via standard click path)");
+  // ariaTree must wire the cursor-clickables pass after assignAriaRefs.
+  const ariaTreeSrc = BrowserDaemon.prototype.ariaTree.toString();
+  assert(ariaTreeSrc.includes('cursorClickablesFunction'),
+    "ariaTree calls cursorClickablesFunction after AX stamping");
+  assert(ariaTreeSrc.includes('cursor-clickables'),
+    "ariaTree appends cursor-clickables section header");
+  // v0.3.0: click auto-fallback now fires for ALL CDP clicks (not just
+  // floating-layer or c-ref). Plain SPA route-swap buttons can drop
+  // events too. The eligibility tag is diagnostic, no longer a gate.
+  const fallbackEntrySrc = maybeRunClickAutoFallback.toString();
+  assert(fallbackEntrySrc.includes('isCRef') && fallbackEntrySrc.includes('data-realbrowser-ref="c'),
+    "maybeRunClickAutoFallback tags c-ref clicks for diagnostics");
+  assert(!fallbackEntrySrc.match(/if\s*\(\s*!payload\.inFloatingLayer\s*&&\s*!isCRef\s*\)\s*return/),
+    "maybeRunClickAutoFallback no longer gates on floating-layer || c-ref (drops the v0.3.11 gate)");
+  // Signature must include scrollHeight + xhrCount (catches panel-swap
+  // SPAs whose body text doesn't change and submit handlers that kick
+  // off fetches before any DOM mutation). xhrCount filters to
+  // user-initiated fetch/XHR so passive prefetch/analytics polls don't
+  // falsely flip the signal.
+  const sigSrc = pageStateSignature.toString();
+  assert(sigSrc.includes('scrollHeight') && sigSrc.includes('xhrCount'),
+    "pageStateSignature includes scrollHeight + xhrCount");
+  assert(sigSrc.includes('"fetch"') && sigSrc.includes('"xmlhttprequest"'),
+    "pageStateSignature filters resource entries to fetch + xmlhttprequest only");
+  // 0.3.11: multi-OS browser executable resolver. We can't fs.existsSync the
+  // candidate paths in a portable test, so we exercise the candidate
+  // generator + the kind-filtering logic that drives findBrowserExecutable.
+  const candidates = browserExecutableCandidates();
+  assert(Array.isArray(candidates) && candidates.length >= 4, "browserExecutableCandidates returns a non-empty list");
+  const kinds = new Set(candidates.map((entry) => entry.kind));
+  assert(kinds.has("chrome") && kinds.has("brave") && kinds.has("edge"), "candidate list spans chrome+brave+edge");
+  if (process.platform === "darwin") {
+    assert(kinds.has("vivaldi") && kinds.has("arc"), "macOS candidates include vivaldi and arc");
+    assert(candidates[0].path === "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "macOS chrome candidate is first");
+    const braveOnMac = candidates.filter((c) => c.kind === "brave");
+    assert(braveOnMac.every((c) => c.path.startsWith("/Applications/")), "macOS brave candidates live under /Applications");
+  } else if (process.platform === "linux") {
+    assert(candidates.some((c) => c.kind === "chrome" && c.path === "/usr/bin/google-chrome"), "linux includes /usr/bin/google-chrome");
+    assert(candidates.some((c) => c.kind === "chromium" && c.path === "/snap/bin/chromium"), "linux includes /snap/bin/chromium");
+    assert(candidates.some((c) => c.kind === "brave" && c.path.includes("brave-browser")), "linux includes brave");
+    assert(candidates.some((c) => c.kind === "edge" && c.path === "/usr/bin/microsoft-edge"), "linux includes /usr/bin/microsoft-edge");
+  } else if (IS_WINDOWS) {
+    assert(candidates.some((c) => c.kind === "chrome" && c.path.toLowerCase().endsWith("chrome.exe")), "windows candidates contain chrome.exe");
+    assert(candidates.some((c) => c.kind === "brave" && c.path.toLowerCase().endsWith("brave.exe")), "windows candidates contain brave.exe");
+    assert(candidates.some((c) => c.kind === "edge" && c.path.toLowerCase().endsWith("msedge.exe")), "windows candidates contain msedge.exe");
+  }
+  // CHROME_PATH override semantics — synthesize a candidate file and test
+  // that the override wins regardless of platform.
+  const overrideStashPath = path.join(os.tmpdir(), `realbrowser-self-test-${process.pid}-chrome`);
+  await fsp.writeFile(overrideStashPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const priorChromePath = process.env.CHROME_PATH;
+  try {
+    process.env.CHROME_PATH = overrideStashPath;
+    assert(findBrowserExecutable() === overrideStashPath, "CHROME_PATH override wins over default candidates");
+    assert(findBrowserExecutable("chrome") === overrideStashPath, "CHROME_PATH override honored when --browser=chrome");
+    // A mismatched browser hint should bypass the override (the override path
+    // doesn't include "brave" in its name) and fall through to fs.existsSync.
+    const braveResolved = findBrowserExecutable("brave");
+    assert(braveResolved === null || braveResolved !== overrideStashPath, "CHROME_PATH does not satisfy --browser=brave when name doesn't match");
+    process.env.CHROME_PATH = "/this/path/definitely/does/not/exist/realbrowser-test";
+    const fallbackResolved = findBrowserExecutable();
+    // Either a real candidate matched on this host, or no browser exists; the
+    // override must NOT be returned because fs.existsSync is false.
+    assert(fallbackResolved !== "/this/path/definitely/does/not/exist/realbrowser-test", "missing CHROME_PATH does not poison the resolver");
+  } finally {
+    if (priorChromePath === undefined) delete process.env.CHROME_PATH;
+    else process.env.CHROME_PATH = priorChromePath;
+    await fsp.rm(overrideStashPath, { force: true });
+  }
+  // 0.3.5: cross-owner label fallback (rescues terminal-pane / multi-session
+  // workflow where TERM_SESSION_ID-derived owner changes between calls).
+  const xLabels = {
+    [`profile:chrome:Default${OWNER_SCOPE_SEPARATOR}owner-old`]: { vn: "TID-VN-OLD", solo: "TID-SOLO" },
+    [`profile:chrome:Default${OWNER_SCOPE_SEPARATOR}owner-new`]: { other: "TID-OTHER" },
+    [`anonymous:s1${OWNER_SCOPE_SEPARATOR}owner-old`]: { aaa: "TID-A" },
+  };
+  const xDaemon = {
+    labels: xLabels,
+    context: { key: "profile:chrome:Default" },
+    contextScopeKey: () => `profile:chrome:Default${OWNER_SCOPE_SEPARATOR}owner-new`,
+    labelsForContext: BrowserDaemon.prototype.labelsForContext,
+  };
+  const sameOwner = xDaemon.labelsForContext.call(xDaemon);
+  assert(!sameOwner.vn, "labelsForContext same-owner does not see other owner's vn label");
+  assert(!sameOwner.solo, "labelsForContext same-owner does not see other owner's solo");
+  const cross = xDaemon.labelsForContext.call(xDaemon, { includeCrossOwner: true });
+  assert(cross.vn === "TID-VN-OLD", "labelsForContext cross-owner picks up vn from other owner under same base context");
+  assert(cross.solo === "TID-SOLO", "labelsForContext cross-owner picks up solo from other owner");
+  assert(!cross.aaa, "labelsForContext cross-owner does not bleed across base contexts (anonymous != profile)");
+  // contextFlagsForKnownTarget cross-owner fallback
+  // (uses LABELS_FILE so we test the function structurally with unique vs ambiguous)
+  const cfRaw = "vn";
+  const cfOwner = "owner-fresh";
+  const cfMatchesSame = [];
+  const cfMatchesOther = [];
+  for (const [contextKey, contextLabels] of Object.entries(xLabels)) {
+    if (typeof contextLabels[cfRaw] !== "string") continue;
+    const so = ownerFromScopedContextKey(contextKey);
+    if (!so || so === cfOwner) cfMatchesSame.push(contextKey);
+    else cfMatchesOther.push(contextKey);
+  }
+  assert(cfMatchesSame.length === 0, "contextFlagsForKnownTarget no same-owner matches when owner is fresh");
+  const cfOtherUnique = [...new Set(cfMatchesOther.map(baseContextKeyFromScopedKey))];
+  assert(cfOtherUnique.length === 1 && cfOtherUnique[0] === "profile:chrome:Default", "contextFlagsForKnownTarget cross-owner unique base context");
+  // 0.3.8: resolveBrowserContextIdForProfile picks the right browserContextId
+  // when Chrome runs browser-scoped CDP across multiple profiles. Single
+  // strict pass: only profileOwned=true with a trusted source
+  // (profile-open from --profile-directory launch, or cdp-create-with-context
+  // from a verified Target.createTarget). Labels and untrusted sources are
+  // intentionally skipped — under multi-profile Chrome they may anchor to
+  // tabs in any profile and would re-introduce the wrong-profile bug.
+  // Bootstrap (no proven tab yet) → caller falls through to launchProfileTab.
+  const bcDaemon = Object.create(BrowserDaemon.prototype);
+  bcDaemon.context = { kind: "profile", key: "profile:chrome:Default", profile: { id: "chrome:Default" }, endpointScope: "browser" };
+  const bcOwnedKey = `profile:chrome:Default${OWNER_SCOPE_SEPARATOR}owner-me`;
+  const bcCrossKey = `profile:chrome:Default${OWNER_SCOPE_SEPARATOR}owner-other`;
+  bcDaemon.contextScopeKey = () => bcOwnedKey;
+  bcDaemon.labels = {};
+  bcDaemon.targetMeta = {
+    [bcOwnedKey]: {
+      "tid-proven": { profile: "chrome:Default", profileOwned: true, source: "profile-open" },
+      "tid-untrusted": { profile: "chrome:Default", profileOwned: true, source: "browser-scope-cdp-create" },
+      "tid-other-profile": { profile: "chrome:Profile 1", profileOwned: true, source: "profile-open" },
+    },
+    [bcCrossKey]: {
+      "tid-cross-proven": { profile: "chrome:Default", profileOwned: true, source: "profile-open" },
+    },
+  };
+  bcDaemon.tabsRaw = async () => [
+    { targetId: "tid-untrusted", browserContextId: "ctx-WRONG" },
+    { targetId: "tid-other-profile", browserContextId: "ctx-OTHER" },
+    { targetId: "tid-proven", browserContextId: "ctx-DEFAULT" },
+    { targetId: "tid-cross-proven", browserContextId: "ctx-DEFAULT" },
+  ];
+  const bcResolved = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
+  assert(bcResolved === "ctx-DEFAULT", "resolveBrowserContextIdForProfile picks proven same-owner context, not untrusted source");
+  // Cross-owner fallback: same-owner has no proven entry, cross-owner does.
+  bcDaemon.targetMeta[bcOwnedKey] = {
+    "tid-untrusted": { profile: "chrome:Default", profileOwned: true, source: "browser-scope-cdp-create" },
+  };
+  const bcCross = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
+  assert(bcCross === "ctx-DEFAULT", "resolveBrowserContextIdForProfile falls back to cross-owner proven entry");
+  // Untrusted-source only: returns null so caller falls through to
+  // launchProfileTab. We intentionally do NOT use the "tid-untrusted" tab as
+  // a context anchor: that target was created by pre-0.3.7 cdp-create which
+  // lied about profile attribution. Trusting it would re-introduce the
+  // wrong-profile bug under multi-profile Chrome.
+  bcDaemon.targetMeta = {
+    [bcOwnedKey]: { "tid-untrusted": { profile: "chrome:Default", profileOwned: true, source: "browser-scope-cdp-create" } },
+  };
+  const bcUntrustedOnly = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
+  assert(bcUntrustedOnly === null, "resolveBrowserContextIdForProfile rejects untrusted-source-only state to force --profile-directory bootstrap");
+  // No live tab matching: also null.
+  bcDaemon.targetMeta = {
+    [bcOwnedKey]: { "tid-dead": { profile: "chrome:Default", profileOwned: true, source: "profile-open" } },
+  };
+  const bcNone = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
+  assert(bcNone === null, "resolveBrowserContextIdForProfile returns null when no live tab matches");
+  // cdp-create-with-context source is trusted (we passed browserContextId).
+  bcDaemon.targetMeta = {
+    [bcOwnedKey]: { "tid-proven": { profile: "chrome:Default", profileOwned: true, source: "cdp-create-with-context" } },
+  };
+  const bcVerified = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
+  assert(bcVerified === "ctx-DEFAULT", "resolveBrowserContextIdForProfile trusts cdp-create-with-context source");
+  // Legacy unscoped key (pre-owner-scoping) is read as a last-resort fallback.
+  bcDaemon.targetMeta = {
+    "profile:chrome:Default": { "tid-proven": { profile: "chrome:Default", profileOwned: true, source: "profile-open" } },
+  };
+  const bcLegacy = await bcDaemon.resolveBrowserContextIdForProfile("chrome:Default");
+  assert(bcLegacy === "ctx-DEFAULT", "resolveBrowserContextIdForProfile reads legacy unscoped meta store");
+
+  // v0.3.0: enumerateLiveBrowserContexts unions explicit context list with
+  // contexts visible on live page targets. Size > 1 = multi-profile ambiguity
+  // for the default-context fallback in tab ensure --background.
+  const enumDaemon = Object.create(BrowserDaemon.prototype);
+  enumDaemon.cdp = { send: async (method) => { if (method === "Target.getBrowserContexts") return { browserContextIds: ["ctx-A"] }; return null; } };
+  enumDaemon.tabsRaw = async () => [
+    { targetId: "tid-a", browserContextId: "ctx-A" },
+    { targetId: "tid-b", browserContextId: "ctx-B" },
+    { targetId: "tid-c", browserContextId: "" },
+  ];
+  const enumSet = await enumDaemon.enumerateLiveBrowserContexts();
+  assert(enumSet instanceof Set, "enumerateLiveBrowserContexts returns a Set");
+  assert(enumSet.size === 2, "enumerateLiveBrowserContexts unions getBrowserContexts and tab targets, drops empty");
+  assert(enumSet.has("ctx-A") && enumSet.has("ctx-B"), "enumerateLiveBrowserContexts captures both distinct contexts");
+  // Single-profile case: only one context visible across all surfaces.
+  enumDaemon.cdp = { send: async () => ({ browserContextIds: [] }) };
+  enumDaemon.tabsRaw = async () => [
+    { targetId: "tid-x", browserContextId: "ctx-ONLY" },
+    { targetId: "tid-y", browserContextId: "ctx-ONLY" },
+  ];
+  const enumSingle = await enumDaemon.enumerateLiveBrowserContexts();
+  assert(enumSingle.size === 1 && enumSingle.has("ctx-ONLY"), "enumerateLiveBrowserContexts collapses identical contexts to single entry");
+
+  // Task-tab registry: origin canonicalization, classifyTabOwnership, and
+  // duplicate-task-origin guard (Codex § 7 self-test additions).
+  const originA = canonicalOriginKey("https://www.example.com/?x=1");
+  const originB = canonicalOriginKey("https://www.example.com/vn/en/home");
+  assert(originA === originB, "canonicalOriginKey dedupes same web origin across paths/queries");
+  assert(canonicalOriginKey("https://Example.COM:443/foo") === "https://example.com", "canonicalOriginKey lowercases host and strips default port");
+  assert(canonicalOriginKey("http://example.com:8080/") === "http://example.com:8080", "canonicalOriginKey keeps non-default port");
+  assert(canonicalOriginKey("about:blank").startsWith("url:"), "canonicalOriginKey falls back to url: for non-http schemes");
+
+  const taskScope = taskRegistryScopeKey("profile:chrome:Default@@owner:owner-a", "task-x");
+  assert(taskScope === "profile:chrome:Default@@owner:owner-a@@task:task-x", "taskRegistryScopeKey composes context+task key");
+
+  const taskDaemon = Object.create(BrowserDaemon.prototype);
+  taskDaemon.context = { kind: "profile", key: "profile:chrome:Default", owner: "owner-a", profile: { id: "chrome:Default" }, endpointScope: "profile" };
+  taskDaemon.labels = {};
+  taskDaemon.labelMeta = {};
+  taskDaemon.targetMeta = {};
+  taskDaemon.leases = {};
+  taskDaemon.taskTabs = {
+    "profile:chrome:Default@@owner:owner-a@@task:owner-a": {
+      "https://www.example.com": {
+        targetId: "target-example",
+        label: "app",
+        owner: "owner-a",
+        taskId: "owner-a",
+        origin: "https://www.example.com",
+      },
+    },
+  };
+  assert(taskDaemon.classifyTabOwnership({ targetId: "target-example" }, {}) === "mine", "task registry marks current task tab as mine");
+  assert(taskDaemon.classifyTabOwnership({ targetId: "target-other" }, {}) === "user", "unregistered tab is user-owned by default");
+  // Cross-task-same-owner classification should yield 'my-other-task'.
+  taskDaemon.taskTabs["profile:chrome:Default@@owner:owner-a@@task:other-task"] = {
+    "https://example.com": { targetId: "target-other-task", owner: "owner-a", taskId: "other-task" },
+  };
+  assert(taskDaemon.classifyTabOwnership({ targetId: "target-other-task" }, {}) === "my-other-task", "another-task-same-owner tab classifies as my-other-task");
+
+  // Duplicate-task-origin error shape — the agent must see the next commands.
+  let dupErr = null;
+  try {
+    throw duplicateTaskOriginError({
+      origin: "https://www.example.com",
+      existing: { targetId: "target-example", label: "app", url: "https://www.example.com/", owner: "owner-a", taskId: "owner-a" },
+      requestedLabel: "app2",
+      url: "https://www.example.com/",
+    });
+  } catch (err) {
+    dupErr = err;
+  }
+  assert(dupErr instanceof CliError, "duplicateTaskOriginError yields a CliError");
+  assert(dupErr.code === "duplicate_task_origin", "duplicate_task_origin error code");
+  assert(Array.isArray(dupErr.next) && dupErr.next.some((s) => s.startsWith("realbrowser tab navigate ")), "duplicate_task_origin includes navigate hint");
+  assert(dupErr.next.some((s) => s.includes("--force-new")), "duplicate_task_origin includes force-new escape hatch");
+
+  // resolveTaskId precedence: explicit task > REALBROWSER_TASK_ID env > owner.
+  assert(resolveTaskId({ task: "explicit-t" }) === "explicit-t", "resolveTaskId honors explicit task flag");
+  const prevEnvTask = process.env.REALBROWSER_TASK_ID;
+  process.env.REALBROWSER_TASK_ID = "env-t";
+  assert(resolveTaskId({}) === "env-t", "resolveTaskId reads REALBROWSER_TASK_ID env");
+  delete process.env.REALBROWSER_TASK_ID;
+  if (prevEnvTask !== undefined) process.env.REALBROWSER_TASK_ID = prevEnvTask;
+  assert(resolveTaskId({ owner: "owner-z" }) === "owner-z", "resolveTaskId falls back to owner when no task given");
+  assert(resolveTaskId({}) === DEFAULT_TASK_ID || resolveTaskId({}) !== "", "resolveTaskId always returns a non-empty id");
+
+  // Parser: --mine, --force-new, --allow-user-tab-mutation, --task value.
+  const mineParsed = parseCli(["tab", "list", "--mine"]);
+  assert(mineParsed.flags.mine === true, "tab list --mine parser");
+  const forceNewParsed = parseCli(["tab", "ensure", "https://example.com", "--label", "x", "--force-new"]);
+  assert(forceNewParsed.flags.forceNew === true, "tab ensure --force-new parser");
+  const allowUserMutate = parseCli(["tab", "navigate", "-t", "x", "https://example.com", "--allow-user-tab-mutation"]);
+  assert(allowUserMutate.flags.allowUserTabMutation === true, "tab navigate --allow-user-tab-mutation parser");
+  const taskFlagParsed = parseCli(["tab", "list", "--task", "task-9f3a"]);
+  assert(taskFlagParsed.flags.task === "task-9f3a", "tab list --task parser");
+  const closeMineParsed = parseCli(["tab", "close", "--mine"]);
+  assert(closeMineParsed.flags.mine === true, "tab close --mine parser");
+  const doneParsed = parseCli(["tab", "done", "--close"]);
+  assert(doneParsed.command === "done" && doneParsed.flags.close === true, "tab done parser with --close");
+
   stdout("realbrowser self-test passed\n");
 }
 

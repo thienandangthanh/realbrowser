@@ -1,64 +1,91 @@
 # Changelog
 
-## 0.3.0 - 2026-05-08
+## 0.3.0 - 2026-05-14
 
-Added ARIA tree, token efficiency improvements, bug fixes, and Claude Code
-plugin support.
+This release moves Realbrowser from `0.2.1` to `0.3.0`. The release goal is
+Claude Code support, faster and lower-token browsing, and a more stable plugin
+runtime across macOS, Linux, and Windows.
 
 Added:
 
-- `read tree` command: compact ARIA accessibility tree via CDP
-  `Accessibility.getFullAXTree`. 5-20x more compact than DOM-based snapshots.
-  Composable flags: `--interactive`/`-i`, `--compact`/`-c`, `--depth N`/`-d N`,
-  `--diff`/`-D`, `--selector`. Refs bridge to DOM for click/fill/type.
-- Short flag aliases: `-i` (interactive), `-c` (compact), `-D` (diff), `-d`
-  (depth) for compact CLI usage.
-- Linux focus restore via `xdotool` for `--best-effort-background`.
-- Windows focus restore via PowerShell for `--best-effort-background`.
-- Windows Chromium user data directory in `browserBases()`.
-- `.claude-plugin/plugin.json` manifest for Claude Code plugin auto-discovery.
-- `skills/realbrowser/` directory structure following the Claude Code plugin
-  convention (SKILL.md, scripts, and references inside the skill subdirectory).
-- Enhanced SKILL.md description for better auto-triggering in Claude Code.
+- Claude Code plugin support via `.claude-plugin/plugin.json`.
+- Claude Code skill layout under `skills/realbrowser/`, with the CLI, wrappers,
+  skill instructions, and references colocated for plugin discovery.
+- Portable launch wrappers for macOS/Linux shells, Windows `cmd.exe`, and
+  PowerShell.
+- `read tree`: compact ARIA accessibility tree via CDP with refs for actions.
+  Use `--interactive`/`-i`, `--compact`/`-c`, `--depth`/`-d`, `--diff`/`-D`,
+  and `--selector` to keep reads bounded.
+- Task and session tab registries so agents reuse one same-origin tab instead
+  of creating duplicate tabs after a failed action or across nested sessions.
+- `tab done` and `tab close --mine` cleanup paths that only touch agent-owned
+  tabs.
+- `action scroll`, `read autocomplete`, and `read overlay` for generic browsing
+  flows that need scroll containers, transient UI, or overlay diagnostics.
+- Cross-platform focus capture/restore for explicit
+  `--best-effort-background` profile launches:
+  macOS via AppleScript, Linux via `xdotool` when present, and Windows via
+  PowerShell.
+- Windows process-tree cleanup for anonymous browser sessions.
 
 Changed:
 
-- Replaced set-based `simpleDiff` with proper LCS-based `lineDiff` that
-  preserves line ordering, handles duplicates, and shows context lines.
-- `--best-effort-background` focus restore now works on Linux (xdotool) and
-  Windows (PowerShell) in addition to macOS (osascript).
-- SKILL.md operating loop updated: `read tree -i -c` as primary interaction
-  reader, `read tree --diff` as verify-after-action pattern, explicit warning
-  against Playwright pseudo-selectors, preference for `wait ready --visual-stable`
-  over `sleep N && screenshot capture`.
-- Moved `SKILL.md`, `scripts/`, and `references/` into `skills/realbrowser/`
-  for Claude Code skill auto-discovery.
-- Replaced Codex-specific path (`$HOME/.codex/skills/...`) with portable
-  skill-relative path references.
-- Replaced Codex-specific language with agent-generic terms throughout docs.
-- Updated `README.md` with Claude Code installation instructions and new
-  directory layout.
-- Set the script version to `0.3.0`.
+- The runtime version is now `0.3.0` everywhere.
+- Browsing guidance is target-first and site-agnostic: acquire one target, read
+  compact state, act once, and verify with a diff or page wait.
+- `SKILL.md` stays concise and delegates command/reference detail to files under
+  `references/`.
+- `read tree -i -c` is the default interaction reader; broad HTML, full-page
+  screenshots, and large body dumps are fallback/debug tools.
+- Large reads, network bodies, HAR files, screenshots, and traces are directed
+  to `--out` so local tools can inspect them without spending model context.
+- `tab ensure --background` uses only background-safe CDP/browser paths. Profile
+  app launch is gated behind explicit `--best-effort-background` or `--front`.
+- Signed-in profile handling prefers direct `DevToolsActivePort` WebSocket
+  reuse to avoid repeated Chrome approval prompts.
+- Profile ownership is monotonic once proven, preventing later label/cache
+  writes from downgrading a verified tab.
+- Profile routing uses `chrome://version` Profile Path readback when profile
+  ownership is not otherwise proven. Wrong-profile or unverifiable probe tabs
+  are closed before the requested URL is loaded.
+- Session-registry hits are reusable but not automatically considered `mine`,
+  so cleanup commands do not close sibling task tabs.
+- Health checks report stale/dead CDP sockets accurately so callers can restart
+  the daemon instead of timing out repeatedly.
+- Help and workflow examples use neutral hosts and labels such as
+  `example.com`, `app.example`, `app`, and `project-a`.
 
 Fixed:
 
 - `wait ready --screenshot <path>` no longer treats the output path as a CSS
-  selector (was using `args[0]` as selector fallback).
-- `action state --root <ref>` now resolves ref-based and CSS selector roots
-  instead of always falling back to `activeRootElementSourceEval()`.
-- Dead ternary in `actionOptions` (`"active" : "active"`) replaced with correct
-  conditional.
-- `ariaRefKind` regex now uses grouping so roles like `tabpanel` and `tablist`
-  are not misclassified as button refs.
-- `assignAriaRefs` uses pre-assigned `node.ref` from `finalizeAriaRefs` instead
-  of recomputing counters, preventing ref mismatch when `pushNodesByBackendIds`
-  partially fails.
-- Windows focus capture uses `GetForegroundWindow` via P/Invoke instead of
-  `Get-Process` sort, which could return the wrong window.
+  selector.
+- `action state --root <ref>` resolves ref-based and CSS roots instead of always
+  falling back to the active root.
+- ARIA refs are assigned from finalized nodes, preventing ref mismatch when CDP
+  backend-id pushes partially fail.
+- ARIA role matching no longer misclassifies roles such as `tabpanel` and
+  `tablist`.
+- `action submit`, `action click`, `action hover`, `action fill`, and
+  `action select` argument validation accepts explicit `--ref` where supported.
+- Screenshot sizing env parsing no longer parses the same env var twice.
+- `readTargetProfileDir` handles Chrome's newline-rendered `Profile Path`
+  output and paths with spaces.
+- CDP-created background tabs no longer fall through to OS profile launch after
+  a strict profile verification failure.
+- Dead code and duplicated in-page helper code were removed from the CLI.
 
 Compatibility:
 
-- `agents/openai.yaml` retained at root for Codex compatibility.
+- `agents/openai.yaml` remains for Codex compatibility.
+- The CLI remains a zero-dependency standalone Node script.
+
+Validated:
+
+- `node --check skills/realbrowser/scripts/realbrowser.mjs`
+- `skills/realbrowser/scripts/realbrowser --version`
+- `skills/realbrowser/scripts/realbrowser self-test`
+- `git diff --check`
+- Anonymous background browse smoke against `https://example.com`
 
 ## 0.2.1 - 2026-05-07
 
@@ -69,14 +96,14 @@ Added:
 
 - Owner-scoped labels, default context, and element refs via `--owner` /
   `REALBROWSER_OWNER`.
-- Target leases for mutating commands so parallel sessions do not
-  accidentally control each other's tabs.
+- Target leases for mutating commands so parallel sessions do not accidentally
+  control each other's tabs.
 - Owner-separated anonymous daemons while keeping real signed-in browser
   endpoints shared per physical browser endpoint.
-- Local JSON state locking for labels, target metadata, leases, and owner default
-  contexts.
-- Daemon runtime schema checks so old same-version daemons are restarted when the
-  state/lease model changes.
+- Local JSON state locking for labels, target metadata, leases, and owner
+  default contexts.
+- Daemon runtime schema checks so old same-version daemons are restarted when
+  the state/lease model changes.
 
 Changed:
 
@@ -95,15 +122,15 @@ Fixed:
 
 - Owner-scoped refs prevent one session's `b1`/`e1` reads from overwriting
   another session's pending action refs.
-- Cross-owner lease detection now considers duplicate/stale lease records and
-  keeps the newest relevant lease.
+- Cross-owner lease detection considers duplicate/stale lease records and keeps
+  the newest relevant lease.
 - Broadened mutating raw CDP detection for `devtools raw`.
 - Preserved the `realbrowser` name consistently across code and docs.
 - Set the script version to `0.2.1`.
 
 ## 0.2.0 - 2026-05-07
 
-This is a major CLI and workflow refactor from `v0.1.0`.
+This is a major CLI and workflow refactor from `0.1.0`.
 
 Breaking changes:
 
@@ -116,52 +143,32 @@ Breaking changes:
 - Replaced old flows such as `open`, `tabs`, `observe`, `snapshot`, `console`,
   and `screenshot` with grouped commands such as `tab ensure`, `tab list`,
   `read observe`, `read snapshot`, `console list`, and `screenshot capture`.
-- Removed the old split reference docs (`references/debugging.md`,
-  `references/profiles.md`, `references/screenshots.md`) in favor of the new
-  command reference plus workflow reference.
+- Removed the old split reference docs in favor of the new grouped command
+  reference and workflow reference.
 
 Added:
 
-- New command groups: `profile`, `session`, `daemon`, `tab`, `handle`, `read`,
-  `wait`, `action`, `screenshot`, `console`, `network`, `state`, `dialog`,
-  `perf`, `download`, `export`, `devtools`, `chain`, and `completion`.
-- Stable labeled targets from `tab ensure`, `tab select`, and `tab new`.
-- Provenance checks for signed-in profile work, including safer handling for
-  browser-scoped CDP endpoints where existing tabs cannot prove profile
-  ownership.
-- Anonymous managed sessions plus explicit `--incognito` / `--private` support
-  when a visible Chrome Incognito window is required.
-- Structured, compact readers for large pages: `read size`, `read query`,
-  `read items`, `read item`, `read snapshot`, `read text`, `read html`,
-  `read links`, and `read forms`.
-- Root-scoped action workflows with `action state`, guarded `action upload`,
-  exact-label or ref-based `action submit`, keyboard actions, and
-  file-chooser protection.
-- Target-bound screenshot workflows: `screenshot capture`, `screenshot full`,
-  `screenshot area`, and `screenshot device`.
-- Target-bound console and network workflows, including capture windows,
-  response body export, HAR export, and large-output guards.
-- `chain` for running target-bound JSON step sequences with compact summaries.
-- `references/workflows.md` and `references/design-notes.md`.
+- Anonymous session lifecycle through `--anonymous --session <name>`.
+- Signed-in profile attach and reuse through `--profile <profile>`.
+- Default context via `session use`, `session list`, and `session clear`.
+- Stable target handles via `handle create`, `handle list`, and
+  `handle release`.
+- Guarded action surface: `action state`, `action root`, `action click`,
+  `action fill`, `action type`, `action press`, `action upload`,
+  `action submit`, `action hover`, and `action select`.
+- Console, network, dialog, performance, download, screenshot, PDF, and raw CDP
+  command groups.
+- Self-test coverage for parser and key runtime helpers.
 
 Changed:
 
-- Reworked `SKILL.md`, `README.md`, `agents/openai.yaml`, and
-  `references/commands.md` around the target-first contract.
-- Made background-first signed-in profile behavior the documented default;
-  profile app launch focus risk now requires explicit `--best-effort-background`
-  or `--front`.
-- Kept exact-tab console-copy guidance explicit: select one tab, verify it, and
-  copy that tab's DevTools-style lines rather than mixing multiple matches.
-- Made large reads, network bodies, traces, screenshots, downloads, and PDFs
-  prefer `--out` or artifact paths instead of stdout.
-- Set the script version to `0.2.0`.
+- The skill now defaults to compact reads and explicit action targets.
+- Large outputs prefer `--out` files instead of stdout.
+- Profile operations are more explicit about signed-in state, approval prompts,
+  and foreground handoff.
 
-Validation:
+Fixed:
 
-- `node --check scripts/realbrowser.mjs`
-- `./scripts/realbrowser --version`
-- `./scripts/realbrowser self-test`
-- Help generation for all command groups.
-- `git diff --check`
-- Anonymous `about:blank` smoke test.
+- Reduced accidental tab mutation by requiring explicit targets.
+- Reduced repeated browser launches by reusing daemon context per selected
+  browser endpoint.
