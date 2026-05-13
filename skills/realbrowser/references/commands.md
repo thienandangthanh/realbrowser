@@ -41,7 +41,7 @@ tab         list/select/ensure/new/navigate/label/focus/close/handoff/resume
 handle      create/list/release
 read        observe/size/snapshot/query/query-selector/items/item/text/html/links/forms/url/is
 wait        ready/selector/text/url/load/network
-action      state/root/click/fill/type/press/key/upload/submit/hover/select/scroll
+action      state/root/click/fill/type/press/key/upload/submit/hover/select
 screenshot  capture/full/area/device/responsive
 console     list/get/clear/capture
 network     list/get/body/export/clear/capture
@@ -246,17 +246,13 @@ stored per owner; `session clear` clears the current owner, and `session clear
 --all` removes every owner default. `session stop` is also owner-scoped unless
 `--all` is explicit.
 
-Keyboard and scroll actions:
+Keyboard actions:
 
 ```text
 action type -t app e1 "hello"
 action type -t app --stdin
 action press -t app Escape
 action key -t app Escape
-action scroll -t app down 500
-action scroll -t app up 300
-action scroll -t app --selector '[data-scroll-root]' down 800
-action scroll -t app e1 down 400
 action state -t app --root active --compact --screenshot --annotate-refs
 action upload -t app --root active --input-ref e2 ~/Downloads/file.png
 action upload -t app --root active --trigger-ref b7 ~/Downloads/file.png
@@ -272,11 +268,6 @@ naturally use browser-action wording like "send key Escape".
 only contain the requested label as part of a longer label. If an exact label is
 not available, run `action state --root active --compact` and submit by the
 specific button ref.
-
-`scroll` scrolls the window or a specific element by pixel amount. Directions:
-`up`, `down`, `left`, `right`. Default direction is `down`, default amount is
-`500`. Use `--selector <css>` or a ref as the first positional arg to scroll a
-specific container instead of the window.
 
 Screenshot checkpoints:
 
