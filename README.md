@@ -45,16 +45,25 @@ downloads, and exports.
 
 ### Claude Code
 
-Install as a Claude Code plugin from a local path:
+Add the marketplace, then install the plugin:
 
-```bash
-claude plugin add /path/to/realbrowser
+```
+/plugin marketplace add darkamenosa/realbrowser
+/plugin install realbrowser@realbrowser
 ```
 
-Or from a git repository:
+To update later:
 
-```bash
-claude plugin add https://github.com/<owner>/realbrowser
+```
+/plugin marketplace update realbrowser
+/plugin update realbrowser@realbrowser
+```
+
+Local development install:
+
+```
+/plugin marketplace add /path/to/realbrowser
+/plugin install realbrowser@realbrowser
 ```
 
 The skill auto-activates when tasks involve browser interaction, screenshots,
