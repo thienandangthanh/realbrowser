@@ -7,8 +7,8 @@
     {
       "name": "realbrowser",
       "source": {
-        "source": "git",
-        "url": "https://github.com/darkamenosa/realbrowser.git"
+        "source": "github",
+        "repo": "darkamenosa/realbrowser"
       },
       "description": "Target-first local Chrome/Chromium browser control with signed-in profiles, labeled tabs, and guarded actions"
     }
