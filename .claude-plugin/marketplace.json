@@ -1,0 +1,13 @@
+{
+  "name": "realbrowser",
+  "owner": {
+    "name": "darkamenosa"
+  },
+  "plugins": [
+    {
+      "name": "realbrowser",
+      "source": ".",
+      "description": "Target-first local Chrome/Chromium browser control with signed-in profiles, labeled tabs, and guarded actions"
+    }
+  ]
+}
